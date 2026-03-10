@@ -25,12 +25,11 @@ RUN apt-get update && \
     libswscale-dev \
     libgpiod2 \
     libgpiod-dev \
+    libcap-dev \
+    pkg-config \
     cmake \
     git \
     curl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd -m -s /bin/bash appuser
 
 # Upgrade pip first to avoid issues
 RUN pip install --upgrade pip setuptools wheel
