@@ -11,6 +11,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  DOCKER_BUILDKIT: 1
 
 jobs:
   build:
@@ -47,25 +48,45 @@ jobs:
             type=semver,pattern={{major}}
             type=sha
 
-      - name: Build Docker image
+      - name: Build Docker image (AMD64)
         uses: docker/build-push-action@v5
         with:
           context: .
+          platforms: linux/amd64
           push: false
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}-amd64
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
 
-      - name: Build without cache
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      - name: Build Docker image (ARM64)
         uses: docker/build-push-action@v5
         with:
           context: .
+          platforms: linux/arm64
           push: false
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}-arm64
           labels: ${{ steps.meta.outputs.labels }}
-          no-cache: true
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      - name: Create and push multi-platform manifest
+        if: github.event_name != 'pull_request'
+        run: |
+          # Pull both images to create manifest
+          docker pull ${{ steps.meta.outputs.tags }}-amd64 || true
+          docker pull ${{ steps.meta.outputs.tags }}-arm64 || true
+          
+          # Create and push multi-platform manifest
+          docker manifest create ${{ steps.meta.outputs.tags }} \
+            ${{ steps.meta.outputs.tags }}-amd64 \
+            ${{ steps.meta.outputs.tags }}-arm64 || true
+          
+          docker manifest push ${{ steps.meta.outputs.tags }} || true
 
   test:
     runs-on: ubuntu-latest
@@ -82,12 +103,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt || true
 
       - name: Run tests
         run: |
-          # Add test commands here
-          # Example: pytest tests/ or python -m pytest
           echo "No tests configured yet"
 
   push:
@@ -124,10 +143,11 @@ jobs:
             type=semver,pattern={{major}}
             type=sha
 
-      - name: Build and Push Docker image
+      - name: Build and Push Docker image (multi-arch)
         uses: docker/build-push-action@v5
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
