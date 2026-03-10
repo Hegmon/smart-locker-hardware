@@ -8,99 +8,84 @@ Raspberry Pi 4 based smart locker controller with camera integration, Docker dep
 
 ## ✨ Features
 
-- GPIO-based locker solenoid / relay control  
-- Raspberry Pi Camera capture (photos + video streams)  
-- Secure communication with Django backend via REST API  
-- Fully containerized with **Docker & docker-compose**  
-- Automatic code & image updates on boot  
-- Multi-architecture Docker images (ARM64 / AMD64)  
-- Designed for **100+ device** fleet management  
+- GPIO-based locker solenoid / relay control
+- Raspberry Pi Camera capture (photos + video streams)
+- Secure communication with Django backend via REST API
+- Fully containerized with **Docker & docker-compose**
+- Automatic code & image updates on boot
+- Multi-architecture Docker images (ARM64 / AMD64)
+- Designed for **100+ device** fleet management
 - Easy bulk provisioning via master SD card image + unique `.env`
 
-## 📦 Architecture Overview
-┌───────────────────────┐       ┌───────────────────────┐
-│   Raspberry Pi 4      │       │   Django Backend      │
-│                       │       │                       │
-│  ┌───────────────┐    │       │  ┌─────────────────┐  │
-│  │ camera_service│◄───┼───────┼─►│   API Endpoints │  │
-│  └───────────────┘    │  HTTP │  └─────────────────┘  │
-│  ┌───────────────┐    │       │                       │
-│  │locker_controller◄───┼───────┼─►│   Device Status │  │
-│  └───────────────┘    │       │  └─────────────────┘  │
-│        │              │       └───────────────────────┘
-│   GPIO pins           │
-│   Pi Camera           │
-└───────────────────────┘
-▲
-│ pull / update
-│
-GitHub + Docker Hub
-text## 🚀 Quick Start
+## 🚀 Quick Start
 
 ### 1. Prerequisites
 
 ```bash
-# Update and install essentials
+# Update system and install essentials
 sudo apt update && sudo apt upgrade -y
 sudo apt install -y git docker.io docker-compose
 
 # Add current user to docker group (recommended: user 'pi')
 sudo usermod -aG docker $USER
-# Log out and back in (or reboot)
+
+# Important: log out and log back in (or reboot) for group change to take effect
 2. Clone & Configure
 Bashgit clone https://github.com/yourusername/smart-locker-hardware.git
 cd smart-locker-hardware
 
-# Create and edit .env file
+# Create and edit environment file
 cp .env.example .env
 nano .env
 .env example:
-ini# Required
+ini# ────────────────────────────────────────────────
+# Required settings
 API_URL=https://yourserver.com/api
 API_TOKEN=dev_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 DEVICE_ID=locker-042
 
-# Optional / advanced
+# Optional / tuning parameters
 LOG_LEVEL=INFO
 CAMERA_RESOLUTION=1920x1080
-HEARTBEAT_INTERVAL=30
+HEARTBEAT_INTERVAL=30          # seconds
 3. Docker Deployment (recommended)
-Bash# Build containers (first time ~5-10 min)
+Bash# Build containers (first time: ~5–10 minutes)
 docker compose build
 
-# Start in background
+# Start services in detached mode
 docker compose up -d
 
-# Follow logs (most useful during setup)
+# View logs (very useful during initial setup)
 docker compose logs -f camera
 docker compose logs -f locker
 🔄 Auto-update on Boot
-The system uses a systemd service that runs start.sh → update.sh on every boot.
-Bash# Install systemd service (one-time)
+The system uses a systemd service that runs start.sh → update.sh automatically on every boot.
+Bash# Install the systemd service (one-time setup)
 sudo cp locker.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable locker.service
 sudo systemctl start locker.service
 
-# Check status
+# Check service status
 sudo systemctl status locker.service
-What happens on boot:
+What happens automatically on every boot:
 
-update.sh → git pull latest code
-Rebuilds containers if needed (docker compose build --pull)
+update.sh performs git pull → gets latest code
+Rebuilds containers when needed (docker compose build --pull)
 Restarts services (docker compose up -d)
 
 🏭 Scaling to 100+ Devices
-AspectSolution / RecommendationUnique identificationUnique DEVICE_ID in each .envCode distributionSingle GitHub repo + auto-pull on bootContainer updatesDocker Hub + GitHub Actions multi-arch buildsFully automaticAdd Watchtower containerCentralized loggingELK / Loki / Graylog / Fluent Bit → central serverMonitoringPrometheus + Node Exporter + Grafana (lightweight on Pi)Mass provisioningBurn master SD card image → customize only .env per device
+
+AspectSolution / RecommendationUnique identificationUnique DEVICE_ID in each .env fileCode distributionSingle GitHub repo + auto-pull on bootContainer updatesDocker Hub + GitHub Actions multi-arch buildsFully automaticAdd Watchtower containerCentralized loggingELK / Loki / Graylog / Fluent Bit → central serverMonitoringPrometheus + Node Exporter + Grafana (lightweight on Pi)Mass provisioningBurn master SD card image → customize only .env per device
 📂 Project Structure
 textsmart-locker-hardware/
-├── hardware/                    # Main application logic
+├── hardware/                    # Core application logic
 │   ├── camera_service.py
 │   └── locker_controller.py
-├── scripts/                     # Boot & update logic
+├── scripts/                     # Boot & update scripts
 │   ├── start.sh
 │   └── update.sh
-├── .env.example
+├── .env.example                 # Template for environment variables
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
@@ -108,12 +93,20 @@ textsmart-locker-hardware/
 └── README.md
 🔧 Development Tips
 
-Use docker compose up (without -d) during development
-Mount local code for fast iteration:
+Run interactively during development:
 
-YAML# in docker-compose.yml (dev override)
-volumes:
-  - ./hardware:/app/hardware:ro
+Bashdocker compose up
+
+For fast code iteration, mount local source code:
+
+YAML# Add to docker-compose.yml (development override)
+services:
+  camera:
+    volumes:
+      - ./hardware:/app/hardware:ro
+  locker:
+    volumes:
+      - ./hardware:/app/hardware:ro
 📜 License
 MIT License
-Feel free to use, modify, and deploy — just keep the spirit of open-source alive! 🚀
+Feel free to use, modify, and deploy — attribution appreciated but not required.
