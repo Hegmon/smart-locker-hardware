@@ -7,7 +7,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install dependencies for Raspberry Pi GPIO + camera
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
@@ -30,8 +29,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone lgpio using SSH
-RUN git clone git@github.com:agherzan/lgpio.git /tmp/lgpio \
+# Clone lgpio using SSH forward
+# --mount=type=ssh allows Docker to access your SSH key temporarily
+# You will build using: docker build --ssh default .
+RUN --mount=type=ssh git clone git@github.com:agherzan/lgpio.git /tmp/lgpio \
     && cd /tmp/lgpio \
     && make \
     && make install \
@@ -41,14 +42,11 @@ RUN git clone git@github.com:agherzan/lgpio.git /tmp/lgpio \
 # Upgrade pip
 RUN pip install --upgrade pip setuptools wheel
 
-# Copy requirements.txt and install Python packages
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy hardware code
 COPY ./hardware ./hardware
 
-# Create non-root user
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
