@@ -1,22 +1,31 @@
+
+
 services:
   camera-service:
     build: .
     container_name: camera_service
     restart: unless-stopped
-
     privileged: true
 
     devices:
       - /dev/video0:/dev/video0
       - /dev/gpiochip0:/dev/gpiochip0
+      - /dev/gpiochip4:/dev/gpiochip4   # Pi5 uses chip4; Pi4 uses chip0
+      - /dev/i2c-1:/dev/i2c-1
+      - /dev/spidev0.0:/dev/spidev0.0
 
     volumes:
       - ./hardware:/app/hardware
       - ./data:/app/data
+      # Required for picamera2 / libcamera on Pi
+      - /run/udev:/run/udev:ro
+      - /dev/dma_heap:/dev/dma_heap
 
     environment:
       DEVICE_ID: locker-001
       API_URL: https://backend.qbox.sa/
+      # Tell libcamera where to find pipeline
+      LIBCAMERA_LOG_LEVELS: "*:ERROR"
 
     working_dir: /app/hardware
     command: python3 camera_stream_service.py

@@ -1,25 +1,25 @@
-# System / GPIO
+# GPIO - pick ONE stack, not all four
 gpiozero==2.0.1
-RPi.GPIO==0.7.1
-pigpio==1.78
+lgpio==0.2.2.0
 smbus2==0.4.2
 spidev==3.5
-lgpio==0.2.2.0
+# Remove RPi.GPIO and pigpio unless you specifically need them
+# RPi.GPIO requires kernel headers; pigpio requires pigpiod daemon
 
 # Camera / Video
 picamera2==0.3.31
-opencv-python==4.7.0.72
+# Use headless - no GUI deps needed in container
+opencv-python-headless==4.8.1.78
 av==12.3.0
-numpy==1.24.2
-Pillow==9.4.0
-scipy==1.10.1
+numpy==1.24.4
+Pillow==10.0.1
 
 # Networking / API
-requests==2.28.1
-python-dotenv==0.21.0
+requests==2.28.2
+python-dotenv==1.0.0
 python-dateutil==2.8.2
-pytz==2022.7.1
+pytz==2023.3
 
 # Utilities
-tqdm==4.64.1
-cryptography==38.0.4
+tqdm==4.65.0
+cryptography==41.0.3
