@@ -6,17 +6,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Add Raspberry Pi repository for libcamera-apps
+# Add Raspberry Pi repository for libcamera-apps (if needed later)
 RUN echo "deb http://archive.raspberrypi.com/debian bookworm main" > /etc/apt/sources.list.d/raspi.list && \
     curl -sSL https://archive.raspberrypi.com/debian/archivrepo.gpg.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/raspi.gpg && \
-    apt-get update
+    apt-get update || true
 
 # Install essential system dependencies
-RUN apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libgpiod2 \
     ffmpeg \
     v4l-utils \
-    libcamera-apps \
     libjpeg62-turbo \
     libargon2-1 \
     && apt-get clean \
