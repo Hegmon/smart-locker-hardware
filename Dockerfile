@@ -6,13 +6,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install dependencies for Raspberry Pi GPIO + camera
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
     python3-pip \
     swig \
-    libatlas3-base \
+    libatlas-base-dev \
     libjpeg-dev \
     libtiff-dev \
     libopenjp2-7-dev \
@@ -25,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     git \
     curl \
+    openssh-client \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
