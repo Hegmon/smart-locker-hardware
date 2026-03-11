@@ -29,7 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install lgpio from source (works for ARM)
-RUN git clone https://github.com/agherzan/lgpio.git /tmp/lgpio \
+# Install lgpio from source using SSH
+RUN git clone git@github.com:agherzan/lgpio.git /tmp/lgpio \
     && cd /tmp/lgpio \
     && make \
     && make install \
