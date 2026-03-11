@@ -336,6 +336,22 @@ def main():
     
     elif args.action == "status":
         status_check()
+    
+    # Keepalive loop - monitor FFmpeg processes
+    print("Monitoring streams...")
+    while True:
+        try:
+            time.sleep(5)
+            # Check if any FFmpeg process died
+            for camera_id, process in list(FFMPEG_PROCESSES.items()):
+                if process.poll() is not None:
+                    print(f"[{camera_id}] FFmpeg process died, restarting...")
+                    # Restart this camera
+                    start_stream_ffmpeg(camera_id, CAMERAS[camera_id])
+        except KeyboardInterrupt:
+            print("\nInterrupted, stopping streams...")
+            stop_all()
+            break
 
 
 if __name__ == "__main__":
