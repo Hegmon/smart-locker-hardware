@@ -5,15 +5,13 @@ WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 
+# Install system dependencies (correct package names for bookworm)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     build-essential \
     pkg-config \
+    libgpiod2 \
     libgpiod-dev \
-    python3-gpiod \
-    gpiod \
-    libopencv-dev \
-    python3-opencv \
     libjpeg-dev \
     libtiff-dev \
     libopenjp2-7-dev \
@@ -27,13 +25,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Upgrade pip
 RUN pip install --upgrade pip setuptools wheel
 
+# Copy and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy application code
 COPY ./hardware ./hardware
 
+# Create groups and user for GPIO/video access
 RUN groupadd -f video && groupadd -f gpio && groupadd -f i2c \
     && useradd -m appuser \
     && usermod -aG video,gpio,i2c appuser \
