@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies (fixed for Debian 12 bookworm)
+# Install only essential system packages for building lgpio and Python deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
@@ -24,18 +24,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcap-dev \
     pkg-config \
     cmake \
-    git \
     curl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    unzip \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install lgpio from HTTPS source
-RUN git clone https://github.com/agherzan/lgpio.git /tmp/lgpio \
-    && cd /tmp/lgpio \
+# Download lgpio as ZIP and install
+RUN curl -L -o /tmp/lgpio.zip https://github.com/agherzan/lgpio/archive/refs/heads/master.zip \
+    && mkdir -p /tmp/lgpio \
+    && unzip /tmp/lgpio.zip -d /tmp/lgpio \
+    && cd /tmp/lgpio/lgpio-master \
     && make \
     && make install \
-    && cd / \
-    && rm -rf /tmp/lgpio
+    && cd / && rm -rf /tmp/lgpio /tmp/lgpio.zip
 
 # Upgrade pip
 RUN pip install --upgrade pip setuptools wheel
