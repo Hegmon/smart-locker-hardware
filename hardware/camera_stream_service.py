@@ -158,7 +158,7 @@ def start_stream_ffmpeg(camera_id, config):
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             preexec_fn=os.setsid
         )
         FFMPEG_PROCESSES[camera_id] = process
@@ -345,6 +345,13 @@ def main():
             # Check if any FFmpeg process died
             for camera_id, process in list(FFMPEG_PROCESSES.items()):
                 if process.poll() is not None:
+                    # Get FFmpeg output before restarting
+                    try:
+                        output = process.stdout.read().decode('utf-8', errors='ignore')
+                        if output:
+                            print(f"[{camera_id}] FFmpeg output: {output[:500]}")
+                    except:
+                        pass
                     print(f"[{camera_id}] FFmpeg process died, restarting...")
                     # Restart this camera
                     start_stream_ffmpeg(camera_id, CAMERAS[camera_id])
