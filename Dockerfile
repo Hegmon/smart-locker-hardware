@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     libc-dev \
     libcap-dev \
+    libcamera-tools \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

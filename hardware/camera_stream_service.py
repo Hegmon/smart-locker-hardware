@@ -51,7 +51,7 @@ CAMERAS = {
         "fps": 25,
     },
     "pi_cam_internal": {
-        "device": "/dev/video3", 
+        "device": "",  # Empty = use libcamera
         "resolution": "640x480",
         "fps": 25,
     }
@@ -313,7 +313,12 @@ def main():
             # Start all cameras
             print("Starting all cameras...")
             for camera_id, config in CAMERAS.items():
-                start_stream_ffmpeg(camera_id, config)
+                if config.get("device"):
+                    # Has device - use V4L2/FFmpeg
+                    start_stream_ffmpeg(camera_id, config)
+                else:
+                    # No device - use libcamera
+                    start_stream_libcamera(camera_id, config)
                 time.sleep(1)
     
     elif args.action == "stop":
@@ -365,8 +370,12 @@ def main():
                     except:
                         pass
                     print(f"[{camera_id}] FFmpeg process died, restarting...")
-                    # Restart this camera
-                    start_stream_ffmpeg(camera_id, CAMERAS[camera_id])
+                    # Restart this camera - use appropriate method
+                    config = CAMERAS[camera_id]
+                    if config.get("device"):
+                        start_stream_ffmpeg(camera_id, config)
+                    else:
+                        start_stream_libcamera(camera_id, config)
         except KeyboardInterrupt:
             print("\nInterrupted, stopping streams...")
             stop_all()
