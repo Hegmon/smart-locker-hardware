@@ -1,11 +1,10 @@
-# Multi-platform base image for Raspberry Pi (ARM64) and x86_64
-# For Raspberry Pi use: python:3.11-slim-bookworm
+# Multi-platform base image (works on Raspberry Pi ARM64 and x86_64)
 FROM python:3.11-slim-bookworm
 
 # Set working directory
 WORKDIR /app
 
-# Avoid prompts during install
+# Environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -29,32 +28,38 @@ RUN apt-get update && \
     pkg-config \
     cmake \
     git \
-    curl \
+    curl && \
+    rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip first to avoid issues
+# Upgrade pip tools
 RUN pip install --upgrade pip setuptools wheel
 
-# Copy requirements
+# Copy requirements first (better Docker caching)
 COPY requirements.txt .
 
-# Install Python dependencies with error handling
-# Use --ignore-installed to avoid conflicts
-RUN pip install --no-cache-dir --upgrade \
+# Install Python dependencies
+RUN pip install --no-cache-dir \
     --root-user-action=ignore \
     -r requirements.txt || \
-    pip install --no-cache-dir --upgrade \
+    pip install --no-cache-dir \
     --root-user-action=ignore \
     --break-system-packages \
     -r requirements.txt
 
-# Copy all hardware scripts
+# Copy hardware scripts
 COPY ./hardware ./hardware
 
-# Set default working directory for container
-WORKDIR /app/hardware
+# Create non-root user for security
+RUN useradd -m appuser
+
+# Change ownership
+RUN chown -R appuser:appuser /app
 
 # Switch to non-root user
 USER appuser
 
-# Default command (can be overridden in docker-compose)
-CMD ["python3", "camera_service.py"]
+# Set working directory
+WORKDIR /app/hardware
+
+# Default command
+CMD ["python3", "camera_stream_service.py"]
