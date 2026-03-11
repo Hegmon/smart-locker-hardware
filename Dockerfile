@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.3
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -6,12 +7,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# Install dependencies for Raspberry Pi GPIO + camera
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
     python3-pip \
     swig \
-    libatlas-base-dev \
+    libatlas3-base \
     libjpeg-dev \
     libtiff-dev \
     libopenjp2-7-dev \
@@ -28,8 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install lgpio from source (works for ARM)
-# Install lgpio from source using SSH
+# Clone lgpio using SSH
 RUN git clone git@github.com:agherzan/lgpio.git /tmp/lgpio \
     && cd /tmp/lgpio \
     && make \
