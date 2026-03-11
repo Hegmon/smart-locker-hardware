@@ -4,45 +4,33 @@ WORKDIR /app
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
-# Install system dependencies (correct package names for bookworm)
+# Install minimal system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3-dev \
-    build-essential \
-    pkg-config \
     libgpiod2 \
-    libgpiod-dev \
-    libjpeg-dev \
-    libtiff-dev \
-    libopenjp2-7-dev \
-    libavcodec-dev \
-    libavformat-dev \
-    libswscale-dev \
-    libavdevice-dev \
-    libcap-dev \
-    libarchive-dev \
-    v4l-utils \
-    curl \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    libjpeg62-turbo \
+    libargon2-1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip
-RUN pip install --upgrade pip setuptools wheel
+# Install pip and wheel
+RUN pip install --no-cache-dir --upgrade pip wheel
 
 # Copy and install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Copy application code
 COPY ./hardware ./hardware
 
-# Create groups and user for GPIO/video access
-RUN groupadd -f video && groupadd -f gpio && groupadd -f i2c \
-    && useradd -m appuser \
-    && usermod -aG video,gpio,i2c appuser \
-    && chown -R appuser:appuser /app
+# Create user (no root)
+RUN useradd -m -r appuser && \
+    chown -R appuser:appuser /app
 
 USER appuser
 
 WORKDIR /app/hardware
 
-CMD ["python3", "camera_stream_service.py"]
+# Use exec form for proper signal handling
+CMD ["python3", "-u", "camera_stream_service.py"]

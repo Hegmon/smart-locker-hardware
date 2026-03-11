@@ -1,40 +1,38 @@
-
-
 services:
   camera-service:
     build: .
     container_name: camera_service
     restart: unless-stopped
-    privileged: true
+    mem_limit: 512m        # Limit container memory
+    mem_reservation: 256m  # Reserve minimum memory
+    cpus: 0.5             # Limit CPU to 50%
 
     devices:
       - /dev/video0:/dev/video0
       - /dev/gpiochip0:/dev/gpiochip0
-      - /dev/gpiochip4:/dev/gpiochip4   # Pi5 uses chip4; Pi4 uses chip0
+      - /dev/gpiochip4:/dev/gpiochip4
       - /dev/i2c-1:/dev/i2c-1
       - /dev/spidev0.0:/dev/spidev0.0
 
     volumes:
-      - ./hardware:/app/hardware
+      - ./hardware:/app/hardware:ro
       - ./data:/app/data
-      # Required for picamera2 / libcamera on Pi
-      - /run/udev:/run/udev:ro
-      - /dev/dma_heap:/dev/dma_heap
 
     environment:
-      DEVICE_ID: locker-001
-      API_URL: https://backend.qbox.sa/
-      # Tell libcamera where to find pipeline
-      LIBCAMERA_LOG_LEVELS: "*:ERROR"
+      - DEVICE_ID=locker-001
+      - API_URL=https://backend.qbox.sa/
+      - LIBCAMERA_LOG_LEVELS=*:ERROR
+      - OPENCV_IO_THREADS=1
+      - OMP_NUM_THREADS=1
 
     working_dir: /app/hardware
-    command: python3 camera_stream_service.py
+    command: python3 -u camera_stream_service.py
 
     logging:
       driver: json-file
       options:
-        max-size: "50m"
-        max-file: "5"
+        max-size: "10m"
+        max-file: "2"
 
 networks:
   default:
