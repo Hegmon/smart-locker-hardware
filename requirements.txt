@@ -1,14 +1,12 @@
-# GPIO - pick ONE stack, not all four
+# GPIO
 gpiozero==2.0.1
-lgpio==0.2.2.0
+lgpio==0.2.2.0        # ← keep this, installed via pip (not apt)
 smbus2==0.4.2
 spidev==3.5
-# Remove RPi.GPIO and pigpio unless you specifically need them
-# RPi.GPIO requires kernel headers; pigpio requires pigpiod daemon
+# Remove RPi.GPIO and pigpio
 
 # Camera / Video
 picamera2==0.3.31
-# Use headless - no GUI deps needed in container
 opencv-python-headless==4.8.1.78
 av==12.3.0
 numpy==1.24.4

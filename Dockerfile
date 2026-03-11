@@ -5,16 +5,14 @@ WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 
-# System deps - use apt lgpio/gpiod, avoid building from source
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     build-essential \
     pkg-config \
     # GPIO
-    python3-lgpio \
-    python3-gpiozero \
     libgpiod-dev \
-    python3-libgpiod \
+    python3-gpiod \
+    gpiod \
     # Camera / OpenCV deps
     libopencv-dev \
     python3-opencv \
@@ -31,17 +29,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip
 RUN pip install --upgrade pip setuptools wheel
 
-# Copy and install requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app code
 COPY ./hardware ./hardware
 
-# Non-root user with video/gpio group access
 RUN groupadd -f video && groupadd -f gpio && groupadd -f i2c \
     && useradd -m appuser \
     && usermod -aG video,gpio,i2c appuser \
