@@ -1,7 +1,9 @@
 FROM python:3.11-slim-bullseye
 
+# Set working directory
 WORKDIR /app
 
+# Avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -29,22 +31,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# upgrade pip
+# Upgrade pip and install Python packages needed for GPIO
 RUN pip install --upgrade pip setuptools wheel
-RUN apt-get update && apt-get install -y lgpio-dev
-# copy requirements
-COPY requirements.txt .
 
-# install python packages
+# Install lgpio Python package instead of apt package
+RUN pip install lgpio
+
+# Copy requirements.txt and install other Python dependencies
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# copy hardware code
+# Copy hardware code
 COPY ./hardware ./hardware
 
-# create non root user
+# Create a non-root user and switch to it
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
 WORKDIR /app/hardware
 
+# Default command
 CMD ["python3", "camera_stream_service.py"]
