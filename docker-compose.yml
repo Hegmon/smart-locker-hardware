@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   camera-service:
     build:
@@ -5,14 +7,18 @@ services:
       dockerfile: Dockerfile
     container_name: camera_service
     restart: unless-stopped
+    privileged: true   # needed for GPIO + camera access
+    devices:
+      - /dev/video0:/dev/video0
+      - /dev/gpiochip0:/dev/gpiochip0
     volumes:
       - ./hardware:/app/hardware
       - ./data:/app/data
     environment:
-      - DEVICE_ID=locker-001
-      - API_URL=https://backend.qbox.sa/
+      DEVICE_ID: locker-001
+      API_URL: https://backend.qbox.sa/
     working_dir: /app/hardware
-    command: python3 hardware/camera_stream_service.py
+    command: python3 camera_stream_service.py
     logging:
       driver: "json-file"
       options:
