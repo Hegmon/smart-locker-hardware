@@ -9,7 +9,7 @@ services:
 
     devices:
       - /dev/video0:/dev/video0
-      - /dev/video3:/dev/video3
+      - /dev/video2:/dev/video2
       - /dev/gpiochip0:/dev/gpiochip0
       - /dev/gpiochip4:/dev/gpiochip4
       - /dev/i2c-20:/dev/i2c-1
