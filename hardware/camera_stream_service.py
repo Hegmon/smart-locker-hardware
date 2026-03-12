@@ -43,7 +43,7 @@ MEDIAMTX_HOST = os.environ.get("MEDIAMTX_HOST", "69.62.125.223")  # Server IP
 MEDIAMTX_PORT = 8554  # RTSP port for MediaMTX
 
 # Camera Configuration
-# Use V4L2 device paths or libcamera
+# Use V4L2 device paths
 CAMERAS = {
     "pi_cam_external": {
         "device": "/dev/video0",
@@ -51,7 +51,7 @@ CAMERAS = {
         "fps": 25,
     },
     "pi_cam_internal": {
-        "device": "",  # Empty = use libcamera
+        "device": "/dev/video2",  # Second USB camera
         "resolution": "640x480",
         "fps": 25,
     }
