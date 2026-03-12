@@ -3,32 +3,24 @@ services:
     build: .
     container_name: camera_service
     restart: unless-stopped
-    mem_limit: 512m        # Limit container memory
-    mem_reservation: 256m  # Reserve minimum memory
-    cpus: 0.5             # Limit CPU to 50%
+    privileged: true           # Grant full device access
+    mem_limit: 512m
+    mem_reservation: 256m
+    cpus: 0.5
 
     devices:
-      - /dev/video0:/dev/video0
-      - /dev/video2:/dev/video2
+      - /dev/video0:/dev/video0   # External
+      - /dev/video3:/dev/video3   # Internal mapped correctly
       - /dev/gpiochip0:/dev/gpiochip0
       - /dev/gpiochip4:/dev/gpiochip4
       - /dev/i2c-20:/dev/i2c-1
-      # - /dev/spidev0.0:/dev/spidev0.0  # Not available, enable via raspi-config if needed
 
-    # Grant video group access to container
     group_add:
       - video
 
     volumes:
       - ./hardware:/app/hardware:ro
       - ./data:/app/data
-
-    environment:
-      - DEVICE_ID=locker-001
-      - API_URL=https://backend.qbox.sa/
-      - LIBCAMERA_LOG_LEVELS=*:ERROR
-      - OPENCV_IO_THREADS=1
-      - OMP_NUM_THREADS=1
 
     working_dir: /app/hardware
     command: python3 -u camera_stream_service.py start
