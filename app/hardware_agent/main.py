@@ -39,8 +39,8 @@ class WifiUploadAgent:
             self.config.device_uuid,
             self.config.device_id or "<unknown>",
             self.config.scan_event_url,
-            self.config.state_update_url,
-            self.config.command_poll_url,
+            self.config.state_update_url or "<disabled>",
+            self.config.command_poll_url or "<disabled>",
         )
         while True:
             loop_started = time.monotonic()
@@ -55,7 +55,6 @@ class WifiUploadAgent:
         self._flush_queue()
 
         connected_state = self._get_connected_state()
-        self._maybe_report_state(connected_state)
 
         try:
             networks = self.scanner.scan()
@@ -65,7 +64,8 @@ class WifiUploadAgent:
             logger.info("WiFi scan success: found %s networks", len(networks))
             self._maybe_report_scan_diff(networks, connected_state)
 
-        self._poll_and_execute_command()
+        if self.config.command_poll_url:
+            self._poll_and_execute_command()
 
     def _maybe_report_scan_diff(self, networks: list[WiFiNetwork], connected_state: dict[str, Any]) -> None:
         state = self.storage.load_state()
@@ -79,22 +79,32 @@ class WifiUploadAgent:
         )
         last_sent_at = self._parse_epoch(state.get("last_scan_reported_at_epoch"))
         heartbeat_due = last_sent_at is None or (time.time() - last_sent_at) >= self.config.heartbeat_seconds
+        connection_signature = self._signature(
+            {
+                "connected_ssid": connected_state["connected_ssid"],
+                "signal_strength": connected_state["signal_strength"],
+                "status": connected_state["status"],
+            }
+        )
+        last_connection_signature = str(state.get("last_connection_signature") or "")
+        connection_changed = connection_signature != last_connection_signature
 
         state["last_scan_networks"] = {ssid: network.to_payload() for ssid, network in current_networks.items()}
         state["last_scan_at"] = diff_payload["timestamp"]
         self.storage.save_state(state)
 
-        if not has_diff and not heartbeat_due:
-            logger.info("WiFi scan unchanged and no significant signal diff detected; skipping scan event")
+        if not has_diff and not heartbeat_due and not connection_changed:
+            logger.info("WiFi scan unchanged and connection state unchanged; skipping upload")
             return
 
-        if not has_diff and heartbeat_due:
-            logger.info("WiFi scan diff empty but heartbeat due; sending state-only scan event")
+        if not has_diff and (heartbeat_due or connection_changed):
+            logger.info("WiFi diff empty but heartbeat or connection change requires upload")
 
         if self._send_with_retry("scan_event", self.config.scan_event_url, diff_payload):
             state = self.storage.load_state()
             state["last_scan_reported_at"] = diff_payload["timestamp"]
             state["last_scan_reported_at_epoch"] = time.time()
+            state["last_connection_signature"] = connection_signature
             self.storage.save_state(state)
             return
 
@@ -102,6 +112,8 @@ class WifiUploadAgent:
         logger.warning("WiFi scan event buffered locally after upload failure")
 
     def _maybe_report_state(self, connected_state: dict[str, Any], force: bool = False) -> None:
+        if not self.config.state_update_url:
+            return
         payload = self._build_state_payload(connected_state)
         signature = self._signature(
             {
@@ -140,6 +152,8 @@ class WifiUploadAgent:
         logger.warning("WiFi state update buffered locally after upload failure")
 
     def _poll_and_execute_command(self) -> None:
+        if not self.config.command_poll_url:
+            return
         state = self.storage.load_state()
         last_polled_at = self._parse_epoch(state.get("last_command_poll_at_epoch"))
         if last_polled_at is not None and (
@@ -227,6 +241,9 @@ class WifiUploadAgent:
         }
 
     def _report_command_result(self, command_id: str, result: dict[str, Any]) -> None:
+        if not self.config.command_result_url_template:
+            logger.info("Skipping WiFi command result callback because no result endpoint is configured")
+            return
         url = self.config.command_result_url_template.format(command_id=command_id)
         if self._send_with_retry("command_result", url, result):
             logger.info("Reported WiFi command result for command_id=%s", command_id)
@@ -394,9 +411,13 @@ class WifiUploadAgent:
 
 
 def main() -> None:
+    import os
     config = load_agent_config()
     agent = WifiUploadAgent(config)
-    agent.run_forever()
+    if os.getenv("RUN_ONCE", "").lower() in ("1", "true", "yes"):
+        agent.run_once()
+    else:
+        agent.run_forever()
 
 
 if __name__ == "__main__":
