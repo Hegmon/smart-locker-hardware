@@ -6,9 +6,9 @@ Wants=NetworkManager.service
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/pi/smart-locker-hardware
+WorkingDirectory=__PROJECT_DIR__
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/pi/smart-locker-hardware/.venv/bin/python -m app.services.reconnect
+ExecStart=__PROJECT_DIR__/.venv/bin/python -m app.services.reconnect
 Restart=always
 RestartSec=5
 
