@@ -12,7 +12,7 @@ HOTSPOT_PASSWORD = os.getenv("HOTSPOT_PASSWORD", "SmartLocker123")
 QBOX_DEVICE_NAME = os.getenv("QBOX_DEVICE_NAME", os.getenv("HOSTNAME", "QboxPi4"))[:25]
 QBOX_DEVICE_REGISTRATION_URL = os.getenv(
     "QBOX_DEVICE_REGISTRATION_URL",
-    "https://backend.qbox.sa/hardware-devices/",
+    "https://backend.qbox.sa/devices/",
 )
 QBOX_TELEMETRY_URL = os.getenv(
     "QBOX_TELEMETRY_URL",
