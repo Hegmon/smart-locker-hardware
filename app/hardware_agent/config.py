@@ -41,7 +41,7 @@ class AgentConfig:
 
     @property
     def endpoint_url(self) -> str:
-        return f"{self.base_url}/api/devices/{self.device_id}/wifi/"
+        return f"{self.base_url}/devices/{self.device_id}/wifi/"
 
 
 def load_agent_config() -> AgentConfig:
