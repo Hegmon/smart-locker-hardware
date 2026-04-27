@@ -6,9 +6,10 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
 FASTAPI_UNIT_TMP="$(mktemp)"
 WIFI_UNIT_TMP="$(mktemp)"
+WIFI_UPLOAD_UNIT_TMP="$(mktemp)"
 
 cleanup() {
-  rm -f "$FASTAPI_UNIT_TMP" "$WIFI_UNIT_TMP"
+  rm -f "$FASTAPI_UNIT_TMP" "$WIFI_UNIT_TMP" "$WIFI_UPLOAD_UNIT_TMP"
 }
 
 trap cleanup EXIT
@@ -37,10 +38,12 @@ python3 -m venv "$VENV_DIR"
 
 sed "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$PROJECT_DIR/app/systemmd/fastapi.service" > "$FASTAPI_UNIT_TMP"
 sed "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$PROJECT_DIR/app/systemmd/wifi-reconnect.service" > "$WIFI_UNIT_TMP"
+sed "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$PROJECT_DIR/app/systemmd/wifi-upload-agent.service" > "$WIFI_UPLOAD_UNIT_TMP"
 
 sudo cp "$FASTAPI_UNIT_TMP" /etc/systemd/system/fastapi.service
 sudo cp "$WIFI_UNIT_TMP" /etc/systemd/system/wifi-reconnect.service
+sudo cp "$WIFI_UPLOAD_UNIT_TMP" /etc/systemd/system/wifi-upload-agent.service
 
 sudo systemctl daemon-reload
-sudo systemctl enable fastapi.service wifi-reconnect.service
-sudo systemctl restart fastapi.service wifi-reconnect.service
+sudo systemctl enable fastapi.service wifi-reconnect.service wifi-upload-agent.service
+sudo systemctl restart fastapi.service wifi-reconnect.service wifi-upload-agent.service
