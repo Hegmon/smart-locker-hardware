@@ -92,10 +92,9 @@ def load_agent_config() -> AgentConfig:
         max_retry_delay_seconds=_clamp(QBOX_WIFI_AGENT_MAX_RETRY_DELAY_SECONDS, 30),
         signal_change_threshold=_clamp(QBOX_WIFI_AGENT_SIGNAL_CHANGE_THRESHOLD, 1),
         scan_event_url=QBOX_WIFI_AGENT_SCAN_ENDPOINT or _build_default_url(base_url, resolved_device_uuid, "wifi"),
-        state_update_url=QBOX_WIFI_AGENT_STATE_ENDPOINT or _build_default_url(base_url, resolved_device_uuid, "wifi/state"),
-        command_poll_url=QBOX_WIFI_AGENT_COMMAND_ENDPOINT or _build_default_url(base_url, resolved_device_uuid, "wifi/commands/next"),
-        command_result_url_template=QBOX_WIFI_AGENT_COMMAND_RESULT_ENDPOINT_TEMPLATE
-        or f"{base_url}/devices/{resolved_device_uuid}/wifi/commands/{{command_id}}/result/",
+        state_update_url=QBOX_WIFI_AGENT_STATE_ENDPOINT.strip(),
+        command_poll_url=QBOX_WIFI_AGENT_COMMAND_ENDPOINT.strip(),
+        command_result_url_template=QBOX_WIFI_AGENT_COMMAND_RESULT_ENDPOINT_TEMPLATE.strip(),
         state_file=Path(QBOX_WIFI_AGENT_STATE_FILE),
         queue_file=Path(QBOX_WIFI_AGENT_QUEUE_FILE),
     )
