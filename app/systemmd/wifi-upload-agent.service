@@ -1,0 +1,16 @@
+[Unit]
+Description=Smart Locker WiFi Upload Agent
+After=network-online.target NetworkManager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__PROJECT_DIR__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__PROJECT_DIR__/.venv/bin/python -m app.hardware_agent.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
