@@ -33,8 +33,9 @@ class WifiUploadAgent:
 
     def run_forever(self) -> None:
         logger.info(
-            "Starting WiFi upload agent for device_id=%s interval=%ss heartbeat=%ss endpoint=%s",
-            self.config.device_id,
+            "Starting WiFi upload agent for device_uuid=%s device_id=%s interval=%ss heartbeat=%ss endpoint=%s",
+            self.config.device_uuid,
+            self.config.device_id or "<unknown>",
             self.config.scan_interval_seconds,
             self.config.heartbeat_seconds,
             self.config.endpoint_url,
