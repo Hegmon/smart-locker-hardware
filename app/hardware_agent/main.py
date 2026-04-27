@@ -67,7 +67,7 @@ class WifiUploadAgent:
         if self.config.command_poll_url:
             self._poll_and_execute_command()
 
-    def _maybe_report_scan_diff(self, networks: list[WiFiNetwork], connected_state: dict[str, Any]) -> None:
+    def _maybe_report_scan_diff(self, networks: list[WifiNetwork], connected_state: dict[str, Any]) -> None:
         state = self.storage.load_state()
         previous_networks = self._extract_network_map(state.get("last_scan_networks"))
         current_networks = {network.ssid: network for network in networks if network.ssid}
@@ -303,8 +303,8 @@ class WifiUploadAgent:
 
     def _build_scan_diff_payload(
         self,
-        previous_networks: dict[str, WiFiNetwork],
-        current_networks: dict[str, WiFiNetwork],
+        previous_networks: dict[str, WifiNetwork],
+        current_networks: dict[str, WifiNetwork],
         connected_state: dict[str, Any],
     ) -> dict[str, Any]:
         new_networks = [
@@ -359,14 +359,14 @@ class WifiUploadAgent:
         }
 
     @staticmethod
-    def _extract_network_map(raw_networks: Any) -> dict[str, WiFiNetwork]:
+    def _extract_network_map(raw_networks: Any) -> dict[str, WifiNetwork]:
         if not isinstance(raw_networks, dict):
             return {}
-        networks: dict[str, WiFiNetwork] = {}
+        networks: dict[str, WifiNetwork] = {}
         for ssid, payload in raw_networks.items():
             if not isinstance(payload, dict):
                 continue
-            networks[str(ssid)] = WiFiNetwork(
+            networks[str(ssid)] = WifiNetwork(
                 ssid=str(payload.get("ssid") or ssid),
                 rssi=WifiUploadAgent._safe_int(payload.get("rssi"), -100),
                 is_secured=bool(payload.get("is_secured", False)),
