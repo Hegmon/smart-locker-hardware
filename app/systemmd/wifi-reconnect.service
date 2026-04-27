@@ -1,0 +1,16 @@
+[Unit]
+Description=Smart Locker WiFi Reconnect Service
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pi/smart-locker-hardware
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/smart-locker-hardware/.venv/bin/python -m app.services.reconnect
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
