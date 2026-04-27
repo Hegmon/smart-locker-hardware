@@ -10,6 +10,7 @@ from typing import Any
 
 @dataclass
 class QueueItem:
+    kind: str
     payload: dict[str, Any]
     retry_count: int = 0
 
@@ -31,17 +32,27 @@ class JsonFileStorage:
             return []
         queue: list[QueueItem] = []
         for item in raw_queue:
-            if not isinstance(item, dict) or "payload" not in item:
+            if not isinstance(item, dict):
                 continue
-            payload = item["payload"]
-            retry_count = item.get("retry_count", 0)
-            if isinstance(payload, dict):
-                queue.append(QueueItem(payload=payload, retry_count=int(retry_count)))
+            payload = item.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            queue.append(
+                QueueItem(
+                    kind=str(item.get("kind") or "unknown"),
+                    payload=payload,
+                    retry_count=self._safe_int(item.get("retry_count"), 0),
+                )
+            )
         return queue
 
     def save_queue(self, queue: list[QueueItem]) -> None:
         serializable = [
-            {"payload": item.payload, "retry_count": item.retry_count}
+            {
+                "kind": item.kind,
+                "payload": item.payload,
+                "retry_count": item.retry_count,
+            }
             for item in queue
         ]
         self._write_json(self.queue_file, serializable)
@@ -50,6 +61,12 @@ class JsonFileStorage:
         queue = self.load_queue()
         queue.append(queue_item)
         self.save_queue(queue)
+
+    def replace_queue_item(self, index: int, queue_item: QueueItem) -> None:
+        queue = self.load_queue()
+        if 0 <= index < len(queue):
+            queue[index] = queue_item
+            self.save_queue(queue)
 
     def _read_json(self, path: Path, default: Any) -> Any:
         try:
@@ -61,14 +78,16 @@ class JsonFileStorage:
 
     def _write_json(self, path: Path, payload: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            delete=False,
-        ) as temp_file:
+        with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as temp_file:
             json.dump(payload, temp_file, indent=2, sort_keys=True)
             temp_file.flush()
             os.fsync(temp_file.fileno())
             temp_path = Path(temp_file.name)
         temp_path.replace(path)
+
+    @staticmethod
+    def _safe_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
