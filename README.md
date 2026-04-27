@@ -97,20 +97,41 @@ Example cron job to send telemetry every 5 minutes:
 
 ## WiFi upload agent
 
-The WiFi upload agent runs as a separate `systemd` service and continuously scans nearby networks, only uploads when the scan changes, and otherwise sends a heartbeat snapshot every 5 minutes.
+The WiFi upload agent runs as a separate `systemd` service and behaves like a state-aware edge agent:
+
+- scans nearby WiFi networks
+- keeps a local cache of the previous scan
+- sends only diffs: `new_networks`, `removed_networks`, and `updated_networks`
+- reports the currently connected SSID and signal strength as a separate state update
+- polls Django for WiFi commands and executes `CONNECT_WIFI`
+- buffers failed uploads locally and retries them later
 
 Environment variables:
 
 - `QBOX_WIFI_AGENT_BASE_URL` sets the Django backend root URL, for example `https://backend.example.com`
-- `QBOX_WIFI_AGENT_DEVICE_ID` overrides the device identifier used in `/api/devices/{device_id}/wifi/`
+- `QBOX_WIFI_AGENT_DEVICE_ID` overrides the backend UUID only when `app/config/backend_device.json` is unavailable
 - `QBOX_WIFI_AGENT_SCAN_INTERVAL_SECONDS` controls how often the Pi scans nearby networks
-- `QBOX_WIFI_AGENT_HEARTBEAT_SECONDS` controls the forced upload interval when WiFi data is unchanged
+- `QBOX_WIFI_AGENT_HEARTBEAT_SECONDS` controls the forced scan-event heartbeat when WiFi diffs are unchanged
+- `QBOX_WIFI_AGENT_STATE_HEARTBEAT_SECONDS` controls the forced state heartbeat when the active connection is unchanged
 - `QBOX_WIFI_AGENT_REQUEST_TIMEOUT_SECONDS` controls the POST timeout
+- `QBOX_WIFI_AGENT_SIGNAL_CHANGE_THRESHOLD` sets the minimum RSSI delta before a network goes into `updated_networks`
+- `QBOX_WIFI_AGENT_COMMAND_POLL_INTERVAL_SECONDS` controls how often Django is polled for WiFi commands
+- `QBOX_WIFI_AGENT_SCAN_ENDPOINT` overrides the scan diff event endpoint
+- `QBOX_WIFI_AGENT_STATE_ENDPOINT` overrides the connected-state endpoint
+- `QBOX_WIFI_AGENT_COMMAND_ENDPOINT` overrides the WiFi command poll endpoint
+- `QBOX_WIFI_AGENT_COMMAND_RESULT_ENDPOINT_TEMPLATE` overrides the command result callback URL template
 
 Files written locally:
 
-- `app/config/wifi_agent_state.json` stores the last sent scan signature and timestamps
-- `app/config/wifi_agent_queue.json` stores buffered payloads when the backend is offline
+- `app/config/wifi_agent_state.json` stores the last scan cache, state signatures, timestamps, and command bookkeeping
+- `app/config/wifi_agent_queue.json` stores buffered scan events, state reports, and command results when the backend is offline
+
+Default backend URLs:
+
+- scan diff events: `/devices/<device_uuid>/wifi/`
+- connection state: `/devices/<device_uuid>/wifi/state/`
+- command poll: `/devices/<device_uuid>/wifi/commands/next/`
+- command result callback: `/devices/<device_uuid>/wifi/commands/<command_id>/result/`
 
 ## Pi 4 test plan
 
