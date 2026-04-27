@@ -19,7 +19,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Smart Locker Device API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Smart Locker Device API", version="v1.0.0", lifespan=lifespan)
 
 app.include_router(wifi.router)
 app.include_router(device.router)
