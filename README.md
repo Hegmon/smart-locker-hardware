@@ -1,223 +1,128 @@
-# 🛡️📷 Smart Locker Hardware System
+# Smart Locker Hardware
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Raspberry%20Pi%204-Model%20B-red?logo=raspberrypi" alt="Raspberry Pi 4">
-  <img src="https://img.shields.io/badge/docker-%230db7ed.svg?logo=docker&logoColor=white" alt="Docker">
-  <img src="https://img.shields.io/badge/GitHub%20Actions-2088FF?logo=github-actions&logoColor=white" alt="GitHub Actions">
-  <img src="https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/License-MIT-green" alt="License">
-</p>
+FastAPI service for a Raspberry Pi 4 that:
 
-Raspberry Pi 4 based smart locker controller with camera integration, Docker deployment, automatic GitHub updates, and production-ready scaling design.
+- lists available Wi-Fi networks
+- connects the Pi to a selected Wi-Fi network
+- enables hotspot mode when Wi-Fi is not connected
+- switches back to normal Wi-Fi client mode after a successful connection
 
----
+## API
 
-## ✨ Features
+- `GET /` returns service status
+- `GET /system/health` returns health status
+- `GET /device/heartbeat` returns device heartbeat
+- `GET /wifi/status` returns current Wi-Fi state
+- `GET /wifi/scan` lists nearby Wi-Fi networks
+- `POST /wifi/connect` connects to a Wi-Fi network
+- `POST /wifi/disconnect` disconnects Wi-Fi and enables hotspot mode
+- `POST /wifi/hotspot/start` forces hotspot mode
 
-| Feature | Description |
-|---------|-------------|
-| 🔐 **GPIO Control** | Locker solenoid / relay control via GPIO pins |
-| 📷 **Camera Integration** | Raspberry Pi Camera capture (photos + video streams) |
-| 🌐 **REST API Communication** | Secure communication with Django backend |
-| 🐳 **Docker Deployment** | Fully containerized with Docker & docker-compose |
-| 🔄 **Auto-Updates** | Automatic code & image updates on boot |
-| 🏗️ **Multi-Architecture** | Docker images for ARM64 / AMD64 |
-| 📈 **Fleet Management** | Designed for **100+ device** fleet management |
-| ⚡ **Bulk Provisioning** | Easy bulk provisioning via master SD card image + unique `.env` |
+Example connect request:
 
----
-
-## 📦 Architecture Overview
-
-```
-┌───────────────────────┐       ┌───────────────────────┐
-│   Raspberry Pi 4      │       │   Django Backend      │
-│                       │       │                       │
-│  ┌───────────────┐    │       │  ┌─────────────────┐  │
-│  │ camera_service│◄───┼───────┼─►│   API Endpoints │  │
-│  └───────────────┘    │  HTTP │  └─────────────────┘  │
-│  ┌───────────────┐    │       │                       │
-│  │locker_controller◄───┼───────┼─►│   Device Status │  │
-│  └───────────────┘    │       │  └─────────────────┘  │
-│        │              │       └───────────────────────┘
-│   GPIO pins           │
-│   Pi Camera           │
-└───────────────────────┘
-            ▲
-            │ pull / update
-            │
-    GitHub + Docker Hub
+```json
+{
+  "ssid": "MyWifi",
+  "password": "MyPassword"
+}
 ```
 
----
+## Raspberry Pi 4 setup
 
-## 🚀 Quick Start
+Use Raspberry Pi OS with NetworkManager enabled. This project now uses `nmcli` for both station mode and hotspot mode, so you should not separately manage `wpa_supplicant`, `hostapd`, or `dnsmasq` for the same `wlan0` interface.
 
-### 1. Prerequisites
+1. Copy the project to `/home/pi/smart-locker-hardware`.
+2. Install dependencies:
 
 ```bash
-# Update and install essentials
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y git docker.io docker-compose
-
-# Add current user to docker group (recommended: user 'pi')
-sudo usermod -aG docker $USER
-
-# Log out and back in (or reboot)
-reboot
+cd /home/pi/smart-locker-hardware
+chmod +x app/scripts/install.sh app/scripts/start_ap.sh app/scripts/stop_ap.sh
+./app/scripts/install.sh
 ```
 
-### 2. Clone & Configure
+3. Optional hotspot settings:
 
 ```bash
-git clone https://github.com/yourusername/smart-locker-hardware.git
-cd smart-locker-hardware
-
-# Create and edit .env file
-cp .env.example .env
-nano .env
+export HOTSPOT_SSID="SmartLocker-Setup"
+export HOTSPOT_PASSWORD="SmartLocker123"
+export HOTSPOT_CONNECTION="SmartLockerHotspot"
+export WIFI_INTERFACE="wlan0"
 ```
 
-**.env example:**
-```ini
-# Required
-API_URL=https://yourserver.com/api
-API_TOKEN=dev_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-DEVICE_ID=locker-042
+If you want those values to persist in systemd, add them in the service files or with `Environment=` lines before enabling the services.
 
-# Optional / advanced
-LOG_LEVEL=INFO
-CAMERA_RESOLUTION=1920x1080
-HEARTBEAT_INTERVAL=30
-```
-
-### 3. Docker Deployment (recommended)
+4. Start services:
 
 ```bash
-# Build containers (first time ~5-10 min)
-docker compose build
-
-# Start in background
-docker compose up -d
-
-# Follow logs (most useful during setup)
-docker compose logs -f camera
-docker compose logs -f locker
+sudo systemctl restart fastapi.service
+sudo systemctl restart wifi-reconnect.service
 ```
 
----
-
-## 🔄 Auto-update on Boot
-
-The system uses a systemd service that runs `start.sh` → `update.sh` on every boot.
+5. Check service logs:
 
 ```bash
-# Install systemd service (one-time)
-sudo cp locker.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable locker.service
-sudo systemctl start locker.service
-
-# Check status
-sudo systemctl status locker.service
+sudo systemctl status fastapi.service
+sudo systemctl status wifi-reconnect.service
+journalctl -u fastapi.service -f
+journalctl -u wifi-reconnect.service -f
 ```
 
-### What happens on boot:
+## Pi 4 test plan
 
-1. `update.sh` → git pull latest code
-2. Rebuilds containers if needed (`docker compose build --pull`)
-3. Restarts services (`docker compose up -d`)
+1. Boot test:
+   Confirm both services are active after reboot.
 
----
-
-## 🏭 Scaling to 100+ Devices
-
-| Aspect | Solution / Recommendation |
-|--------|---------------------------|
-| Unique identification | Unique `DEVICE_ID` in each `.env` |
-| Code distribution | Single GitHub repo + auto-pull on boot |
-| Container updates | GitHub Actions multi-arch builds |
-| Fully automatic | Add Watchtower container |
-| Centralized logging | ELK / Loki / Graylog / Fluent Bit → central server |
-| Monitoring | Prometheus + Node Exporter + Grafana (lightweight on Pi) |
-| Mass provisioning | Burn master SD card image → customize only `.env` per device |
-
----
-
-## 📂 Project Structure
-
-```
-smart-locker-hardware/
-├── .github/
-│   └── workflows/
-│       └── build.yml          # GitHub Actions CI/CD pipeline
-├── hardware/                   # Main application logic
-│   ├── camera_stream_service.py
-│   └── locker_controller.py
-├── scripts/                    # Boot & update logic
-│   ├── start.sh
-│   └── update.sh
-├── .env.example               # Environment template
-├── requirements.txt           # Python dependencies
-├── Dockerfile                 # Docker image definition
-├── docker-compose.yml         # Docker Compose configuration
-├── locker.service             # systemd unit file
-└── README.md                  # This file
+```bash
+sudo reboot
+sudo systemctl status fastapi.service
+sudo systemctl status wifi-reconnect.service
 ```
 
----
+2. Hotspot fallback test:
+   Start with the Pi not connected to any saved Wi-Fi or with the router powered off.
 
-## 🔧 Development Tips
-
-Use `docker compose up` (without `-d`) during development for live output.
-
-Mount local code for fast iteration:
-
-```yaml
-# in docker-compose.yml (dev override)
-services:
-  camera:
-    volumes:
-      - ./hardware:/app/hardware:ro
+```bash
+nmcli device status
+nmcli connection show --active
 ```
 
----
+Expected result: `SmartLockerHotspot` becomes active on `wlan0`.
 
-## 🐳 Docker Hub & GitHub Actions
+3. Scan Wi-Fi test:
 
-This project includes automated Docker image builds via GitHub Actions:
+```bash
+curl http://127.0.0.1:8000/wifi/scan
+```
 
-- **Multi-architecture images**: ARM64 (Raspberry Pi) & AMD64 (x86_64)
-- **Auto-push on tags**: Tag a release to push to registry
-- **Cache optimization**: Faster builds with GitHub Actions cache
+Expected result: JSON list of nearby SSIDs with signal strength.
 
-### Available Triggers
+4. Connect Wi-Fi test:
 
-| Event | Action |
-|-------|--------|
-| Push to `main`/`master` | Build & push latest |
-| Push tag `v*` | Build & push versioned release |
-| Pull Request | Build (no push) |
-| Manual | Full rebuild with no cache |
+```bash
+curl -X POST http://127.0.0.1:8000/wifi/connect \
+  -H "Content-Type: application/json" \
+  -d '{"ssid":"YOUR_WIFI_NAME","password":"YOUR_WIFI_PASSWORD"}'
+```
 
----
+Expected result: API returns `"status":"connected"`, the hotspot goes down, and `nmcli connection show --active` shows your Wi-Fi.
 
-## 🤝 Contributing
+5. Failover test:
+   After the Pi is connected to Wi-Fi, power off the router or move the Pi out of range. Wait about 15 seconds.
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+```bash
+nmcli connection show --active
+curl http://127.0.0.1:8000/wifi/status
+```
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+Expected result: hotspot mode comes back automatically.
 
----
+6. Recovery test:
+   Turn the router back on, then call the connect API again if needed.
 
-## 📜 License
+Expected result: the Pi reconnects to the target Wi-Fi and leaves hotspot mode.
 
-MIT License
+## Notes
 
-> *Freely use, modify, and deploy — just keep the spirit of open-source alive!*
-
----
+- `wifi-reconnect.service` runs as `root` because changing network mode on the Pi requires elevated privileges.
+- `fastapi.service` also runs as `root` so the connect, disconnect, scan, and hotspot endpoints can call `nmcli` successfully from systemd.
+- If `wlan0` is being managed by another tool, disable that conflict first.
