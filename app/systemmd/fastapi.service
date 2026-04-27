@@ -1,0 +1,16 @@
+[Unit]
+Description=Smart Locker FastAPI Service
+After=network-online.target NetworkManager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pi/smart-locker-hardware
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/smart-locker-hardware/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
