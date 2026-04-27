@@ -12,6 +12,9 @@ FastAPI service for a Raspberry Pi 4 that:
 - `GET /` returns service status
 - `GET /system/health` returns health status
 - `GET /device/heartbeat` returns device heartbeat
+- `GET /device/backend/status` returns backend registration state and stored device UUID
+- `POST /device/backend/register` registers the Pi in the Django backend one time
+- `POST /device/backend/telemetry` sends telemetry to the Django backend immediately
 - `GET /hardware/status` returns detected hardware status
 - `GET /hardware/lights/status` returns light controller status
 - `GET /hardware/cameras/status` returns internal and external camera detection status
@@ -68,6 +71,25 @@ sudo systemctl status fastapi.service
 sudo systemctl status wifi-reconnect.service
 journalctl -u fastapi.service -f
 journalctl -u wifi-reconnect.service -f
+```
+
+6. Backend registration and telemetry:
+
+```bash
+curl http://127.0.0.1:8000/device/backend/status
+curl -X POST http://127.0.0.1:8000/device/backend/register
+curl -X POST http://127.0.0.1:8000/device/backend/telemetry
+```
+
+Expected result:
+- the first successful registration stores the Django `id` UUID in `app/config/backend_device.json`
+- later restarts reuse that stored UUID and do not create a second hardware device
+- telemetry posts always use that stored UUID as the `device` field
+
+Example cron job to send telemetry every 5 minutes:
+
+```bash
+*/5 * * * * cd /home/pi/smart-locker-hardware && /home/pi/smart-locker-hardware/.venv/bin/python -m app.scripts.send_telemetry >> /var/log/qbox-telemetry.log 2>&1
 ```
 
 ## Pi 4 test plan
@@ -132,3 +154,5 @@ Expected result: the Pi reconnects to the target Wi-Fi and leaves hotspot mode.
 - Camera detection uses `/dev/video*` and optionally `libcamera-hello --list-cameras`.
 - You can override the expected camera device paths with `INTERNAL_CAMERA_DEVICE` and `EXTERNAL_CAMERA_DEVICE`.
 - Light status is configuration-based until the actual GPIO light on/off control logic is added.
+- Backend registration runs at FastAPI startup. If `app/config/backend_device.json` already contains a `device_uuid`, registration is skipped.
+- Use `QBOX_DEVICE_NAME`, `QBOX_DEVICE_REGISTRATION_URL`, `QBOX_TELEMETRY_URL`, `QBOX_AUTO_REGISTER`, and `LOCKER_DEFAULT_STATUS` to override backend sync behavior.
