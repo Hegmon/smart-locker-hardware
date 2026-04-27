@@ -3,7 +3,7 @@ import os
 
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("APP_PORT", "8000"))
-APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
+APP_VERSION = os.getenv("APP_VERSION", "v1.0.0")
 WIFI_INTERFACE = os.getenv("WIFI_INTERFACE", "wlan0")
 HOTSPOT_CONNECTION = os.getenv("HOTSPOT_CONNECTION", "SmartLockerHotspot")
 HOTSPOT_SSID = os.getenv("HOTSPOT_SSID", "SmartLocker-Setup")
