@@ -6,41 +6,56 @@ from typing import Any
 import requests
 
 
-class WifiUploadError(RuntimeError):
+class WifiApiError(RuntimeError):
     pass
 
 
 @dataclass(frozen=True)
 class WifiApiClient:
-    endpoint_url: str
     timeout_seconds: float
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_session", requests.Session())
 
-    def send_scan(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+    def post_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         try:
-            response = self._session.post(
-                self.endpoint_url,
-                json=payload,
-                timeout=self.timeout_seconds,
-            )
+            response = self._session.post(url, json=payload, timeout=self.timeout_seconds)
         except requests.RequestException as exc:
-            raise WifiUploadError(f"WiFi upload request failed: {exc}") from exc
+            raise WifiApiError(f"POST {url} failed: {exc}") from exc
+        return self._handle_response(response, f"POST {url}")
 
+    def get_json(self, url: str) -> dict[str, Any] | None:
+        try:
+            response = self._session.get(url, timeout=self.timeout_seconds)
+        except requests.RequestException as exc:
+            raise WifiApiError(f"GET {url} failed: {exc}") from exc
+        return self._handle_response(response, f"GET {url}")
+
+    def patch_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            response = self._session.patch(url, json=payload, timeout=self.timeout_seconds)
+        except requests.RequestException as exc:
+            raise WifiApiError(f"PATCH {url} failed: {exc}") from exc
+        return self._handle_response(response, f"PATCH {url}")
+
+    @staticmethod
+    def _handle_response(response: requests.Response, action: str) -> dict[str, Any] | None:
+        if response.status_code == 404:
+            return None
         if response.status_code >= 400:
             body: Any
             try:
                 body = response.json()
             except ValueError:
                 body = response.text
-            raise WifiUploadError(
-                f"WiFi upload failed with status {response.status_code}: {body}"
-            )
+            raise WifiApiError(f"{action} returned {response.status_code}: {body}")
 
         if not response.content:
             return None
         try:
-            return response.json()
+            parsed = response.json()
         except ValueError:
             return {"raw_response": response.text}
+        if isinstance(parsed, dict):
+            return parsed
+        return {"data": parsed}
