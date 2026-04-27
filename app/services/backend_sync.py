@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 from datetime import datetime, timezone
+from json import JSONDecodeError
 from typing import Any
 
 import requests
@@ -23,8 +24,15 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+class BackendSyncError(Exception):
+    def __init__(self, message: str, *, status_code: int = 500, detail: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.detail = detail or {"message": message}
+
+
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _get_ip_address() -> str | None:
@@ -36,6 +44,26 @@ def _get_ip_address() -> str | None:
         return None
     finally:
         sock.close()
+
+
+def _parse_response_body(response: requests.Response) -> Any:
+    if not response.content:
+        return None
+    try:
+        return response.json()
+    except JSONDecodeError:
+        return response.text
+
+
+def _build_registration_payload() -> dict[str, Any]:
+    return {
+        "name": QBOX_DEVICE_NAME,
+        "ip_address": _get_ip_address(),
+        "version": APP_VERSION,
+        "is_active": True,
+        "status": "Online",
+        "last_seen": _utc_now_iso(),
+    }
 
 
 def _normalize_registration_status(status: str) -> str:
@@ -78,26 +106,80 @@ def register_device(force: bool = False) -> dict[str, Any]:
             "skipped": True,
             "device_uuid": state["device_uuid"],
             "device_id": state.get("device_id"),
+            "backend_response": state,
         }
 
-    payload = {
-        "name": QBOX_DEVICE_NAME,
-        "ip_address": _get_ip_address(),
-        "version": APP_VERSION,
-        "is_active": True,
-        "status": "Online",
-        "last_seen": _utc_now_iso(),
-    }
-    response = requests.post(
-        QBOX_DEVICE_REGISTRATION_URL,
-        json=payload,
-        timeout=QBOX_BACKEND_TIMEOUT_SECONDS,
+    payload = _build_registration_payload()
+    print(f"[backend-register] POST {QBOX_DEVICE_REGISTRATION_URL}", flush=True)
+    print(f"[backend-register] payload={payload}", flush=True)
+    logger.info("Registering Qbox device with payload: %s", payload)
+
+    try:
+        response = requests.post(
+            QBOX_DEVICE_REGISTRATION_URL,
+            json=payload,
+            timeout=QBOX_BACKEND_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as exc:
+        detail = {
+            "message": "Failed to call Django registration API.",
+            "url": QBOX_DEVICE_REGISTRATION_URL,
+            "payload": payload,
+            "error": str(exc),
+        }
+        print(f"[backend-register] request error={detail}", flush=True)
+        logger.exception("Django registration API request failed")
+        raise BackendSyncError("Registration request failed", status_code=502, detail=detail) from exc
+
+    response_body = _parse_response_body(response)
+    print(
+        f"[backend-register] response_status={response.status_code} response_body={response_body}",
+        flush=True,
     )
-    response.raise_for_status()
-    body = response.json()
+    logger.info("Registration response status=%s body=%s", response.status_code, response_body)
+    if response.status_code >= 400:
+        raise BackendSyncError(
+            "Registration API returned an error",
+            status_code=response.status_code,
+            detail={
+                "message": "Django registration API returned an error.",
+                "url": QBOX_DEVICE_REGISTRATION_URL,
+                "payload": payload,
+                "backend_status_code": response.status_code,
+                "backend_response": response_body,
+            },
+        )
+
+    if not isinstance(response_body, dict):
+        raise BackendSyncError(
+            "Registration API returned a non-object response",
+            status_code=502,
+            detail={
+                "message": "Django registration API returned an unexpected response.",
+                "url": QBOX_DEVICE_REGISTRATION_URL,
+                "payload": payload,
+                "backend_status_code": response.status_code,
+                "backend_response": response_body,
+            },
+        )
+
+    body = response_body
+    device_uuid = body.get("id")
+    if not device_uuid:
+        raise BackendSyncError(
+            "Registration response did not include device UUID",
+            status_code=502,
+            detail={
+                "message": "Django registration API did not return `id`.",
+                "url": QBOX_DEVICE_REGISTRATION_URL,
+                "payload": payload,
+                "backend_status_code": response.status_code,
+                "backend_response": body,
+            },
+        )
 
     updated_state = {
-        "device_uuid": body["id"],
+        "device_uuid": device_uuid,
         "device_id": body.get("device_id"),
         "name": body.get("name", QBOX_DEVICE_NAME),
         "ip_address": body.get("ip_address") or payload["ip_address"],
@@ -113,6 +195,9 @@ def register_device(force: bool = False) -> dict[str, Any]:
         "skipped": False,
         "device_uuid": updated_state["device_uuid"],
         "device_id": updated_state.get("device_id"),
+        "request_payload": payload,
+        "backend_status_code": response.status_code,
+        "backend_response": body,
     }
 
 
