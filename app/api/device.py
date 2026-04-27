@@ -1,6 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
-from app.services.backend_sync import get_backend_sync_status, register_device, send_telemetry
+from app.services.backend_sync import BackendSyncError, get_backend_sync_status, register_device, send_telemetry
 
 
 router = APIRouter(prefix="/device")
@@ -18,7 +18,10 @@ def backend_status() -> dict:
 
 @router.post("/backend/register")
 def backend_register() -> dict:
-    return register_device(force=False)
+    try:
+        return register_device(force=False)
+    except BackendSyncError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
 @router.post("/backend/telemetry")
