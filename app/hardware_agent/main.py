@@ -57,11 +57,16 @@ class WifiUploadAgent:
 
         connected_state = self._get_connected_state()
 
+        print("[agent] Starting WiFi scan", flush=True)
         try:
             networks = self.scanner.scan()
-        except WifiScannerError:
+        except WifiScannerError as exc:
+            print(f"[agent] WiFi scan failed: {exc}", flush=True)
             logger.exception("WiFi scan failed")
         else:
+            print(f"[agent] WiFi scan success: found {len(networks)} networks", flush=True)
+            for net in networks:
+                print(f"[agent] Network: {net.ssid} rssi={net.rssi} secured={net.is_secured}", flush=True)
             logger.info("WiFi scan success: found %s networks", len(networks))
             self._maybe_report_scan_diff(networks, connected_state)
 
@@ -95,12 +100,15 @@ class WifiUploadAgent:
         self.storage.save_state(state)
 
         if not has_diff and not heartbeat_due and not connection_changed:
+            print("[agent] No changes detected; skipping upload", flush=True)
             logger.info("WiFi scan unchanged and connection state unchanged; skipping upload")
             return
 
         if not has_diff and (heartbeat_due or connection_changed):
+            print("[agent] Heartbeat or connection change; sending empty scan event", flush=True)
             logger.info("WiFi diff empty but heartbeat or connection change requires upload")
 
+        print(f"[agent] Sending scan event to {self.config.scan_event_url}", flush=True)
         if self._send_with_retry("scan_event", self.config.scan_event_url, diff_payload):
             state = self.storage.load_state()
             state["last_scan_reported_at"] = diff_payload["timestamp"]
