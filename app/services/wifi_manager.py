@@ -36,6 +36,13 @@ def _parse_nmcli_table(output: str, columns: list[str]) -> list[dict[str, str]]:
     return rows
 
 
+def _safe_int(value: str, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def ensure_wifi_radio() -> None:
     _run_command(["nmcli", "radio", "wifi", "on"])
 
@@ -105,6 +112,42 @@ def get_wifi_status() -> dict[str, Any]:
         "connected": False,
         "connection": "",
         "hotspot_active": False,
+    }
+
+
+def get_connected_wifi_details() -> dict[str, Any]:
+    ensure_wifi_radio()
+    active_result = _run_command(
+        [
+            "nmcli",
+            "-t",
+            "-f",
+            "ACTIVE,SSID,SIGNAL,SECURITY",
+            "dev",
+            "wifi",
+            "list",
+            "ifname",
+            DEFAULT_INTERFACE,
+        ]
+    )
+    for row in _parse_nmcli_table(active_result.stdout, ["active", "ssid", "signal", "security"]):
+        if row["active"] != "yes":
+            continue
+        return {
+            "connected": True,
+            "connected_ssid": row["ssid"].strip(),
+            "signal_strength": _safe_int(row["signal"], 0),
+            "rssi": int((_safe_int(row["signal"], 0) / 2) - 100),
+            "is_secured": bool(row["security"].strip() and row["security"].strip() != "--"),
+        }
+
+    status = get_wifi_status()
+    return {
+        "connected": False,
+        "connected_ssid": status["connection"] if status["connected"] else "",
+        "signal_strength": 0,
+        "rssi": -100,
+        "is_secured": False,
     }
 
 
@@ -186,10 +229,12 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
         command.extend(["password", password])
 
     result = _run_command(command)
+    connection = get_connected_wifi_details()
     return {
         "status": "connected",
         "ssid": ssid,
         "details": result.stdout.strip(),
+        "connection": connection,
     }
 
 
