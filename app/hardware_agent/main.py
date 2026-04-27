@@ -49,6 +49,7 @@ class WifiUploadAgent:
             except Exception:
                 logger.exception("WiFi upload agent loop failed unexpectedly")
             elapsed = time.monotonic() - loop_started
+            print(f"[agent] loop completed in {elapsed:.1f}s, sleeping {max(1, self.config.scan_interval_seconds - int(elapsed))}s", flush=True)
             time.sleep(max(1, self.config.scan_interval_seconds - int(elapsed)))
 
     def run_once(self) -> None:
