@@ -62,6 +62,7 @@ If you want those values to persist in systemd, add them in the service files or
 ```bash
 sudo systemctl restart fastapi.service
 sudo systemctl restart wifi-reconnect.service
+sudo systemctl restart wifi-upload-agent.service
 ```
 
 5. Check service logs:
@@ -69,8 +70,10 @@ sudo systemctl restart wifi-reconnect.service
 ```bash
 sudo systemctl status fastapi.service
 sudo systemctl status wifi-reconnect.service
+sudo systemctl status wifi-upload-agent.service
 journalctl -u fastapi.service -f
 journalctl -u wifi-reconnect.service -f
+journalctl -u wifi-upload-agent.service -f
 ```
 
 6. Backend registration and telemetry:
@@ -91,6 +94,23 @@ Example cron job to send telemetry every 5 minutes:
 ```bash
 */5 * * * * cd /home/pi/smart-locker-hardware && /home/pi/smart-locker-hardware/.venv/bin/python -m app.scripts.send_telemetry >> /var/log/qbox-telemetry.log 2>&1
 ```
+
+## WiFi upload agent
+
+The WiFi upload agent runs as a separate `systemd` service and continuously scans nearby networks, only uploads when the scan changes, and otherwise sends a heartbeat snapshot every 5 minutes.
+
+Environment variables:
+
+- `QBOX_WIFI_AGENT_BASE_URL` sets the Django backend root URL, for example `https://backend.example.com`
+- `QBOX_WIFI_AGENT_DEVICE_ID` overrides the device identifier used in `/api/devices/{device_id}/wifi/`
+- `QBOX_WIFI_AGENT_SCAN_INTERVAL_SECONDS` controls how often the Pi scans nearby networks
+- `QBOX_WIFI_AGENT_HEARTBEAT_SECONDS` controls the forced upload interval when WiFi data is unchanged
+- `QBOX_WIFI_AGENT_REQUEST_TIMEOUT_SECONDS` controls the POST timeout
+
+Files written locally:
+
+- `app/config/wifi_agent_state.json` stores the last sent scan signature and timestamps
+- `app/config/wifi_agent_queue.json` stores buffered payloads when the backend is offline
 
 ## Pi 4 test plan
 
