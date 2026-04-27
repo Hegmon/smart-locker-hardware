@@ -109,6 +109,7 @@ class WifiUploadAgent:
             logger.info("WiFi diff empty but heartbeat or connection change requires upload")
 
         print(f"[agent] Sending scan event to {self.config.scan_event_url}", flush=True)
+        print(f"[agent] Payload: {diff_payload}", flush=True)
         if self._send_with_retry("scan_event", self.config.scan_event_url, diff_payload):
             state = self.storage.load_state()
             state["last_scan_reported_at"] = diff_payload["timestamp"]
