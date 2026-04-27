@@ -14,7 +14,20 @@ cleanup() {
 trap cleanup EXIT
 
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip network-manager
+sudo apt-get install -y \
+  python3 \
+  python3-venv \
+  python3-pip \
+  network-manager \
+  pkg-config \
+  ffmpeg \
+  libavformat-dev \
+  libavcodec-dev \
+  libavdevice-dev \
+  libavutil-dev \
+  libavfilter-dev \
+  libswscale-dev \
+  libswresample-dev
 sudo systemctl enable NetworkManager
 sudo systemctl start NetworkManager
 
