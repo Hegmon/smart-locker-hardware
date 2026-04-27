@@ -27,6 +27,7 @@ def _clamp(value: int, minimum: int) -> int:
 @dataclass(frozen=True)
 class AgentConfig:
     base_url: str
+    device_uuid: str
     device_id: str
     interface: str
     scan_interval_seconds: int
@@ -41,24 +42,28 @@ class AgentConfig:
 
     @property
     def endpoint_url(self) -> str:
-        return f"{self.base_url}/devices/{self.device_id}/wifi/"
+        return f"{self.base_url}/devices/{self.device_uuid}/wifi/"
 
 
 def load_agent_config() -> AgentConfig:
     backend_state = load_backend_state()
-    resolved_device_id = (
-        QBOX_WIFI_AGENT_DEVICE_ID
+    resolved_device_uuid = (
+        str(backend_state.get("device_uuid") or "").strip()
+        or QBOX_WIFI_AGENT_DEVICE_ID
         or str(backend_state.get("device_id") or "").strip()
-        or str(backend_state.get("device_uuid") or "").strip()
     )
-    if not resolved_device_id:
+    resolved_device_id = str(backend_state.get("device_id") or "").strip()
+
+    if not resolved_device_uuid:
         raise RuntimeError(
-            "WiFi agent device id is not configured. Set QBOX_WIFI_AGENT_DEVICE_ID "
-            "or register the device so app/config/backend_device.json contains device_id or device_uuid."
+            "WiFi agent device UUID is not configured. Register the device so "
+            "app/config/backend_device.json contains device_uuid, or set "
+            "QBOX_WIFI_AGENT_DEVICE_ID to the backend UUID explicitly."
         )
 
     return AgentConfig(
         base_url=QBOX_WIFI_AGENT_BASE_URL,
+        device_uuid=resolved_device_uuid,
         device_id=resolved_device_id,
         interface=WIFI_INTERFACE,
         scan_interval_seconds=_clamp(QBOX_WIFI_AGENT_SCAN_INTERVAL_SECONDS, 15),
