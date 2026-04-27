@@ -12,6 +12,9 @@ FastAPI service for a Raspberry Pi 4 that:
 - `GET /` returns service status
 - `GET /system/health` returns health status
 - `GET /device/heartbeat` returns device heartbeat
+- `GET /hardware/status` returns detected hardware status
+- `GET /hardware/lights/status` returns light controller status
+- `GET /hardware/cameras/status` returns internal and external camera detection status
 - `GET /wifi/status` returns current Wi-Fi state
 - `GET /wifi/scan` lists nearby Wi-Fi networks
 - `POST /wifi/connect` connects to a Wi-Fi network
@@ -126,3 +129,6 @@ Expected result: the Pi reconnects to the target Wi-Fi and leaves hotspot mode.
 - `wifi-reconnect.service` runs as `root` because changing network mode on the Pi requires elevated privileges.
 - `fastapi.service` also runs as `root` so the connect, disconnect, scan, and hotspot endpoints can call `nmcli` successfully from systemd.
 - If `wlan0` is being managed by another tool, disable that conflict first.
+- Camera detection uses `/dev/video*` and optionally `libcamera-hello --list-cameras`.
+- You can override the expected camera device paths with `INTERNAL_CAMERA_DEVICE` and `EXTERNAL_CAMERA_DEVICE`.
+- Light status is configuration-based until the actual GPIO light on/off control logic is added.
