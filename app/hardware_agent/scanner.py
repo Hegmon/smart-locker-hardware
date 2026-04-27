@@ -38,10 +38,10 @@ class WifiScanner:
         return sorted(deduped.values(), key=lambda item: (-item.rssi, item.ssid))
 
     def _pick_scanner(self):
-        if shutil.which("iw"):
-            return self._scan_with_iw
         if shutil.which("nmcli"):
             return self._scan_with_nmcli
+        if shutil.which("iw"):
+            return self._scan_with_iw
         if shutil.which("iwlist"):
             return self._scan_with_iwlist
         raise WifiScannerError("No supported WiFi scan command found. Install nmcli, iw, or iwlist.")
