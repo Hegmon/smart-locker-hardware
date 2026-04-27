@@ -56,10 +56,13 @@ def _parse_response_body(response: requests.Response) -> Any:
 
 
 def _build_registration_payload() -> dict[str, Any]:
+    version = APP_VERSION
+    if not version.startswith('v'):
+        version = f"v{version}"
     return {
         "name": QBOX_DEVICE_NAME,
         "ip_address": _get_ip_address(),
-        "version": APP_VERSION,
+        "version": version,
         "is_active": True,
         "status": "Online",
         "last_seen": _utc_now_iso(),
