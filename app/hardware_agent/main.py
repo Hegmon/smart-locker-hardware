@@ -163,7 +163,7 @@ class WifiUploadAgent:
             "rssi": connected.get("rssi"),
         }
 
-        self.mqtt.publish(self.config.mqtt_status_topic, payload)
+        self.mqtt.publish(self.config.mqtt_state_topic, payload)
 
     # ---------------- RESULT ----------------
     def publish_command_result(
