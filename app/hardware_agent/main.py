@@ -36,8 +36,10 @@ class WifiUploadAgent:
         self.scanner = WifiScanner(config.interface)
 
         self._running = False
+
+        # runtime state
         self._last_scan_hash = None
-        self._processed_commands: set[str] = set()  # 🧠 deduplication
+        self._processed_commands: set[str] = set()
 
         self.mqtt.register_command_handler(self.handle_command)
 
@@ -46,21 +48,43 @@ class WifiUploadAgent:
         print("[AGENT] Starting MQTT agent...")
 
         self.mqtt.connect()
+
+        # 🔥 IMPORTANT: give MQTT time to connect
+        time.sleep(2)
+
         self._running = True
 
-        # jitter prevents MQTT storm (IMPORTANT at scale)
-        scan_delay = random.randint(0, 5)
-        heartbeat_delay = random.randint(0, 5)
+        # jitter prevents device storm when scaling 100+ devices
+        scan_jitter = random.randint(0, 5)
+        heartbeat_jitter = random.randint(0, 5)
 
-        threading.Thread(target=self._scan_loop, args=(scan_delay,), daemon=True).start()
-        threading.Thread(target=self._heartbeat_loop, args=(heartbeat_delay,), daemon=True).start()
+        threading.Thread(
+            target=self._scan_loop,
+            args=(scan_jitter,),
+            daemon=True
+        ).start()
 
-        while True:
-            time.sleep(1)
+        threading.Thread(
+            target=self._heartbeat_loop,
+            args=(heartbeat_jitter,),
+            daemon=True
+        ).start()
+
+        print("[AGENT] Running...")
+
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("[AGENT] Shutting down...")
+            self._running = False
+            self.mqtt.disconnect()
 
     # ---------------- SCAN LOOP ----------------
     def _scan_loop(self, jitter: int):
         time.sleep(jitter)
+
+        print("[SCAN] loop started")
 
         while self._running:
             try:
@@ -70,9 +94,11 @@ class WifiUploadAgent:
 
             time.sleep(self.config.scan_interval_seconds)
 
-    # ---------------- HEARTBEAT ----------------
+    # ---------------- HEARTBEAT LOOP ----------------
     def _heartbeat_loop(self, jitter: int):
         time.sleep(jitter)
+
+        print("[HEARTBEAT] loop started")
 
         while self._running:
             try:
@@ -86,7 +112,10 @@ class WifiUploadAgent:
     def handle_command(self, payload: dict[str, Any]):
         command_id = payload.get("command_id")
 
-        # 🔥 DEDUPLICATION (VERY IMPORTANT for MQTT QoS1)
+        if not command_id:
+            return
+
+        # 🔥 prevent duplicate execution (MQTT QoS1 safe)
         if command_id in self._processed_commands:
             print(f"[AGENT] Duplicate command ignored: {command_id}")
             return
@@ -96,13 +125,12 @@ class WifiUploadAgent:
         event_type = payload.get("event_type")
         data = payload.get("payload", {})
 
-        print(f"[AGENT] Command received: {event_type}")
+        print(f"[COMMAND] {event_type}")
 
         if event_type == "CONNECT_WIFI":
             self._handle_connect_wifi(command_id, data)
-        else:
-            print(f"[AGENT] Unknown command: {event_type}")
 
+    # ---------------- WIFI CONNECT ----------------
     def _handle_connect_wifi(self, command_id: str, data: dict[str, Any]):
         ssid = data.get("ssid")
         password = data.get("password")
@@ -111,20 +139,20 @@ class WifiUploadAgent:
             result = connect_wifi(ssid, password)
 
             self.publish_command_result(
-                command_id=command_id,
-                status="SUCCESS",
-                ssid=ssid,
-                message="Connected successfully",
-                details=result,
+                command_id,
+                "SUCCESS",
+                ssid,
+                "Connected successfully",
+                result,
             )
 
         except WifiCommandError as e:
             self.publish_command_result(
-                command_id=command_id,
-                status="FAILED",
-                ssid=ssid,
-                message=str(e),
-                details=None,
+                command_id,
+                "FAILED",
+                ssid,
+                str(e),
+                None,
             )
 
     # ---------------- WIFI SCAN ----------------
@@ -133,6 +161,7 @@ class WifiUploadAgent:
         connected = get_connected_wifi_details()
 
         current_hash = hash(tuple((n.ssid, n.rssi) for n in networks))
+
         if current_hash == self._last_scan_hash:
             return
 
@@ -146,6 +175,8 @@ class WifiUploadAgent:
             "signal_strength": connected.get("signal_strength"),
             "networks": [n.to_payload() for n in networks],
         }
+
+        print(f"[SCAN] publishing {len(networks)} networks")
 
         self.mqtt.publish(self.config.mqtt_scan_topic, payload)
 
@@ -165,7 +196,7 @@ class WifiUploadAgent:
 
         self.mqtt.publish(self.config.mqtt_state_topic, payload)
 
-    # ---------------- RESULT ----------------
+    # ---------------- COMMAND RESULT ----------------
     def publish_command_result(
         self,
         command_id: str,
