@@ -173,31 +173,13 @@ def get_connected_wifi_details() -> dict[str, Any]:
         "nmcli",
         "-t",
         "-f",
-        "ACTIVE,SSID,SIGNAL,SECURITY",
-        "dev",
-        "wifi",
-        "list",
-        "ifname",
+        "GENERAL.CONNECTION,GENERAL.STATE,IP4.ADDRESS",
+        "device",
+        "show",
         DEFAULT_INTERFACE,
     ])
 
-    for line in result.stdout.splitlines():
-        parts = line.split(":")
-
-        if parts[0] != "yes":
-            continue
-
-        signal = int(parts[2]) if parts[2].isdigit() else 0
-
-        return {
-            "connected": True,
-            "connected_ssid": parts[1],
-            "signal_strength": signal,
-            "rssi": int((signal / 2) - 100),
-            "is_secured": parts[3] != "--",
-        }
-
-    return {
+    data = {
         "connected": False,
         "connected_ssid": "",
         "signal_strength": 0,
@@ -205,7 +187,45 @@ def get_connected_wifi_details() -> dict[str, Any]:
         "is_secured": False,
     }
 
+    for line in result.stdout.splitlines():
+        if "GENERAL.CONNECTION" in line:
+            connection = line.split(":")[1].strip()
+            if connection and connection != "--":
+                data["connected"] = True
+                data["connected_ssid"] = connection
 
+        if "GENERAL.STATE" in line:
+            state = line.split(":")[1].strip()
+            if "100" in state:
+                data["connected"] = True
+
+    # OPTIONAL: better signal fetch
+    try:
+        signal_result = _run([
+            "nmcli",
+            "-t",
+            "-f",
+            "IN-USE,SIGNAL",
+            "dev",
+            "wifi",
+            "list",
+            "ifname",
+            DEFAULT_INTERFACE,
+        ])
+
+        for line in signal_result.stdout.splitlines():
+            if line.startswith("*"):
+                parts = line.split(":")
+                if len(parts) > 1:
+                    signal = int(parts[1] or 0)
+                    data["signal_strength"] = signal
+                    data["rssi"] = int((signal / 2) - 100)
+                    break
+
+    except Exception:
+        pass
+
+    return data
 # =========================================================
 # HOTSPOT MODE (DEVICE PROVISIONING)
 # =========================================================
