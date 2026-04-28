@@ -43,6 +43,10 @@ QBOX_BACKEND_TIMEOUT_SECONDS = float(os.getenv("QBOX_BACKEND_TIMEOUT_SECONDS", "
 QBOX_AUTO_REGISTER = os.getenv("QBOX_AUTO_REGISTER", "true").strip().lower() in {
     "1", "true", "yes", "on"
 }
+QBOX_WIFI_AGENT_COMMAND_ENDPOINT = os.getenv(
+    "QBOX_WIFI_AGENT_COMMAND_ENDPOINT",
+    "",
+).strip()
 
 LOCKER_DEFAULT_STATUS = os.getenv("LOCKER_DEFAULT_STATUS", "LOCKED")
 
