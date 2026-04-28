@@ -35,8 +35,6 @@ from app.services.backend_state import load_backend_state
 def _clamp(value: int, minimum: int) -> int:
     return max(value, minimum)
 
-
-# ✅ PRODUCTION CONFIG MODEL
 @dataclass(frozen=True)
 class AgentConfig:
     # -------- DEVICE --------
