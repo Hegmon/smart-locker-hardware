@@ -34,61 +34,82 @@ class MqttClient:
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
 
-        self._handlers: dict[str, Callable[[dict[str, Any]], None]] = {}
+        self._handlers: dict[str, Callable[[dict[str, Any], str], None]] = {}
 
-        self.command_topic = f"devices/+/command"
-
+    # ---------------- CONNECT ----------------
     def connect(self):
+        print(f"[MQTT] Connecting to {self.host}:{self.port}")
+
         self.client.connect_async(self.host, self.port, self.keepalive)
         self.client.loop_start()
 
         threading.Thread(target=self._watchdog, daemon=True).start()
 
+    # ---------------- WATCHDOG ----------------
     def _watchdog(self):
         while self._running:
             if not self._connected:
                 try:
+                    print("[MQTT] Reconnecting...")
                     self.client.reconnect()
                 except Exception:
                     pass
             time.sleep(5)
 
+    # ---------------- CONNECT CALLBACK ----------------
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self._connected = True
             print("[MQTT] Connected")
 
+            # wildcard subscriptions (IMPORTANT FOR SCALING)
             client.subscribe("devices/+/command", qos=1)
             client.subscribe("devices/+/wifi/scan", qos=1)
             client.subscribe("devices/+/wifi/state", qos=1)
             client.subscribe("devices/+/command/result", qos=1)
 
         else:
-            print(f"[MQTT] Failed rc={rc}")
+            print(f"[MQTT] Connection failed rc={rc}")
 
+    # ---------------- DISCONNECT ----------------
     def _on_disconnect(self, client, userdata, rc):
         self._connected = False
-        print("[MQTT] Disconnected")
+        print(f"[MQTT] Disconnected rc={rc}")
 
+    # ---------------- MESSAGE ----------------
     def _on_message(self, client, userdata, msg):
         try:
             payload = json.loads(msg.payload.decode())
-            handler = self._handlers.get("command")
-            if handler:
-                handler(payload)
-        except Exception as e:
-            print(f"[MQTT] Error: {e}")
 
+            topic = msg.topic
+
+            # route based on topic type
+            if "command" in topic:
+                handler = self._handlers.get("command")
+                if handler:
+                    handler(payload, topic)
+
+        except Exception as e:
+            print(f"[MQTT] message error: {e}")
+
+    # ---------------- HANDLER ----------------
     def register_command_handler(self, handler: Callable):
         self._handlers["command"] = handler
 
+    # ---------------- PUBLISH ----------------
     def publish(self, topic: str, payload: dict):
         if not self._connected:
-            print("[MQTT] Not connected, skipping publish")
+            print(f"[MQTT] Not connected -> skip publish {topic}")
             return
 
-        self.client.publish(topic, json.dumps(payload), qos=1)
+        self.client.publish(
+            topic,
+            json.dumps(payload),
+            qos=1,
+            retain=False,
+        )
 
+    # ---------------- STOP ----------------
     def disconnect(self):
         self._running = False
         self.client.loop_stop()
