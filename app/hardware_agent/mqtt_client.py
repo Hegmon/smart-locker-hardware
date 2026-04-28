@@ -14,6 +14,8 @@ class MqttClient:
         port: int,
         client_id: str,
         keepalive: int = 60,
+        username: str = None,
+        password: str = None,
     ):
         self.host = host
         self.port = port
@@ -28,6 +30,8 @@ class MqttClient:
             clean_session=True,
         )
 
+        if username and password:
+            self.client.username_pw_set(username, password)
         self.client.reconnect_delay_set(min_delay=1, max_delay=30)
 
         self.client.on_connect = self._on_connect
