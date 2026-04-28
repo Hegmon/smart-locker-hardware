@@ -23,6 +23,11 @@ from app.core.config import (
     QBOX_WIFI_AGENT_STATE_FILE,
     QBOX_WIFI_AGENT_STATE_HEARTBEAT_SECONDS,
     WIFI_INTERFACE,
+    MQTT_HOST,
+    MQTT_PORT,
+    MQTT_KEEPALIVE,
+    MQTT_USERNAME,
+    MQTT_PASSWORD,
 )
 from app.services.backend_state import load_backend_state
 
@@ -44,8 +49,10 @@ class AgentConfig:
     mqtt_host: str
     mqtt_port: int
     mqtt_keepalive: int
+    mqtt_username: str
+    mqtt_password: str
     mqtt_command_topic: str
-    mqtt_result_topic: str
+    mqtt_command_result_topic: str
     mqtt_scan_topic: str
     mqtt_state_topic: str
 
@@ -112,11 +119,13 @@ def load_agent_config() -> AgentConfig:
         interface=WIFI_INTERFACE,
 
         # -------- MQTT --------
-        mqtt_host="69.62.125.223",   # ⚠️ change to broker IP for production cluster
-        mqtt_port=1883,
-        mqtt_keepalive=60,
+        mqtt_host=MQTT_HOST,
+        mqtt_port=MQTT_PORT,
+        mqtt_keepalive=MQTT_KEEPALIVE,
+        mqtt_username=MQTT_USERNAME,
+        mqtt_password=MQTT_PASSWORD,
         mqtt_command_topic=mqtt_command_topic,
-        mqtt_result_topic=mqtt_result_topic,
+        mqtt_command_result_topic=mqtt_command_result_topic,
         mqtt_scan_topic=mqtt_scan_topic,
         mqtt_state_topic=mqtt_state_topic,
 
