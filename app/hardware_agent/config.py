@@ -112,7 +112,7 @@ def load_agent_config() -> AgentConfig:
         interface=WIFI_INTERFACE,
 
         # -------- MQTT --------
-        mqtt_host="localhost",   # ⚠️ change to broker IP for production cluster
+        mqtt_host="69.62.125.223",   # ⚠️ change to broker IP for production cluster
         mqtt_port=1883,
         mqtt_keepalive=60,
         mqtt_command_topic=mqtt_command_topic,
