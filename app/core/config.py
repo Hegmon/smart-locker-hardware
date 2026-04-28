@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
-
+from app.services.backend_state import load_backend_state
+from dataclasses import dataclass
 
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("APP_PORT", "8000"))
@@ -10,6 +11,8 @@ HOTSPOT_CONNECTION = os.getenv("HOTSPOT_CONNECTION", "SmartLockerHotspot")
 HOTSPOT_SSID = os.getenv("HOTSPOT_SSID", "SmartLocker-Setup")
 HOTSPOT_PASSWORD = os.getenv("HOTSPOT_PASSWORD", "SmartLocker123")
 QBOX_DEVICE_NAME = os.getenv("QBOX_DEVICE_NAME", os.getenv("HOSTNAME", "QboxPi4"))[:25]
+MQTT_HOST = "localhost"
+MQTT_PORT = 1883
 QBOX_DEVICE_REGISTRATION_URL = os.getenv(
     "QBOX_DEVICE_REGISTRATION_URL",
     "https://backend.qbox.sa/devices/",
@@ -89,3 +92,24 @@ QBOX_WIFI_AGENT_QUEUE_FILE = os.getenv(
     "QBOX_WIFI_AGENT_QUEUE_FILE",
     str(CONFIG_DIR / "wifi_agent_queue.json"),
 )
+@dataclass(frozen=True)
+class AgentConfig:
+    base_url: str
+    device_uuid: str
+    device_id: str
+    interface: str
+
+    mqtt_host: str
+    mqtt_port: int
+def load_agent_config() -> AgentConfig:
+    backend_state = load_backend_state()
+
+    return AgentConfig(
+        base_url=QBOX_WIFI_AGENT_BASE_URL,
+        device_uuid=str(backend_state.get("device_uuid")),
+        device_id=str(backend_state.get("device_id")),
+        interface=WIFI_INTERFACE,
+
+        mqtt_host="localhost",
+        mqtt_port=1883,
+    )
