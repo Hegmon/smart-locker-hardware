@@ -105,7 +105,7 @@ def load_agent_config() -> AgentConfig:
 
     # ✅ MQTT TOPICS (VERY IMPORTANT FOR SCALE)
     mqtt_command_topic = f"devices/{resolved_device_id}/command"
-    mqtt_result_topic = f"devices/{resolved_device_id}/command/result"
+    mqtt_command_result_topic = f"devices/{resolved_device_id}/command/result"
     mqtt_scan_topic = f"devices/{resolved_device_id}/wifi/scan"
     mqtt_state_topic = f"devices/{resolved_device_id}/wifi/state"
 
