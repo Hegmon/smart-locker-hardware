@@ -111,7 +111,7 @@ class WifiUploadAgent:
             time.sleep(self.config.heartbeat_seconds)
 
     # ---------------- COMMAND HANDLER ----------------
-    def handle_command(self, payload: dict[str, Any]):
+    def handle_command(self, payload: dict[str, Any], topic: str):
         command_id = payload.get("command_id")
 
         if not command_id:
