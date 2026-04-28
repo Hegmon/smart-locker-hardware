@@ -221,7 +221,7 @@ class WifiUploadAgent:
             "timestamp": utc_now(),
         }
 
-        self.mqtt.publish(self.config.mqtt_result_topic, payload)
+        self.mqtt.publish(self.config.mqtt_command_result_topic, payload)
 
 
 # ---------------- ENTRYPOINT ----------------
