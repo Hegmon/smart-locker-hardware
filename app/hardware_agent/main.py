@@ -1,210 +1,197 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import random
+import threading
 import time
+import random
 from datetime import datetime, timezone
 from typing import Any
 
-from app.hardware_agent.client import WifiApiClient, WifiApiError
-from app.hardware_agent.config import AgentConfig, load_agent_config
-from app.hardware_agent.scanner import WifiNetwork, WifiScanner, WifiScannerError
-from app.hardware_agent.storage import JsonFileStorage, QueueItem
+from app.hardware_agent.config import load_agent_config, AgentConfig
+from app.hardware_agent.mqtt_client import MqttClient
+from app.hardware_agent.scanner import WifiScanner
 from app.services.wifi_manager import (
-    WifiCommandError,
     connect_wifi,
     get_connected_wifi_details,
+    WifiCommandError,
 )
-from app.utils.logger import get_logger
 
 
-logger = get_logger(__name__)
+# ---------------- TIME ----------------
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
+# ---------------- AGENT ----------------
 class WifiUploadAgent:
-    def __init__(self, config: AgentConfig) -> None:
+    def __init__(self, config: AgentConfig):
         self.config = config
+
+        self.mqtt = MqttClient(
+            host=config.mqtt_host,
+            port=config.mqtt_port,
+            client_id=config.device_id,
+            keepalive=config.mqtt_keepalive,
+        )
+
         self.scanner = WifiScanner(config.interface)
-        self.storage = JsonFileStorage(config.state_file, config.queue_file)
-        self.client = WifiApiClient(timeout_seconds=config.request_timeout_seconds)
 
-    def run_forever(self) -> None:
-        logger.info("Starting WiFi upload agent (30s interval)")
+        self._running = False
+        self._last_scan_hash = None
+        self._processed_commands: set[str] = set()  # 🧠 deduplication
+
+        self.mqtt.register_command_handler(self.handle_command)
+
+    # ---------------- START ----------------
+    def start(self):
+        print("[AGENT] Starting MQTT agent...")
+
+        self.mqtt.connect()
+        self._running = True
+
+        # jitter prevents MQTT storm (IMPORTANT at scale)
+        scan_delay = random.randint(0, 5)
+        heartbeat_delay = random.randint(0, 5)
+
+        threading.Thread(target=self._scan_loop, args=(scan_delay,), daemon=True).start()
+        threading.Thread(target=self._heartbeat_loop, args=(heartbeat_delay,), daemon=True).start()
+
         while True:
-            start = time.monotonic()
+            time.sleep(1)
+
+    # ---------------- SCAN LOOP ----------------
+    def _scan_loop(self, jitter: int):
+        time.sleep(jitter)
+
+        while self._running:
             try:
-                self.run_once()
-            except Exception:
-                logger.exception("Agent loop failed (handled safely)")
+                self.publish_wifi_scan()
+            except Exception as e:
+                print(f"[SCAN ERROR] {e}")
 
-            elapsed = time.monotonic() - start
-            sleep_time = max(1, 30 - int(elapsed))  # 👈 fixed 30 sec interval
-            print(f"[agent] loop done in {elapsed:.1f}s, sleeping {sleep_time}s", flush=True)
-            time.sleep(sleep_time)
+            time.sleep(self.config.scan_interval_seconds)
 
-    def run_once(self) -> None:
-        # ✅ Load state ONCE
-        state = self.storage.load_state() or {}
+    # ---------------- HEARTBEAT ----------------
+    def _heartbeat_loop(self, jitter: int):
+        time.sleep(jitter)
 
-        self._flush_queue()
+        while self._running:
+            try:
+                self.publish_status()
+            except Exception as e:
+                print(f"[HEARTBEAT ERROR] {e}")
 
-        connected_state = self._get_connected_state()
+            time.sleep(self.config.heartbeat_seconds)
 
-        print("[agent] Starting WiFi scan", flush=True)
+    # ---------------- COMMAND HANDLER ----------------
+    def handle_command(self, payload: dict[str, Any]):
+        command_id = payload.get("command_id")
 
-        try:
-            networks = self.scanner.scan()
-        except WifiScannerError as exc:
-            logger.exception("WiFi scan failed")
+        # 🔥 DEDUPLICATION (VERY IMPORTANT for MQTT QoS1)
+        if command_id in self._processed_commands:
+            print(f"[AGENT] Duplicate command ignored: {command_id}")
             return
 
-        print(f"[agent] Found {len(networks)} networks", flush=True)
+        self._processed_commands.add(command_id)
 
-        # ✅ Process everything with SAME state object
-        self._maybe_report_scan_diff(networks, connected_state, state)
+        event_type = payload.get("event_type")
+        data = payload.get("payload", {})
 
-    # ✅ PASS STATE (no re-load)
-    def _maybe_report_scan_diff(
-        self,
-        networks: list[WifiNetwork],
-        connected_state: dict[str, Any],
-        state: dict[str, Any],
-    ) -> None:
+        print(f"[AGENT] Command received: {event_type}")
 
-        previous_networks = self._extract_network_map(state.get("last_scan_networks"))
-
-        current_networks = {n.ssid: n for n in networks if n.ssid}
-
-        diff_payload = self._build_scan_diff_payload(
-            previous_networks, current_networks, connected_state
-        )
-
-        has_diff = bool(
-            diff_payload["new_networks"]
-            or diff_payload["removed_networks"]
-            or diff_payload["updated_networks"]
-        )
-
-        last_sent_at = self._parse_epoch(state.get("last_scan_reported_at_epoch"))
-
-        heartbeat_due = last_sent_at is None or (time.time() - last_sent_at) >= 300
-
-        # update state BEFORE sending
-        state["last_scan_networks"] = {
-            ssid: net.to_payload() for ssid, net in current_networks.items()
-        }
-        state["last_scan_at"] = diff_payload["timestamp"]
-
-        self.storage.save_state(state)
-
-        if not has_diff and not heartbeat_due:
-            print("[agent] No changes, skipping", flush=True)
-            return
-
-        print("[agent] Sending scan update...", flush=True)
-
-        if self._send_with_retry("scan_event", self.config.scan_event_url, diff_payload):
-            state["last_scan_reported_at"] = diff_payload["timestamp"]
-            state["last_scan_reported_at_epoch"] = time.time()
-            self.storage.save_state(state)
+        if event_type == "CONNECT_WIFI":
+            self._handle_connect_wifi(command_id, data)
         else:
-            self.storage.append_queue_item(
-                QueueItem(kind="scan_event", payload=diff_payload, retry_count=0)
-            )
+            print(f"[AGENT] Unknown command: {event_type}")
 
-    def _flush_queue(self) -> None:
+    def _handle_connect_wifi(self, command_id: str, data: dict[str, Any]):
+        ssid = data.get("ssid")
+        password = data.get("password")
+
         try:
-            queue = self.storage.load_queue()
-        except Exception:
-            return
+            result = connect_wifi(ssid, password)
 
-        if not queue:
-            return
-
-        for item in queue[:5]:
-            if not self._deliver_queue_item(item):
-                return
-
-        self.storage.save_queue(queue[5:])
-
-    def _deliver_queue_item(self, item: QueueItem) -> bool:
-        try:
-            return self._send_with_retry(item.kind, self.config.scan_event_url, item.payload)
-        except Exception:
-            return False
-
-    def _send_with_retry(self, kind: str, url: str, payload: dict[str, Any]) -> bool:
-        try:
-            self.client.post_json(url, payload)
-            logger.info("%s success", kind)
-            return True
-        except WifiApiError as exc:
-            logger.warning("%s failed: %s", kind, exc)
-            return False
-
-    def _build_scan_diff_payload(
-        self,
-        previous: dict[str, WifiNetwork],
-        current: dict[str, WifiNetwork],
-        connected_state: dict[str, Any],
-    ) -> dict[str, Any]:
-
-        new = [n.to_payload() for s, n in current.items() if s not in previous]
-        removed = [previous[s].to_payload() for s in previous if s not in current]
-
-        return {
-            "device_uuid": self.config.device_uuid,
-            "device_id": self.config.device_id,
-            "connected_ssid": connected_state["connected_ssid"],
-            "signal_strength": connected_state["signal_strength"],
-            "timestamp": utc_now_iso(),
-            "new_networks": new,
-            "removed_networks": removed,
-            "updated_networks": [],
-        }
-
-    @staticmethod
-    def _extract_network_map(raw: Any) -> dict[str, WifiNetwork]:
-        if not isinstance(raw, dict):
-            return {}
-
-        return {
-            ssid: WifiNetwork(
+            self.publish_command_result(
+                command_id=command_id,
+                status="SUCCESS",
                 ssid=ssid,
-                rssi=int(v.get("rssi", -100)),
-                is_secured=bool(v.get("is_secured", False)),
+                message="Connected successfully",
+                details=result,
             )
-            for ssid, v in raw.items()
-            if isinstance(v, dict)
+
+        except WifiCommandError as e:
+            self.publish_command_result(
+                command_id=command_id,
+                status="FAILED",
+                ssid=ssid,
+                message=str(e),
+                details=None,
+            )
+
+    # ---------------- WIFI SCAN ----------------
+    def publish_wifi_scan(self):
+        networks = self.scanner.scan()
+        connected = get_connected_wifi_details()
+
+        current_hash = hash(tuple((n.ssid, n.rssi) for n in networks))
+        if current_hash == self._last_scan_hash:
+            return
+
+        self._last_scan_hash = current_hash
+
+        payload = {
+            "device_id": self.config.device_id,
+            "device_uuid": self.config.device_uuid,
+            "timestamp": utc_now(),
+            "connected_ssid": connected.get("connected_ssid"),
+            "signal_strength": connected.get("signal_strength"),
+            "networks": [n.to_payload() for n in networks],
         }
 
-    @staticmethod
-    def _get_connected_state() -> dict[str, Any]:
-        d = get_connected_wifi_details()
-        return {
-            "connected_ssid": str(d.get("connected_ssid") or ""),
-            "signal_strength": int(d.get("signal_strength") or 0),
-            "rssi": int(d.get("rssi") or -100),
-            "status": "CONNECTED" if d.get("connected") else "DISCONNECTED",
+        self.mqtt.publish(self.config.mqtt_scan_topic, payload)
+
+    # ---------------- STATUS ----------------
+    def publish_status(self):
+        connected = get_connected_wifi_details()
+
+        payload = {
+            "device_id": self.config.device_id,
+            "device_uuid": self.config.device_uuid,
+            "timestamp": utc_now(),
+            "status": "ONLINE",
+            "connected_ssid": connected.get("connected_ssid"),
+            "signal_strength": connected.get("signal_strength"),
+            "rssi": connected.get("rssi"),
         }
 
-    @staticmethod
-    def _parse_epoch(value: Any) -> float | None:
-        try:
-            return float(value)
-        except Exception:
-            return None
+        self.mqtt.publish(self.config.mqtt_status_topic, payload)
+
+    # ---------------- RESULT ----------------
+    def publish_command_result(
+        self,
+        command_id: str,
+        status: str,
+        ssid: str,
+        message: str,
+        details: Any,
+    ):
+        payload = {
+            "command_id": command_id,
+            "device_id": self.config.device_id,
+            "status": status,
+            "ssid": ssid,
+            "message": message,
+            "details": details,
+            "timestamp": utc_now(),
+        }
+
+        self.mqtt.publish(self.config.mqtt_result_topic, payload)
 
 
-def main() -> None:
+# ---------------- ENTRYPOINT ----------------
+def main():
     config = load_agent_config()
     agent = WifiUploadAgent(config)
-    agent.run_forever()
+    agent.start()
 
 
 if __name__ == "__main__":
