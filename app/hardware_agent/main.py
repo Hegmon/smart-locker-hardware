@@ -137,6 +137,7 @@ class WifiUploadAgent:
         ssid = data.get("ssid")
         password = data.get("password")
 
+        print(f"[AGENT] Connecting to WiFi: {ssid}")
         try:
             result = connect_wifi(ssid, password)
 
