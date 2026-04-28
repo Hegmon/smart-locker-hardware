@@ -1,16 +1,29 @@
 [Unit]
-Description=Smart Locker WiFi Upload Agent
-After=network-online.target NetworkManager.service
+Description=Smart Locker WiFi Upload Agent (MQTT + Scan)
+After=network-online.target
 Wants=network-online.target
+
+# 🔥 IMPORTANT: depend on reconnect service
+After=wifi-reconnect.service
+Wants=wifi-reconnect.service
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=__PROJECT_DIR__
+WorkingDirectory=/opt/smart-locker-hardware
+
 Environment=PYTHONUNBUFFERED=1
-ExecStart=__PROJECT_DIR__/.venv/bin/python -m app.hardware_agent.main
+Environment=MQTT_HOST=127.0.0.1
+Environment=MQTT_PORT=1883
+
+ExecStart=/opt/smart-locker-hardware/.venv/bin/python -m app.hardware_agent.main
+
 Restart=always
 RestartSec=10
+
+# prevent CPU loops on network failure
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Install]
 WantedBy=multi-user.target
