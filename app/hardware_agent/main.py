@@ -139,12 +139,15 @@ class WifiUploadAgent:
             result = connect_wifi(ssid, password)
 
             self.publish_command_result(
-                command_id,
-                "SUCCESS",
-                ssid,
-                "Connected successfully",
-                result,
+                command_id=command_id,
+                status="SUCCESS",
+                ssid=ssid,
+                message="Connected successfully",
+                details=result,
             )
+
+            # Update status immediately after connecting
+            self.publish_status()
 
         except WifiCommandError as e:
             self.publish_command_result(
@@ -195,6 +198,7 @@ class WifiUploadAgent:
         }
 
         self.mqtt.publish(self.config.mqtt_state_topic, payload)
+        print(f"[AGENT] Published status: {payload}")
 
     # ---------------- COMMAND RESULT ----------------
     def publish_command_result(
