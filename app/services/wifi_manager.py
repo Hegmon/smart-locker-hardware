@@ -1,111 +1,159 @@
+from __future__ import annotations
 import os
 import shlex
 import subprocess
+import time
 from typing import Any
-
-
+# =========================================================
+# CONFIG
+# =========================================================
 DEFAULT_INTERFACE = os.getenv("WIFI_INTERFACE", "wlan0")
+
 DEFAULT_HOTSPOT_CONNECTION = os.getenv("HOTSPOT_CONNECTION", "SmartLockerHotspot")
 DEFAULT_HOTSPOT_SSID = os.getenv("HOTSPOT_SSID", "SmartLocker-Setup")
 DEFAULT_HOTSPOT_PASSWORD = os.getenv("HOTSPOT_PASSWORD", "SmartLocker123")
-DEFAULT_HOTSPOT_IP = os.getenv("HOTSPOT_IP", "192.168.4.1/24")
 
 
+# =========================================================
+# EXCEPTION
+# =========================================================
 class WifiCommandError(RuntimeError):
     pass
 
 
-def _run_command(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(command, capture_output=True, text=True)
+# =========================================================
+# SAFE EXECUTION LAYER (IMPORTANT FOR MQTT COMMANDS)
+# =========================================================
+def _run(command: list[str], check: bool = True, timeout: int = 12) -> subprocess.CompletedProcess:
+    """
+    Hardened subprocess runner (prevents MQTT blocking failures)
+    """
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    except subprocess.TimeoutExpired:
+        raise WifiCommandError(f"TIMEOUT: {' '.join(command)}")
+
     if check and result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip() or "command failed"
-        raise WifiCommandError(f"{' '.join(shlex.quote(part) for part in command)}: {message}")
+        msg = result.stderr.strip() or result.stdout.strip()
+        raise WifiCommandError(
+            f"{' '.join(shlex.quote(c) for c in command)}: {msg}"
+        )
+
     return result
 
 
-def _parse_nmcli_table(output: str, columns: list[str]) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    for line in output.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split(":")
-        if len(parts) < len(columns):
-            parts.extend([""] * (len(columns) - len(parts)))
-        row = {columns[index]: parts[index].strip() for index in range(len(columns))}
-        rows.append(row)
-    return rows
-
-
-def _safe_int(value: str, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
+# =========================================================
+# CORE HELPERS
+# =========================================================
 def ensure_wifi_radio() -> None:
-    _run_command(["nmcli", "radio", "wifi", "on"])
+    _run(["nmcli", "radio", "wifi", "on"], check=False)
 
 
+def _wait_for_connection(ssid: str, timeout: int = 15) -> bool:
+    """
+    MQTT-safe blocking wait with timeout
+    """
+    start = time.time()
+
+    while time.time() - start < timeout:
+        try:
+            details = get_connected_wifi_details()
+            if details.get("connected_ssid") == ssid:
+                return True
+        except Exception:
+            pass
+
+        time.sleep(1)
+
+    return False
+
+
+# =========================================================
+# WIFI SCAN (MQTT SAFE OUTPUT)
+# =========================================================
 def scan_wifi() -> list[dict[str, Any]]:
     ensure_wifi_radio()
-    _run_command(["nmcli", "dev", "wifi", "rescan"], check=False)
-    result = _run_command(
-        [
-            "nmcli",
-            "-t",
-            "-f",
-            "SSID,SIGNAL,SECURITY,IN-USE",
-            "dev",
-            "wifi",
-            "list",
-            "ifname",
-            DEFAULT_INTERFACE,
-        ]
-    )
-    networks = _parse_nmcli_table(result.stdout, ["ssid", "signal", "security", "in_use"])
-    seen: set[str] = set()
-    unique_networks: list[dict[str, Any]] = []
-    for network in networks:
-        ssid = network["ssid"].strip()
+
+    _run(["nmcli", "dev", "wifi", "rescan"], check=False)
+
+    result = _run([
+        "nmcli",
+        "-t",
+        "-f",
+        "SSID,SIGNAL,SECURITY,IN-USE",
+        "dev",
+        "wifi",
+        "list",
+        "ifname",
+        DEFAULT_INTERFACE,
+    ])
+
+    seen = set()
+    networks: list[dict[str, Any]] = []
+
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+
+        parts = line.split(":")
+
+        ssid = parts[0].strip()
         if not ssid or ssid in seen:
             continue
+
         seen.add(ssid)
-        unique_networks.append(
-            {
-                "ssid": ssid,
-                "signal": int(network["signal"] or 0),
-                "security": network["security"],
-                "connected": network["in_use"] == "*",
-            }
-        )
-    return sorted(unique_networks, key=lambda item: item["signal"], reverse=True)
+
+        signal = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        security = parts[2] if len(parts) > 2 else ""
+
+        networks.append({
+            "ssid": ssid,
+            "signal": signal,
+            "security": security,
+            "connected": "*" in parts,
+        })
+
+    return sorted(networks, key=lambda x: x["signal"], reverse=True)
 
 
+# =========================================================
+# STATUS
+# =========================================================
 def get_wifi_status() -> dict[str, Any]:
     ensure_wifi_radio()
-    result = _run_command(
-        [
-            "nmcli",
-            "-t",
-            "-f",
-            "DEVICE,TYPE,STATE,CONNECTION",
-            "device",
-            "status",
-        ]
-    )
-    for row in _parse_nmcli_table(result.stdout, ["device", "type", "state", "connection"]):
-        if row["device"] != DEFAULT_INTERFACE:
+
+    result = _run([
+        "nmcli",
+        "-t",
+        "-f",
+        "DEVICE,STATE,CONNECTION",
+        "device",
+        "status",
+    ])
+
+    for line in result.stdout.splitlines():
+        parts = line.split(":")
+
+        if parts[0] != DEFAULT_INTERFACE:
             continue
-        is_connected = row["state"] == "connected"
-        connection = row["connection"] if row["connection"] != "--" else ""
+
+        state = parts[1]
+        connection = parts[2] if len(parts) > 2 else ""
+
         return {
-            "interface": row["device"],
-            "state": row["state"],
-            "connected": is_connected,
-            "connection": connection,
+            "interface": DEFAULT_INTERFACE,
+            "state": state,
+            "connected": state == "connected",
+            "connection": connection if connection != "--" else "",
             "hotspot_active": connection == DEFAULT_HOTSPOT_CONNECTION,
         }
+
     return {
         "interface": DEFAULT_INTERFACE,
         "state": "missing",
@@ -115,60 +163,63 @@ def get_wifi_status() -> dict[str, Any]:
     }
 
 
+# =========================================================
+# CONNECTED WIFI DETAILS
+# =========================================================
 def get_connected_wifi_details() -> dict[str, Any]:
     ensure_wifi_radio()
-    active_result = _run_command(
-        [
-            "nmcli",
-            "-t",
-            "-f",
-            "ACTIVE,SSID,SIGNAL,SECURITY",
-            "dev",
-            "wifi",
-            "list",
-            "ifname",
-            DEFAULT_INTERFACE,
-        ]
-    )
-    for row in _parse_nmcli_table(active_result.stdout, ["active", "ssid", "signal", "security"]):
-        if row["active"] != "yes":
+
+    result = _run([
+        "nmcli",
+        "-t",
+        "-f",
+        "ACTIVE,SSID,SIGNAL,SECURITY",
+        "dev",
+        "wifi",
+        "list",
+        "ifname",
+        DEFAULT_INTERFACE,
+    ])
+
+    for line in result.stdout.splitlines():
+        parts = line.split(":")
+
+        if parts[0] != "yes":
             continue
+
+        signal = int(parts[2]) if parts[2].isdigit() else 0
+
         return {
             "connected": True,
-            "connected_ssid": row["ssid"].strip(),
-            "signal_strength": _safe_int(row["signal"], 0),
-            "rssi": int((_safe_int(row["signal"], 0) / 2) - 100),
-            "is_secured": bool(row["security"].strip() and row["security"].strip() != "--"),
+            "connected_ssid": parts[1],
+            "signal_strength": signal,
+            "rssi": int((signal / 2) - 100),
+            "is_secured": parts[3] != "--",
         }
 
-    status = get_wifi_status()
     return {
         "connected": False,
-        "connected_ssid": status["connection"] if status["connected"] else "",
+        "connected_ssid": "",
         "signal_strength": 0,
         "rssi": -100,
         "is_secured": False,
     }
 
 
-def is_wifi_connected() -> bool:
-    status = get_wifi_status()
-    return bool(status["connected"] and not status["hotspot_active"])
+# =========================================================
+# HOTSPOT MODE (DEVICE PROVISIONING)
+# =========================================================
+def start_hotspot() -> dict[str, Any]:
+    ensure_wifi_radio()
 
+    _run(["nmcli", "connection", "down", DEFAULT_HOTSPOT_CONNECTION], check=False)
 
-def stop_hotspot() -> None:
-    _run_command(["nmcli", "connection", "down", DEFAULT_HOTSPOT_CONNECTION], check=False)
-
-
-def ensure_hotspot_connection() -> None:
-    existing_connections = _run_command(
+    existing = _run(
         ["nmcli", "-t", "-f", "NAME", "connection", "show"]
     ).stdout.splitlines()
-    if DEFAULT_HOTSPOT_CONNECTION in existing_connections:
-        return
 
-    _run_command(
-        [
+    if DEFAULT_HOTSPOT_CONNECTION not in existing:
+        _run([
             "nmcli",
             "connection",
             "add",
@@ -178,67 +229,84 @@ def ensure_hotspot_connection() -> None:
             DEFAULT_INTERFACE,
             "con-name",
             DEFAULT_HOTSPOT_CONNECTION,
-            "autoconnect",
-            "no",
             "ssid",
             DEFAULT_HOTSPOT_SSID,
-        ]
-    )
-    _run_command(
-        [
+        ])
+
+        _run([
             "nmcli",
             "connection",
             "modify",
             DEFAULT_HOTSPOT_CONNECTION,
             "802-11-wireless.mode",
             "ap",
-            "802-11-wireless.band",
-            "bg",
             "ipv4.method",
             "shared",
-            "ipv4.addresses",
-            DEFAULT_HOTSPOT_IP,
             "wifi-sec.key-mgmt",
             "wpa-psk",
             "wifi-sec.psk",
             DEFAULT_HOTSPOT_PASSWORD,
-        ]
-    )
+        ])
 
+    result = _run(["nmcli", "connection", "up", DEFAULT_HOTSPOT_CONNECTION])
 
-def start_hotspot() -> dict[str, Any]:
-    ensure_wifi_radio()
-    ensure_hotspot_connection()
-    result = _run_command(["nmcli", "connection", "up", DEFAULT_HOTSPOT_CONNECTION])
     return {
         "status": "hotspot_enabled",
         "ssid": DEFAULT_HOTSPOT_SSID,
-        "connection": DEFAULT_HOTSPOT_CONNECTION,
         "details": result.stdout.strip(),
     }
 
 
+def stop_hotspot() -> None:
+    _run(["nmcli", "connection", "down", DEFAULT_HOTSPOT_CONNECTION], check=False)
+
+
+# =========================================================
+# CONNECT WIFI (MQTT COMMAND ENTRYPOINT)
+# =========================================================
 def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
     ensure_wifi_radio()
+
     stop_hotspot()
+    time.sleep(1)  # avoid nmcli race condition
 
-    _run_command(["nmcli", "connection", "delete", ssid], check=False)
+    _run(["nmcli", "connection", "delete", ssid], check=False)
 
-    command = ["nmcli", "dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE]
+    cmd = ["nmcli", "dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE]
+
     if password:
-        command.extend(["password", password])
+        cmd += ["password", password]
 
-    result = _run_command(command)
-    connection = get_connected_wifi_details()
+    result = _run(cmd)
+
+    if not _wait_for_connection(ssid):
+        raise WifiCommandError(f"Connection verification failed for {ssid}")
+
     return {
         "status": "connected",
         "ssid": ssid,
         "details": result.stdout.strip(),
-        "connection": connection,
+        "connection": get_connected_wifi_details(),
     }
 
 
+# =========================================================
+# DISCONNECT
+# =========================================================
 def disconnect_wifi() -> dict[str, Any]:
-    _run_command(["nmcli", "device", "disconnect", DEFAULT_INTERFACE], check=False)
+    _run(["nmcli", "device", "disconnect", DEFAULT_INTERFACE], check=False)
+
     hotspot = start_hotspot()
-    return {"status": "disconnected", "hotspot": hotspot}
+
+    return {
+        "status": "disconnected",
+        "hotspot": hotspot,
+    }
+
+
+# =========================================================
+# HEALTH CHECK
+# =========================================================
+def is_wifi_connected() -> bool:
+    status = get_wifi_status()
+    return status["connected"] and not status["hotspot_active"]
