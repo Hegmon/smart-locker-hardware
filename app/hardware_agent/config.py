@@ -45,8 +45,9 @@ class AgentConfig:
     mqtt_port: int
     mqtt_keepalive: int
     mqtt_command_topic: str
-    mqtt_event_topic: str
-    mqtt_status_topic: str
+    mqtt_result_topic: str
+    mqtt_scan_topic: str
+    mqtt_state_topic: str
 
     # -------- INTERVALS --------
     scan_interval_seconds: int
@@ -99,8 +100,9 @@ def load_agent_config() -> AgentConfig:
 
     # ✅ MQTT TOPICS (VERY IMPORTANT FOR SCALE)
     mqtt_command_topic = f"devices/{resolved_device_id}/command"
-    mqtt_event_topic = f"devices/{resolved_device_id}/events"
-    mqtt_status_topic = f"devices/{resolved_device_id}/status"
+    mqtt_result_topic = f"devices/{resolved_device_id}/command/result"
+    mqtt_scan_topic = f"devices/{resolved_device_id}/wifi/scan"
+    mqtt_state_topic = f"devices/{resolved_device_id}/wifi/state"
 
     return AgentConfig(
         # -------- DEVICE --------
@@ -114,8 +116,9 @@ def load_agent_config() -> AgentConfig:
         mqtt_port=1883,
         mqtt_keepalive=60,
         mqtt_command_topic=mqtt_command_topic,
-        mqtt_event_topic=mqtt_event_topic,
-        mqtt_status_topic=mqtt_status_topic,
+        mqtt_result_topic=mqtt_result_topic,
+        mqtt_scan_topic=mqtt_scan_topic,
+        mqtt_state_topic=mqtt_state_topic,
 
         # -------- INTERVALS --------
         scan_interval_seconds=_clamp(QBOX_WIFI_AGENT_SCAN_INTERVAL_SECONDS, 15),
