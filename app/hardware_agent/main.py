@@ -31,6 +31,8 @@ class WifiUploadAgent:
             port=config.mqtt_port,
             client_id=config.device_id,
             keepalive=config.mqtt_keepalive,
+            username=config.mqtt_username,
+            password=config.mqtt_password,
         )
 
         self.scanner = WifiScanner(config.interface)
