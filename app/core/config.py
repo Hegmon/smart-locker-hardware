@@ -19,8 +19,8 @@ QBOX_DEVICE_NAME = os.getenv("QBOX_DEVICE_NAME", os.getenv("HOSTNAME", "QboxPi4"
 MQTT_HOST = os.getenv("MQTT_HOST", "69.62.125.223")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_KEEPALIVE = int(os.getenv("MQTT_KEEPALIVE", "60"))
-MQTT_USERNAME = os.getenv("MQTT_USERNAME", "admin")
-MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "Hassoo1234")
+MQTT_USERNAME = os.getenv("MQTT_USERNAME", "qbox")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "strongpassword123")
 
 QBOX_DEVICE_REGISTRATION_URL = os.getenv(
     "QBOX_DEVICE_REGISTRATION_URL",
