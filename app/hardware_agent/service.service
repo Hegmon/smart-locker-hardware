@@ -1,20 +1,43 @@
 [Unit]
-Description=Smart Locker Hardware Agent
-After=network.target
+Description=Smart Locker Hardware Agent (MQTT + WiFi)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
+
 User=hegmon
 Group=hegmon
-WorkingDirectory=/home/hegmon/Documents/smart-locker-hardware
-ExecStart=/home/hegmon/Documents/smart-locker-hardware/.venv/bin/python -m app.hardware_agent.main
+WorkingDirectory=/opt/smart-locker-hardware
+
+ExecStart=/opt/smart-locker-hardware/.venv/bin/python -m app.hardware_agent.main
+
 Restart=always
-RestartSec=5
+RestartSec=3
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
-# important for file access stability
-UMask=0022
+Environment="PYTHONUNBUFFERED=1"
+Environment="MQTT_HOST=127.0.0.1"
+Environment="MQTT_PORT=1883"
+Environment="DEVICE_MODE=production"
+Environment="DJANGO_API_BASE=https://backend.qbox.sa"
 
-Environment=PYTHONUNBUFFERED=1
+# 🔥 IMPORTANT FOR PI WIFI CONTROL
+LimitNOFILE=65535
+NoNewPrivileges=true
+
+# FIX: required for nmcli + network control
+ProtectSystem=false
+ProtectHome=false
+
+PrivateTmp=true
+
+# allow network + dbus access (IMPORTANT for nmcli)
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
