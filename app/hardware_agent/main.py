@@ -297,6 +297,12 @@ class WifiUploadAgent:
             "connected_ssid": connected.get("connected_ssid"),
             "networks": [n.to_payload() for n in networks],
         }
+        # informative log for operator visibility
+        try:
+            ssids = [n.ssid for n in networks]
+        except Exception:
+            ssids = []
+        print(f"[PUBLISH SCAN] device={self.config.device_id} state={self.network_state} connected={connected.get('connected_ssid')} networks={ssids}")
 
         self.mqtt.publish(self.config.mqtt_scan_topic, payload)
 
@@ -312,6 +318,8 @@ class WifiUploadAgent:
             "state": self.network_state,
             "connected_ssid": connected.get("connected_ssid"),
         }
+        # informative log for operator visibility
+        print(f"[PUBLISH STATUS] device={self.config.device_id} state={self.network_state} connected={connected.get('connected_ssid')}")
 
         self.mqtt.publish(self.config.mqtt_state_topic, payload)
 
@@ -330,8 +338,9 @@ class WifiUploadAgent:
         self._last_connected_ssid = connected.get("connected_ssid")
         self._last_state = self.network_state
 
-        # publish both on startup
+        # publish both on startup (with logs)
         try:
+            print("[INITIAL PUBLISH] publishing initial scan and status")
             self.publish_wifi_scan()
         except Exception as e:
             print(f"[INITIAL SCAN ERROR] {e}")
@@ -350,6 +359,7 @@ class WifiUploadAgent:
         if current_ssids != self._last_scan_ssids:
             self._last_scan_ssids = current_ssids
             try:
+                print(f"[PUBLISH SCAN][CHANGED] device={self.config.device_id} ssids={list(current_ssids)} connected={connected.get('connected_ssid')}")
                 payload = {
                     "device_id": self.config.device_id,
                     "timestamp": utc_now(),
@@ -367,6 +377,7 @@ class WifiUploadAgent:
             self._last_connected_ssid = current_connected
             self._last_state = self.network_state
             try:
+                print(f"[PUBLISH STATUS][CHANGED] device={self.config.device_id} state={self.network_state} connected={current_connected}")
                 payload = {
                     "device_id": self.config.device_id,
                     "timestamp": utc_now(),
