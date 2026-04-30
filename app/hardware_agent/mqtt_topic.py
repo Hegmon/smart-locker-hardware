@@ -1,11 +1,8 @@
-def command_topic(device_id: str):
-    return f"devices/{device_id}/command"
+def request(device_id:str,service:str):
+    return f"devices/{device_id}/services/{service}/request"
 
-def scan_topic(device_id: str):
-    return f"devices/{device_id}/wifi/scan"
+def response(device_id:str,service:str):
+    return f"devices/{device_id}/services/{service}/response"
 
-def state_topic(device_id: str):
-    return f"devices/{device_id}/wifi/state"
-
-def result_topic(device_id: str):
-    return f"devices/{device_id}/command/result"
+def event(device_id:str,event:str):
+    return f"devices/{device_id}/events/{event}"
