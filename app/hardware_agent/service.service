@@ -1,7 +1,7 @@
 [Unit]
-Description=Smart Locker Hardware Agent (MQTT + WiFi)
-After=network-online.target
-Wants=network-online.target
+Description=Smart Locker Hardware Agent (MQTT + WiFi + BLE Fallback)
+After=network-online.target NetworkManager.service dbus.service bluetooth.service
+Wants=network-online.target NetworkManager.service bluetooth.service
 
 [Service]
 Type=simple
@@ -15,27 +15,61 @@ ExecStart=/opt/smart-locker-hardware/.venv/bin/python -m app.hardware_agent.main
 Restart=always
 RestartSec=3
 StartLimitIntervalSec=300
-StartLimitBurst=10
+StartLimitBurst=20
 
+# =========================================================
+# ENVIRONMENT
+# =========================================================
 Environment="PYTHONUNBUFFERED=1"
-Environment="MQTT_HOST=127.0.0.1"
+Environment="MQTT_HOST=69.62.125.223"
 Environment="MQTT_PORT=1883"
 Environment="DEVICE_MODE=production"
 Environment="DJANGO_API_BASE=https://backend.qbox.sa"
 
-# 🔥 IMPORTANT FOR PI WIFI CONTROL
-LimitNOFILE=65535
-NoNewPrivileges=true
+# =========================================================
+# SYSTEM ACCESS (CRITICAL FOR WIFI + BLE)
+# =========================================================
 
-# FIX: required for nmcli + network control
+# allow nmcli + network control
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+
+# allow DBus communication (needed for nmcli + BlueZ)
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+
+# DO NOT restrict system access (WiFi + BLE need it)
 ProtectSystem=false
 ProtectHome=false
 
+# allow temporary files
 PrivateTmp=true
 
-# allow network + dbus access (IMPORTANT for nmcli)
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+# allow network stack control
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
+# =========================================================
+# BLUETOOTH + NETWORK PERMISSIONS
+# =========================================================
+
+# required for BlueZ GATT + advertisement
+DeviceAllow=/dev/rfkill rw
+DeviceAllow=/dev/ttyAMA0 rw
+
+# allow system hardware access
+PrivateDevices=false
+
+# =========================================================
+# RELIABILITY (VERY IMPORTANT)
+# =========================================================
+
+Restart=always
+RestartSec=2
+
+# prevent crash loop during WiFi fallback
+StartLimitIntervalSec=0
+
+# =========================================================
+# OUTPUT
+# =========================================================
 StandardOutput=journal
 StandardError=journal
 
