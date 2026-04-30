@@ -65,6 +65,10 @@ class WifiUploadAgent:
 
         self.network_state = NetworkState.DISCONNECTED
         self.last_good_ssid: str | None = None
+        # last published state to avoid duplicate MQTT messages
+        self._last_scan_ssids: set[str] = set()
+        self._last_connected_ssid: str | None = None
+        self._last_state: str | None = None
 
         self.mqtt.register_command_handler(self.handle_command)
 
@@ -82,10 +86,14 @@ class WifiUploadAgent:
         threading.Thread(target=self._watchdog_loop, daemon=True).start()
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
         threading.Thread(target=self._scan_loop, daemon=True).start()
-        # fast telemetry: publish scan + connected state every 5 seconds
-        threading.Thread(target=self._fast_telemetry_loop, daemon=True).start()
 
         print("[AGENT] Running...")
+
+        # initial publish on first run
+        try:
+            self._initial_publish()
+        except Exception as e:
+            print(f"[INITIAL PUBLISH ERROR] {e}")
 
         while True:
             time.sleep(1)
@@ -100,7 +108,7 @@ class WifiUploadAgent:
                 ssid = status.get("connected_ssid")
 
                 if ssid:
-                
+                    # became connected
                     self.last_good_ssid = ssid
                     self.network_state = NetworkState.CONNECTED
 
@@ -108,8 +116,15 @@ class WifiUploadAgent:
                     self._stop_ble()
 
                 else:
+                    # lost connection
                     print("[WATCHDOG] No WiFi → recovery triggered")
                     self._recover_connection()
+
+                # publish on state or connected_ssid change
+                try:
+                    self._maybe_publish_status(status)
+                except Exception as e:
+                    print(f"[WATCHDOG PUBLISH ERROR] {e}")
 
             except Exception as e:
                 print(f"[WATCHDOG ERROR] {e}")
@@ -175,7 +190,9 @@ class WifiUploadAgent:
 
         while self._running:
             try:
-                self.publish_wifi_scan()
+                networks = self.scanner.scan()
+                connected = get_connected_wifi_details()
+                self._maybe_publish_scan(networks, connected)
             except Exception as e:
                 print(f"[SCAN ERROR] {e}")
 
@@ -299,6 +316,68 @@ class WifiUploadAgent:
         self.mqtt.publish(self.config.mqtt_state_topic, payload)
 
     # =========================================================
+    # CHANGE-DRIVEN PUBLISH HELPERS
+    # =========================================================
+    def _initial_publish(self) -> None:
+        networks = self.scanner.scan()
+        connected = get_connected_wifi_details()
+
+        # set last-knowns so subsequent change detection works
+        try:
+            self._last_scan_ssids = {n.ssid for n in networks}
+        except Exception:
+            self._last_scan_ssids = set()
+        self._last_connected_ssid = connected.get("connected_ssid")
+        self._last_state = self.network_state
+
+        # publish both on startup
+        try:
+            self.publish_wifi_scan()
+        except Exception as e:
+            print(f"[INITIAL SCAN ERROR] {e}")
+
+        try:
+            self.publish_status()
+        except Exception as e:
+            print(f"[INITIAL STATUS ERROR] {e}")
+
+    def _maybe_publish_scan(self, networks: list[object], connected: dict[str, Any]) -> None:
+        # compare ssid sets
+        try:
+            current_ssids = {n.ssid for n in networks}
+        except Exception:
+            current_ssids = set()
+        if current_ssids != self._last_scan_ssids:
+            self._last_scan_ssids = current_ssids
+            try:
+                payload = {
+                    "device_id": self.config.device_id,
+                    "timestamp": utc_now(),
+                    "state": self.network_state,
+                    "connected_ssid": connected.get("connected_ssid"),
+                    "networks": [n.to_payload() for n in networks],
+                }
+                self.mqtt.publish(self.config.mqtt_scan_topic, payload)
+            except Exception as e:
+                print(f"[PUBLISH SCAN ERROR] {e}")
+
+    def _maybe_publish_status(self, connected: dict[str, Any]) -> None:
+        current_connected = connected.get("connected_ssid")
+        if current_connected != self._last_connected_ssid or self.network_state != self._last_state:
+            self._last_connected_ssid = current_connected
+            self._last_state = self.network_state
+            try:
+                payload = {
+                    "device_id": self.config.device_id,
+                    "timestamp": utc_now(),
+                    "state": self.network_state,
+                    "connected_ssid": current_connected,
+                }
+                self.mqtt.publish(self.config.mqtt_state_topic, payload)
+            except Exception as e:
+                print(f"[PUBLISH STATUS ERROR] {e}")
+
+    # =========================================================
     # RESULT
     # =========================================================
     def publish_command_result(
@@ -325,23 +404,8 @@ class WifiUploadAgent:
     # FAST TELEMETRY (5s)
     # =========================================================
     def _fast_telemetry_loop(self) -> None:
-        # independent loop that publishes wifi scan and connected state every 5 seconds
-        while self._running:
-            try:
-                try:
-                    self.publish_wifi_scan()
-                except Exception as e:
-                    print(f"[FAST SCAN ERROR] {e}")
+        pass
 
-                try:
-                    self.publish_status()
-                except Exception as e:
-                    print(f"[FAST STATUS ERROR] {e}")
-
-            except Exception as e:
-                print(f"[FAST TELEMETRY ERROR] {e}")
-
-            time.sleep(5)
 
 
 # =========================================================
