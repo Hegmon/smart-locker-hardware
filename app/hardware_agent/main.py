@@ -82,6 +82,8 @@ class WifiUploadAgent:
         threading.Thread(target=self._watchdog_loop, daemon=True).start()
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
         threading.Thread(target=self._scan_loop, daemon=True).start()
+        # fast telemetry: publish scan + connected state every 5 seconds
+        threading.Thread(target=self._fast_telemetry_loop, daemon=True).start()
 
         print("[AGENT] Running...")
 
@@ -318,6 +320,28 @@ class WifiUploadAgent:
         }
 
         self.mqtt.publish(self.config.mqtt_command_result_topic, payload)
+
+    # =========================================================
+    # FAST TELEMETRY (5s)
+    # =========================================================
+    def _fast_telemetry_loop(self) -> None:
+        # independent loop that publishes wifi scan and connected state every 5 seconds
+        while self._running:
+            try:
+                try:
+                    self.publish_wifi_scan()
+                except Exception as e:
+                    print(f"[FAST SCAN ERROR] {e}")
+
+                try:
+                    self.publish_status()
+                except Exception as e:
+                    print(f"[FAST STATUS ERROR] {e}")
+
+            except Exception as e:
+                print(f"[FAST TELEMETRY ERROR] {e}")
+
+            time.sleep(5)
 
 
 # =========================================================
