@@ -1,0 +1,128 @@
+
+# ========================
+# 🐍 Python
+# ========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+
+*.pyc
+*.so
+
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ========================
+# 🧪 Virtual Environments
+# ========================
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# ========================
+# 🧠 Python tooling
+# ========================
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ========================
+# ⚙️ FastAPI / Uvicorn
+# ========================
+*.log
+logs/
+uvicorn.log
+
+# ========================
+# 📡 MQTT / IoT runtime logs
+# ========================
+mqtt_logs/
+dead_letter_queue/
+*.mqttlog
+
+# ========================
+# 🔐 Secrets / Environment
+# ========================
+.env
+.env.*
+!.env.example
+
+# ========================
+# 🧰 OS / System files (IMPORTANT for Pi4)
+# ========================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Linux temp files
+*~
+*.bak
+*.tmp
+
+# ========================
+# 🧠 IDE / Editor
+# ========================
+.vscode/
+.idea/
+*.iml
+
+# ========================
+# 🔧 Raspberry Pi / system artifacts
+# ========================
+*.service.bak
+*.service.tmp
+
+# systemd overrides
+/etc/systemd/system/*.d/
+
+# ========================
+# 🔥 BLE / NetworkManager runtime artifacts
+# ========================
+*.nmconnection
+NetworkManager.state
+
+# ========================
+# 📦 Node / optional tooling (if used later)
+# ========================
+node_modules/
+
+# ========================
+# 🧪 Test artifacts
+# ========================
+tests/__pycache__/
+pytest-results.xml
+
+# ========================
+# 🚀 Deployment / build outputs
+# ========================
+*.tar.gz
+*.zip
+output/
+release/
+
+# ========================
+# 🔥 Logs (global catch-all)
+# ========================
+*.log
