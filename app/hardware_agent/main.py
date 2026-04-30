@@ -9,26 +9,46 @@ from typing import Any
 from app.hardware_agent.config import load_agent_config, AgentConfig
 from app.hardware_agent.mqtt_client import MqttClient
 from app.hardware_agent.scanner import WifiScanner
+
+from app.hardware_agent.provisioning.ble.server import BLEServer
+
 from app.services.wifi_manager import (
     connect_wifi,
     get_connected_wifi_details,
+    start_hotspot,
+    reconnect_saved_wifi,
     WifiCommandError,
 )
 
 
-# ---------------- TIME ----------------
+# =========================================================
+# TIME
+# =========================================================
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# ---------------- AGENT ----------------
+# =========================================================
+# NETWORK STATE
+# =========================================================
+class NetworkState:
+    CONNECTED = "CONNECTED"
+    DISCONNECTED = "DISCONNECTED"
+    BLE = "BLE_PROVISIONING"
+    HOTSPOT = "HOTSPOT"
+
+
+# =========================================================
+# AGENT
+# =========================================================
 class WifiUploadAgent:
+
     def __init__(self, config: AgentConfig):
         self.config = config
 
         self.mqtt = MqttClient(
             host=config.mqtt_host,
-            port=config.mqtt_port,
+            port=config.mqtt_port,  
             client_id=config.device_id,
             keepalive=config.mqtt_keepalive,
             username=config.mqtt_username,
@@ -37,56 +57,119 @@ class WifiUploadAgent:
 
         self.scanner = WifiScanner(config.interface)
 
-        self._running = False
+        # ✅ BLE
+        self.ble = BLEServer(config.interface)
 
-        # runtime state
-        self._last_scan_hash = None
+        self._running = False
         self._processed_commands: set[str] = set()
+
+        self.network_state = NetworkState.DISCONNECTED
+        self.last_good_ssid: str | None = None
 
         self.mqtt.register_command_handler(self.handle_command)
 
-    # ---------------- START ----------------
+    # =========================================================
+    # START
+    # =========================================================
     def start(self):
-        print("[AGENT] Starting MQTT agent...")
+        print("[AGENT] Starting Smart Locker Agent")
 
         self.mqtt.connect()
-
-        # 🔥 IMPORTANT: give MQTT time to connect
         time.sleep(2)
 
         self._running = True
 
-        # jitter prevents device storm when scaling 100+ devices
-        scan_jitter = random.randint(0, 5)
-        heartbeat_jitter = random.randint(0, 5)
-
-        threading.Thread(
-            target=self._scan_loop,
-            args=(scan_jitter,),
-            daemon=True
-        ).start()
-
-        threading.Thread(
-            target=self._heartbeat_loop,
-            args=(heartbeat_jitter,),
-            daemon=True
-        ).start()
+        threading.Thread(target=self._watchdog_loop, daemon=True).start()
+        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
+        threading.Thread(target=self._scan_loop, daemon=True).start()
 
         print("[AGENT] Running...")
 
+        while True:
+            time.sleep(1)
+
+    # =========================================================
+    # WATCHDOG (CORE OF SYSTEM)
+    # =========================================================
+    def _watchdog_loop(self):
+        while self._running:
+            try:
+                status = get_connected_wifi_details()
+                ssid = status.get("connected_ssid")
+
+                if ssid:
+                
+                    self.last_good_ssid = ssid
+                    self.network_state = NetworkState.CONNECTED
+
+                    # stop BLE if running
+                    self._stop_ble()
+
+                else:
+                    print("[WATCHDOG] No WiFi → recovery triggered")
+                    self._recover_connection()
+
+            except Exception as e:
+                print(f"[WATCHDOG ERROR] {e}")
+
+            time.sleep(10)
+
+    # =========================================================
+    # RECOVERY ENGINE (CRITICAL)
+    # =========================================================
+    def _recover_connection(self):
+        #  Try previous WiFi
+        if self.last_good_ssid:
+            try:
+                print(f"[RECOVERY] Trying previous WiFi: {self.last_good_ssid}")
+                reconnect_saved_wifi(self.last_good_ssid)
+                return
+            except Exception as e:
+                print(f"[RECOVERY] Previous WiFi failed: {e}")
+
+        # Start BLE provisioning
+        print("[RECOVERY] Starting BLE provisioning")
+        self.network_state = NetworkState.BLE
+        self._start_ble()
+
+        # Wait some time for user provisioning
+        time.sleep(60)
+
+        # Check again
+        status = get_connected_wifi_details()
+        if status.get("connected_ssid"):
+            print("[RECOVERY] Connected via BLE provisioning")
+            return
+
+        #  Fallback to Hotspot
+        print("[RECOVERY] BLE failed → starting hotspot")
         try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("[AGENT] Shutting down...")
-            self._running = False
-            self.mqtt.disconnect()
+            hotspot = start_hotspot()
+            self.network_state = NetworkState.HOTSPOT
+            print(f"[HOTSPOT] {hotspot}")
+        except Exception as e:
+            print(f"[HOTSPOT ERROR] {e}")
 
-    # ---------------- SCAN LOOP ----------------
-    def _scan_loop(self, jitter: int):
-        time.sleep(jitter)
+    # =========================================================
+    # BLE CONTROL
+    # =========================================================
+    def _start_ble(self):
+        try:
+            threading.Thread(target=self.ble.start, daemon=True).start()
+        except Exception as e:
+            print(f"[BLE ERROR] {e}")
 
-        print("[SCAN] loop started")
+    def _stop_ble(self):
+        try:
+            self.ble.stop()
+        except Exception:
+            pass
+
+    # =========================================================
+    # SCAN LOOP
+    # =========================================================
+    def _scan_loop(self):
+        time.sleep(random.randint(0, 5))
 
         while self._running:
             try:
@@ -96,11 +179,11 @@ class WifiUploadAgent:
 
             time.sleep(self.config.scan_interval_seconds)
 
-    # ---------------- HEARTBEAT LOOP ----------------
-    def _heartbeat_loop(self, jitter: int):
-        time.sleep(jitter)
-
-        print("[HEARTBEAT] loop started")
+    # =========================================================
+    # HEARTBEAT
+    # =========================================================
+    def _heartbeat_loop(self):
+        time.sleep(random.randint(0, 5))
 
         while self._running:
             try:
@@ -110,100 +193,112 @@ class WifiUploadAgent:
 
             time.sleep(self.config.heartbeat_seconds)
 
-    # ---------------- COMMAND HANDLER ----------------
+    # =========================================================
+    # COMMAND HANDLER (MQTT)
+    # =========================================================
     def handle_command(self, payload: dict[str, Any], topic: str):
         command_id = payload.get("command_id")
 
-        if not command_id:
-            return
-
-        # 🔥 prevent duplicate execution (MQTT QoS1 safe)
-        if command_id in self._processed_commands:
-            print(f"[AGENT] Duplicate command ignored: {command_id}")
+        if not command_id or command_id in self._processed_commands:
             return
 
         self._processed_commands.add(command_id)
 
-        event_type = payload.get("event_type")
-        data = payload.get("payload", {})
+        service = payload.get("service")
+        data = payload.get("data", {})
 
-        print(f"[COMMAND] {event_type}")
+        if service == "wifi.connect":
+            self._handle_wifi_connect(command_id, data)
 
-        if event_type == "CONNECT_WIFI":
-            self._handle_connect_wifi(command_id, data)
-
-    # ---------------- WIFI CONNECT ----------------
-    def _handle_connect_wifi(self, command_id: str, data: dict[str, Any]):
+    # =========================================================
+    # WIFI CONNECT (REMOTE COMMAND)
+    # =========================================================
+    def _handle_wifi_connect(self, command_id: str, data: dict[str, Any]):
         ssid = data.get("ssid")
         password = data.get("password")
 
-        print(f"[AGENT] Connecting to WiFi: {ssid}")
+        previous = get_connected_wifi_details().get("connected_ssid")
+
         try:
             result = connect_wifi(ssid, password)
 
-            self.publish_command_result(
-                command_id=command_id,
-                status="SUCCESS",
-                ssid=ssid,
-                message="Connected successfully",
-                details=result,
-            )
+            self.last_good_ssid = ssid
+            self.network_state = NetworkState.CONNECTED
 
-            # Update status immediately after connecting
-            self.publish_status()
-
-        except WifiCommandError as e:
             self.publish_command_result(
                 command_id,
-                "FAILED",
+                "SUCCESS",
                 ssid,
-                str(e),
-                None,
+                "Connected",
+                result,
             )
+            return
 
-    # ---------------- WIFI SCAN ----------------
+        except WifiCommandError as e:
+            print(f"[CONNECT ERROR] {e}")
+
+        # fallback to previous
+        if previous and previous != ssid:
+            try:
+                reconnect_saved_wifi(previous)
+
+                self.publish_command_result(
+                    command_id,
+                    "SUCCESS",
+                    previous,
+                    "Fallback to previous WiFi",
+                    {"fallback": True},
+                )
+                return
+            except Exception:
+                pass
+
+        # final fallback → BLE (not hotspot directly)
+        self._start_ble()
+
+        self.publish_command_result(
+            command_id,
+            "FAILED",
+            ssid,
+            "Failed → switched to BLE provisioning",
+            None,
+        )
+
+    # =========================================================
+    # WIFI SCAN
+    # =========================================================
     def publish_wifi_scan(self):
         networks = self.scanner.scan()
         connected = get_connected_wifi_details()
 
-        current_hash = hash(tuple((n.ssid, n.rssi) for n in networks))
-
-        if current_hash == self._last_scan_hash:
-            return
-
-        self._last_scan_hash = current_hash
-
         payload = {
             "device_id": self.config.device_id,
-            "device_uuid": self.config.device_uuid,
             "timestamp": utc_now(),
+            "state": self.network_state,
             "connected_ssid": connected.get("connected_ssid"),
-            "signal_strength": connected.get("signal_strength"),
             "networks": [n.to_payload() for n in networks],
         }
 
-        print(f"[SCAN] publishing {len(networks)} networks")
-
         self.mqtt.publish(self.config.mqtt_scan_topic, payload)
 
-    # ---------------- STATUS ----------------
+    # =========================================================
+    # STATUS
+    # =========================================================
     def publish_status(self):
         connected = get_connected_wifi_details()
 
         payload = {
             "device_id": self.config.device_id,
-            "device_uuid": self.config.device_uuid,
             "timestamp": utc_now(),
-            "status": "ONLINE",
+            "state": self.network_state,
             "connected_ssid": connected.get("connected_ssid"),
-            "signal_strength": connected.get("signal_strength"),
-            "rssi": connected.get("rssi"),
         }
 
         self.mqtt.publish(self.config.mqtt_state_topic, payload)
-        print(f"[AGENT] Published status: {payload}")
 
-    # ---------------- COMMAND RESULT ----------------
+    # =========================================================
+    # RESULT
+    # =========================================================
     def publish_command_result(
         self,
         command_id: str,
@@ -225,7 +320,9 @@ class WifiUploadAgent:
         self.mqtt.publish(self.config.mqtt_command_result_topic, payload)
 
 
-# ---------------- ENTRYPOINT ----------------
+# =========================================================
+# ENTRYPOINT
+# =========================================================
 def main():
     config = load_agent_config()
     agent = WifiUploadAgent(config)
