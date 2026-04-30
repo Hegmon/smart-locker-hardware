@@ -13,7 +13,7 @@ User=root
 WorkingDirectory=/opt/smart-locker-hardware
 
 Environment=PYTHONUNBUFFERED=1
-Environment=MQTT_HOST=127.0.0.1
+Environment=MQTT_HOST=69.62.125.223
 Environment=MQTT_PORT=1883
 
 ExecStart=/opt/smart-locker-hardware/.venv/bin/python -m app.hardware_agent.main
