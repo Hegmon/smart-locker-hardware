@@ -73,6 +73,11 @@ class AgentConfig:
     mqtt_event_wifi: str
     mqtt_event_state: str
     mqtt_event_scan: str
+    # compatibility/topic aliases used by WifiUploadAgent
+    mqtt_command_topic: str
+    mqtt_command_result_topic: str
+    mqtt_scan_topic: str
+    mqtt_state_topic: str
 
     # -------- INTERVALS --------
     scan_interval_seconds: int
@@ -138,6 +143,11 @@ def load_agent_config() -> AgentConfig:
         mqtt_event_wifi=mqtt_event_wifi,
         mqtt_event_state=mqtt_event_state,
         mqtt_event_scan=mqtt_event_scan,
+        # compatibility/topic aliases used by WifiUploadAgent
+        mqtt_command_topic=f"devices/{device_uuid}/command",
+        mqtt_command_result_topic=f"devices/{device_uuid}/command/result",
+        mqtt_scan_topic=mqtt_event_scan,
+        mqtt_state_topic=mqtt_event_state,
 
         # -------- INTERVALS --------
         scan_interval_seconds=_clamp(QBOX_WIFI_AGENT_SCAN_INTERVAL_SECONDS, 15),
