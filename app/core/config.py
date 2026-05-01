@@ -143,6 +143,7 @@ def load_agent_config() -> AgentConfig:
 
     base_url = QBOX_WIFI_AGENT_BASE_URL
 
+    print(f"[DEBUG] MQTT_HOST: {MQTT_HOST}, MQTT_USERNAME: {MQTT_USERNAME}, device_id: {resolved_device_id}")
     return AgentConfig(
         base_url=base_url,
         device_uuid=resolved_device_uuid,
