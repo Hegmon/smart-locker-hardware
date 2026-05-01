@@ -279,6 +279,10 @@ def is_wifi_connectd() -> bool:
     return status["connected"] and not status["hotspot_active"]
 
 
+def is_wifi_connected() -> bool:
+    return is_wifi_connectd()
+
+
 # =========================================================
 # SCAN NETWORKS
 # =========================================================
