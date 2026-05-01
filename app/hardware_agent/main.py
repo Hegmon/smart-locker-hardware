@@ -82,6 +82,7 @@ class WifiUploadAgent:
         self.last_good_ssid: str | None = None
         self._last_connected_ssid: str | None = None
         self._last_scan_ssids: set[str] = set()
+        self._last_scan_connected_ssid: str | None = None
         self._last_status_signature: tuple[str, str | None] | None = None
 
         self.mqtt.register_command_handler(self.handle_command)
@@ -90,6 +91,7 @@ class WifiUploadAgent:
     def start(self):
         logger.info("Starting Smart Locker hardware agent")
         self.mqtt.connect()
+        self.mqtt.wait_until_connected(timeout_seconds=3.0)
         self._running = True
 
         threading.Thread(target=self._watchdog_loop, daemon=True, name="wifi-watchdog").start()
@@ -144,11 +146,13 @@ class WifiUploadAgent:
                 self.last_good_ssid = connected_ssid
                 self._last_connected_ssid = connected_ssid
                 self._hotspot_active = False
-            self._transition_to(
+            transitioned = self._transition_to(
                 NetworkState.CONNECTED,
                 reason=f"WiFi connected via {source}",
                 connected_ssid=connected_ssid,
             )
+            if transitioned:
+                self._publish_connectivity_snapshot(status)
             return
 
         with self._state_lock:
@@ -170,18 +174,18 @@ class WifiUploadAgent:
             self.publish_status(connected=status, force=False)
             return
 
-        self._transition_to(
+        transitioned = self._transition_to(
             NetworkState.CONNECTED,
             reason=f"BLE provisioned WiFi {ssid}",
             connected_ssid=ssid,
         )
-        self.publish_status(
-            connected={
-                "connected_ssid": ssid,
-                "connected": True,
-            },
-            force=False,
-        )
+        if transitioned:
+            self._publish_connectivity_snapshot(
+                {
+                    "connected_ssid": ssid,
+                    "connected": True,
+                }
+            )
 
     def _handle_mqtt_reconnect_pressure(self):
         with self._state_lock:
@@ -422,16 +426,7 @@ class WifiUploadAgent:
         }
 
     def publish_wifi_scan(self):
-        networks = self.scanner.scan()
-        connected = get_connected_wifi_details()
-        payload = {
-            "device_id": self.config.device_id,
-            "timestamp": utc_now(),
-            "state": self._snapshot().state,
-            "connected_ssid": connected.get("connected_ssid"),
-            "networks": [network.to_payload() for network in networks],
-        }
-        self.mqtt.publish(self.config.mqtt_scan_topic, payload)
+        self._publish_wifi_scan_payload(self.scanner.scan(), get_connected_wifi_details())
 
     def publish_status(self, connected: dict[str, Any] | None = None, force: bool = False):
         connected = connected or get_connected_wifi_details()
@@ -459,20 +454,18 @@ class WifiUploadAgent:
 
     def _maybe_publish_scan(self, networks: list[object], connected: dict[str, Any]):
         current_ssids = {network.ssid for network in networks}
+        current_connected_ssid = connected.get("connected_ssid")
 
         with self._state_lock:
-            if current_ssids == self._last_scan_ssids:
+            if (
+                current_ssids == self._last_scan_ssids
+                and current_connected_ssid == self._last_scan_connected_ssid
+            ):
                 return
             self._last_scan_ssids = current_ssids
+            self._last_scan_connected_ssid = current_connected_ssid
 
-        payload = {
-            "device_id": self.config.device_id,
-            "timestamp": utc_now(),
-            "state": self._snapshot().state,
-            "connected_ssid": connected.get("connected_ssid"),
-            "networks": [network.to_payload() for network in networks],
-        }
-        self.mqtt.publish(self.config.mqtt_scan_topic, payload)
+        self._publish_wifi_scan_payload(networks, connected)
 
     def _build_status_payload(self, connected: dict[str, Any]) -> dict[str, Any]:
         snapshot = self._snapshot()
@@ -482,6 +475,29 @@ class WifiUploadAgent:
             "state": snapshot.state,
             "connected_ssid": connected.get("connected_ssid"),
         }
+
+    def _publish_connectivity_snapshot(self, connected: dict[str, Any]):
+        self.publish_status(connected=connected, force=True)
+        try:
+            networks = self.scanner.scan()
+        except Exception:
+            logger.exception("WiFi scan failed during connect snapshot publish")
+            return
+
+        with self._state_lock:
+            self._last_scan_ssids = {network.ssid for network in networks}
+            self._last_scan_connected_ssid = connected.get("connected_ssid")
+        self._publish_wifi_scan_payload(networks, connected)
+
+    def _publish_wifi_scan_payload(self, networks: list[object], connected: dict[str, Any]):
+        payload = {
+            "device_id": self.config.device_id,
+            "timestamp": utc_now(),
+            "state": self._snapshot().state,
+            "connected_ssid": connected.get("connected_ssid"),
+            "networks": [network.to_payload() for network in networks],
+        }
+        self.mqtt.publish(self.config.mqtt_scan_topic, payload)
 
     def publish_command_result(
         self,
