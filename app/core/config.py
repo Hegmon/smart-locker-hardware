@@ -155,6 +155,6 @@ def load_agent_config() -> AgentConfig:
 
         mqtt_command_topic=f"devices/{resolved_device_id}/command",
         mqtt_command_result_topic=f"devices/{resolved_device_id}/command/result",
-        mqtt_scan_topic=f"devices/{resolved_device_id}/wifi/scan",
-        mqtt_state_topic=f"devices/{resolved_device_id}/wifi/state",
+        mqtt_scan_topic=f"devices/{resolved_device_id}/events/scan",
+        mqtt_state_topic=f"devices/{resolved_device_id}/events/state",
     )
