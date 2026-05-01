@@ -5,6 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
 
+# MQTT values (can be overridden in environment)
+MQTT_HOST="${MQTT_HOST:-69.62.125.223}"
+MQTT_PORT="${MQTT_PORT:-1883}"
+
 FASTAPI_UNIT_TMP="$(mktemp)"
 WIFI_UNIT_TMP="$(mktemp)"
 WIFI_UPLOAD_UNIT_TMP="$(mktemp)"
@@ -119,6 +123,37 @@ echo "⚙️ Installing systemd services..."
 sed "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$PROJECT_DIR/app/systemmd/fastapi.service" > "$FASTAPI_UNIT_TMP"
 sed "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$PROJECT_DIR/app/systemmd/wifi-reconnect.service" > "$WIFI_UNIT_TMP"
 sed "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$PROJECT_DIR/app/systemmd/wifi-upload-agent.service" > "$WIFI_UPLOAD_UNIT_TMP"
+
+# Inject/overwrite MQTT env vars into unit files so services use the desired broker
+for f in "$FASTAPI_UNIT_TMP" "$WIFI_UNIT_TMP" "$WIFI_UPLOAD_UNIT_TMP"; do
+  if grep -q "Environment=MQTT_HOST" "$f"; then
+    sed -i "s|Environment=MQTT_HOST=.*|Environment=MQTT_HOST=$MQTT_HOST|" "$f" || true
+  else
+    sed -i "/Environment=PYTHONUNBUFFERED=1/a Environment=MQTT_HOST=$MQTT_HOST" "$f" || true
+  fi
+
+  if grep -q "Environment=MQTT_PORT" "$f"; then
+    sed -i "s|Environment=MQTT_PORT=.*|Environment=MQTT_PORT=$MQTT_PORT|" "$f" || true
+  else
+    sed -i "/Environment=MQTT_HOST=$MQTT_HOST/a Environment=MQTT_PORT=$MQTT_PORT" "$f" || true
+  fi
+done
+
+# Also update the in-repo agent service file so it's consistent for manual installs
+AGENT_SERVICE_SRC="$PROJECT_DIR/app/hardware_agent/service.service"
+if [ -f "$AGENT_SERVICE_SRC" ]; then
+  if grep -q "Environment=MQTT_HOST" "$AGENT_SERVICE_SRC"; then
+    sed -i "s|Environment=MQTT_HOST=.*|Environment=MQTT_HOST=$MQTT_HOST|" "$AGENT_SERVICE_SRC" || true
+  else
+    sed -i "/Environment=PYTHONUNBUFFERED=1/a Environment=MQTT_HOST=$MQTT_HOST" "$AGENT_SERVICE_SRC" || true
+  fi
+
+  if grep -q "Environment=MQTT_PORT" "$AGENT_SERVICE_SRC"; then
+    sed -i "s|Environment=MQTT_PORT=.*|Environment=MQTT_PORT=$MQTT_PORT|" "$AGENT_SERVICE_SRC" || true
+  else
+    sed -i "/Environment=MQTT_HOST=$MQTT_HOST/a Environment=MQTT_PORT=$MQTT_PORT" "$AGENT_SERVICE_SRC" || true
+  fi
+fi
 
 sudo cp "$FASTAPI_UNIT_TMP" /etc/systemd/system/fastapi.service
 sudo cp "$WIFI_UNIT_TMP" /etc/systemd/system/wifi-reconnect.service
