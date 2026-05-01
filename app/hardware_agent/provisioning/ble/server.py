@@ -38,7 +38,6 @@ class Application(dbus.service.Object):
         for service in self.services:
             response[service.path] = service.get_properties()
 
-            # include characteristics
             for char in [service.command_char, service.response_char]:
                 response[char.path] = char.get_properties()
 
@@ -53,11 +52,15 @@ class BLEServer:
         self.interface = interface
         self.handler = BLEHandler(interface)
 
+        # Set the default DBus main loop once at import/init time.
+        # It must be set before any dbus objects are created.
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 
         self.bus = dbus.SystemBus()
-        self.loop = GLib.MainLoop()
 
+        # FIX 1: Do NOT create GLib.MainLoop here.
+        # It is created fresh inside start() so the server is restartable.
+        self.loop: GLib.MainLoop | None = None
         self.advertisement = None
 
     # -----------------------------------------------------
@@ -65,6 +68,11 @@ class BLEServer:
     # -----------------------------------------------------
     def start(self):
         print("[BLE] Initializing BLE server...")
+
+        # FIX 1: Recreate the MainLoop every time start() is called so that
+        # calling stop() + start() again works correctly. A GLib.MainLoop
+        # that has been quit() cannot be restarted — a new one is required.
+        self.loop = GLib.MainLoop()
 
         adapter = self._get_adapter()
 
@@ -141,11 +149,15 @@ class BLEServer:
                 )
 
                 print("[BLE] Advertisement unregistered")
+                self.advertisement = None
 
         except Exception as e:
             print(f"[BLE STOP ERROR] {e}")
 
-        self.loop.quit()
+        # FIX 1: Guard against stop() being called before start() has
+        # created the loop (e.g. if an exception fires early).
+        if self.loop and self.loop.is_running():
+            self.loop.quit()
 
     # -----------------------------------------------------
     # INTERNAL
