@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Callable
 
 import paho.mqtt.client as mqtt
@@ -33,10 +34,13 @@ class MqttClient:
         self._running = True
         self._connected = False
         self._connection_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
         self._processed_lock = threading.Lock()
         self._processed_commands: list[str] = []
         self._processed_command_set: set[str] = set()
         self._fallback_notified = False
+        self._pending_messages: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._max_pending_messages = 100
 
         self._command_handler: Callable[[dict[str, Any], str], dict[str, Any] | None] | None = None
         self._ble_fallback_handler: Callable[[], None] | None = None
@@ -77,17 +81,14 @@ class MqttClient:
 
     def publish(self, topic: str, payload: dict[str, Any]) -> bool:
         if not self.is_connected():
-            logger.warning("MQTT publish skipped while disconnected: %s", topic)
+            self._queue_publish(topic, payload)
             return False
 
         try:
-            result = self.client.publish(topic, json.dumps(payload), qos=1)
-            if result.rc != mqtt.MQTT_ERR_SUCCESS:
-                logger.warning("MQTT publish returned rc=%s for topic %s", result.rc, topic)
-                return False
-            return True
+            return self._publish_now(topic, payload)
         except Exception:
             logger.exception("MQTT publish failed for topic %s", topic)
+            self._queue_publish(topic, payload)
             return False
 
     def register_command_handler(self, handler: Callable[[dict[str, Any], str], dict[str, Any] | None]):
@@ -107,6 +108,7 @@ class MqttClient:
 
         client.subscribe("devices/+/services/+/request", qos=1)
         logger.info("MQTT connected to %s:%s", self.host, self.port)
+        self._flush_pending_messages()
 
     def _on_disconnect(self, client, userdata, rc):
         with self._connection_lock:
@@ -189,3 +191,45 @@ class MqttClient:
                     self._processed_command_set.discard(expired)
 
             return False
+
+    def wait_until_connected(self, timeout_seconds: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if self.is_connected():
+                return True
+            time.sleep(0.1)
+        return self.is_connected()
+
+    def _publish_now(self, topic: str, payload: dict[str, Any]) -> bool:
+        result = self.client.publish(topic, json.dumps(payload), qos=1)
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            logger.warning("MQTT publish returned rc=%s for topic %s", result.rc, topic)
+            return False
+        return True
+
+    def _queue_publish(self, topic: str, payload: dict[str, Any]):
+        with self._pending_lock:
+            if topic in self._pending_messages:
+                self._pending_messages.pop(topic)
+            self._pending_messages[topic] = payload
+
+            while len(self._pending_messages) > self._max_pending_messages:
+                self._pending_messages.popitem(last=False)
+        logger.info("MQTT queued publish while disconnected: %s", topic)
+
+    def _flush_pending_messages(self):
+        while True:
+            with self._pending_lock:
+                if not self._pending_messages:
+                    return
+                topic, payload = self._pending_messages.popitem(last=False)
+
+            try:
+                published = self._publish_now(topic, payload)
+            except Exception:
+                logger.exception("MQTT pending publish failed for topic %s", topic)
+                published = False
+
+            if not published:
+                self._queue_publish(topic, payload)
+                return
