@@ -58,24 +58,33 @@ sudo systemctl enable NetworkManager
 sudo systemctl start NetworkManager
 
 echo "🐍 Creating Python virtual environment..."
-python3 -m venv "$VENV_DIR"
+if [ -d "$VENV_DIR" ]; then
+  echo "ℹ️ Virtualenv already exists at $VENV_DIR"
+else
+  echo "🐍 Creating virtualenv at $VENV_DIR"
+  python3 -m venv "$VENV_DIR"
+fi
 
-echo "⬆️ Upgrading pip..."
-"$VENV_DIR/bin/pip" install --upgrade pip setuptools wheel
+echo "⬆️ Activating virtualenv and upgrading pip..."
+# shellcheck source=/dev/null
+source "$VENV_DIR/bin/activate"
+python -m pip install --upgrade pip setuptools wheel
 
 echo "📦 Installing Python requirements..."
-"$VENV_DIR/bin/pip" install -r "$PROJECT_DIR/requirements.txt"
+if [ -f "$PROJECT_DIR/requirements.txt" ]; then
+  pip install --no-cache-dir -r "$PROJECT_DIR/requirements.txt"
+else
+  echo "⚠️ requirements.txt not found at $PROJECT_DIR/requirements.txt — skipping Python deps"
+fi
 
-echo "⚠️ Installing DBus Python bindings (Pi-safe method)..."
-sudo apt-get install -y python3-dbus || true
+echo "⚠️ Ensuring DBus and Python DBus bindings are installed (avoid common DBus errors)"
+sudo apt-get install -y dbus-user-session python3-dbus python3-dev || true
 
-echo "🧩 Installing optional BLE Python support..."
-"$VENV_DIR/bin/pip" install \
-  paho-mqtt \
-  requests \
-  pydbus \
-  gobject \
-  dbus-python || true
+echo "🧩 Installing optional Python extras (BLE/MQTT) into virtualenv"
+pip install --no-cache-dir paho-mqtt requests pydbus dbus-python || true
+
+echo "🔐 Enable systemd user lingering so user services can run without a user session"
+sudo loginctl enable-linger "$(whoami)" || true
 
 echo "⚙️ Installing systemd services..."
 
