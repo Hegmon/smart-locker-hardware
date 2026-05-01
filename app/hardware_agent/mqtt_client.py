@@ -58,9 +58,25 @@ class MqttClient:
     # PUBLIC API
     # =========================================================
     def connect(self):
-        self.client.connect(self.host, self.port, self.keepalive)
-        self.client.loop_start()
+        # Use non-blocking connect to avoid blocking the main thread when MQTT host is unreachable.
+        try:
+            # start network loop first
+            self.client.loop_start()
+            # connect asynchronously (won't block)
+            self.client.connect_async(self.host, self.port, self.keepalive)
 
+        except Exception as e:
+            print(f"[MQTT] connect_async failed: {e} — falling back to background blocking connect")
+
+            def _blocking_connect():
+                try:
+                    self.client.connect(self.host, self.port, self.keepalive)
+                except Exception as ex:
+                    print(f"[MQTT] background connect failed: {ex}")
+
+            threading.Thread(target=_blocking_connect, daemon=True).start()
+
+        # watchdog monitors connection state and triggers BLE fallback on persistent failure
         threading.Thread(target=self._watchdog, daemon=True).start()
 
     def disconnect(self):
@@ -163,7 +179,15 @@ class MqttClient:
             if not self._connected:
                 try:
                     print("[MQTT] Reconnecting...")
-                    self.client.reconnect()
+                    # prefer non-blocking reconnect where possible
+                    try:
+                        self.client.reconnect()
+                    except Exception:
+                        # reconnect() can block or fail; attempt async connect as fallback
+                        try:
+                            self.client.connect_async(self.host, self.port, self.keepalive)
+                        except Exception as ex:
+                            print(f"[MQTT] reconnect/connect_async failed: {ex}")
 
                 except Exception:
                     # =================================================
