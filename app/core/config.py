@@ -5,8 +5,6 @@ from pathlib import Path
 from dataclasses import dataclass
 
 from app.services.backend_state import load_backend_state
-
-
 # ---------------- BASIC SYSTEM CONFIG ----------------
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("APP_PORT", "8000"))
