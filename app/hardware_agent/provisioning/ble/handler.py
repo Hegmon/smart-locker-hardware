@@ -1,4 +1,4 @@
-from typing import Dict, Any
+from typing import Any, Callable, Dict
 
 from app.services.wifi_manager import connect_wifi, get_connected_wifi_details
 from app.hardware_agent.scanner import WifiScanner
@@ -6,8 +6,13 @@ from app.hardware_agent.provisioning.ble.protocol import parse_ble_request
 
 
 class BLEHandler:
-    def __init__(self, interface: str):
+    def __init__(
+        self,
+        interface: str,
+        on_wifi_connected: Callable[[str], None] | None = None,
+    ):
         self.scanner = WifiScanner(interface)
+        self._on_wifi_connected = on_wifi_connected
 
     # ===================== ENTRY =====================
     def handle(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -47,6 +52,11 @@ class BLEHandler:
 
         try:
             result = connect_wifi(ssid, password)
+            if self._on_wifi_connected:
+                try:
+                    self._on_wifi_connected(ssid)
+                except Exception:
+                    pass
 
             return {
                 "status": "success",
