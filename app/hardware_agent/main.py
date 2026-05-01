@@ -48,7 +48,7 @@ class WifiUploadAgent:
 
         self.mqtt = MqttClient(
             host=config.mqtt_host,
-            port=config.mqtt_port,  
+            port=config.mqtt_port,
             client_id=config.device_id,
             keepalive=config.mqtt_keepalive,
             username=config.mqtt_username,
@@ -57,7 +57,6 @@ class WifiUploadAgent:
 
         self.scanner = WifiScanner(config.interface)
 
-        # ✅ BLE
         self.ble = BLEServer(config.interface)
 
         self._running = False
@@ -65,10 +64,15 @@ class WifiUploadAgent:
 
         self.network_state = NetworkState.DISCONNECTED
         self.last_good_ssid: str | None = None
-        # last published state to avoid duplicate MQTT messages
+
         self._last_scan_ssids: set[str] = set()
         self._last_connected_ssid: str | None = None
         self._last_state: str | None = None
+
+        # FIX 2: Track whether a recovery is already in progress so the
+        # watchdog never launches two overlapping recovery attempts.
+        self._recovery_in_progress = False
+        self._recovery_lock = threading.Lock()
 
         self.mqtt.register_command_handler(self.handle_command)
 
@@ -89,7 +93,6 @@ class WifiUploadAgent:
 
         print("[AGENT] Running...")
 
-        # initial publish on first run
         try:
             self._initial_publish()
         except Exception as e:
@@ -108,19 +111,25 @@ class WifiUploadAgent:
                 ssid = status.get("connected_ssid")
 
                 if ssid:
-                    # became connected
                     self.last_good_ssid = ssid
                     self.network_state = NetworkState.CONNECTED
-
-                    # stop BLE if running
                     self._stop_ble()
 
                 else:
-                    # lost connection
-                    print("[WATCHDOG] No WiFi → recovery triggered")
-                    self._recover_connection()
+                    # FIX 2: Only launch recovery if one is not already
+                    # running. This keeps the watchdog loop unblocked —
+                    # recovery runs in its own background thread.
+                    with self._recovery_lock:
+                        if not self._recovery_in_progress:
+                            self._recovery_in_progress = True
+                            print("[WATCHDOG] No WiFi → recovery triggered")
+                            threading.Thread(
+                                target=self._recover_connection,
+                                daemon=True,
+                            ).start()
+                        else:
+                            print("[WATCHDOG] No WiFi — recovery already running, skipping")
 
-                # publish on state or connected_ssid change
                 try:
                     self._maybe_publish_status(status)
                 except Exception as e:
@@ -135,37 +144,56 @@ class WifiUploadAgent:
     # RECOVERY ENGINE (CRITICAL)
     # =========================================================
     def _recover_connection(self):
-        #  Try previous WiFi
-        if self.last_good_ssid:
-            try:
-                print(f"[RECOVERY] Trying previous WiFi: {self.last_good_ssid}")
-                reconnect_saved_wifi(self.last_good_ssid)
-                return
-            except Exception as e:
-                print(f"[RECOVERY] Previous WiFi failed: {e}")
-
-        # Start BLE provisioning
-        print("[RECOVERY] Starting BLE provisioning")
-        self.network_state = NetworkState.BLE
-        self._start_ble()
-
-        # Wait some time for user provisioning
-        time.sleep(60)
-
-        # Check again
-        status = get_connected_wifi_details()
-        if status.get("connected_ssid"):
-            print("[RECOVERY] Connected via BLE provisioning")
-            return
-
-        #  Fallback to Hotspot
-        print("[RECOVERY] BLE failed → starting hotspot")
+        # FIX 2: Wrap the entire recovery in a try/finally so the flag is
+        # always cleared — even if an unexpected exception is raised — and
+        # the watchdog can trigger recovery again on the next cycle.
         try:
-            hotspot = start_hotspot()
-            self.network_state = NetworkState.HOTSPOT
-            print(f"[HOTSPOT] {hotspot}")
-        except Exception as e:
-            print(f"[HOTSPOT ERROR] {e}")
+            # Step 1: try the last known good WiFi
+            if self.last_good_ssid:
+                try:
+                    print(f"[RECOVERY] Trying previous WiFi: {self.last_good_ssid}")
+                    reconnect_saved_wifi(self.last_good_ssid)
+
+                    status = get_connected_wifi_details()
+                    if status.get("connected_ssid"):
+                        print("[RECOVERY] Reconnected to previous WiFi")
+                        self.network_state = NetworkState.CONNECTED
+                        return
+                except Exception as e:
+                    print(f"[RECOVERY] Previous WiFi failed: {e}")
+
+            # Step 2: BLE provisioning
+            print("[RECOVERY] Starting BLE provisioning")
+            self.network_state = NetworkState.BLE
+            self._start_ble()
+
+            # FIX 2: Poll every 5 s instead of sleeping the full 60 s in
+            # one block. This means successful provisioning is detected
+            # within 5 s and the recovery thread exits early.
+            for _ in range(12):          # 12 × 5 s = 60 s total budget
+                time.sleep(5)
+                status = get_connected_wifi_details()
+                if status.get("connected_ssid"):
+                    print("[RECOVERY] Connected via BLE provisioning")
+                    self.network_state = NetworkState.CONNECTED
+                    self._stop_ble()
+                    return
+
+            # Step 3: fallback to hotspot
+            print("[RECOVERY] BLE timed out → starting hotspot")
+            self._stop_ble()
+            try:
+                hotspot = start_hotspot()
+                self.network_state = NetworkState.HOTSPOT
+                print(f"[HOTSPOT] {hotspot}")
+            except Exception as e:
+                print(f"[HOTSPOT ERROR] {e}")
+
+        finally:
+            # Always release the lock so the watchdog can start a new
+            # recovery attempt if the device is still offline.
+            with self._recovery_lock:
+                self._recovery_in_progress = False
 
     # =========================================================
     # BLE CONTROL
@@ -272,7 +300,7 @@ class WifiUploadAgent:
             except Exception:
                 pass
 
-        # final fallback → BLE (not hotspot directly)
+        # final fallback → BLE
         self._start_ble()
 
         self.publish_command_result(
@@ -297,7 +325,7 @@ class WifiUploadAgent:
             "connected_ssid": connected.get("connected_ssid"),
             "networks": [n.to_payload() for n in networks],
         }
-        # informative log for operator visibility
+
         try:
             ssids = [n.ssid for n in networks]
         except Exception:
@@ -318,7 +346,6 @@ class WifiUploadAgent:
             "state": self.network_state,
             "connected_ssid": connected.get("connected_ssid"),
         }
-        # informative log for operator visibility
         print(f"[PUBLISH STATUS] device={self.config.device_id} state={self.network_state} connected={connected.get('connected_ssid')}")
 
         self.mqtt.publish(self.config.mqtt_state_topic, payload)
@@ -330,7 +357,6 @@ class WifiUploadAgent:
         networks = self.scanner.scan()
         connected = get_connected_wifi_details()
 
-        # set last-knowns so subsequent change detection works
         try:
             self._last_scan_ssids = {n.ssid for n in networks}
         except Exception:
@@ -338,7 +364,6 @@ class WifiUploadAgent:
         self._last_connected_ssid = connected.get("connected_ssid")
         self._last_state = self.network_state
 
-        # publish both on startup (with logs)
         try:
             print("[INITIAL PUBLISH] publishing initial scan and status")
             self.publish_wifi_scan()
@@ -351,7 +376,6 @@ class WifiUploadAgent:
             print(f"[INITIAL STATUS ERROR] {e}")
 
     def _maybe_publish_scan(self, networks: list[object], connected: dict[str, Any]) -> None:
-        # compare ssid sets
         try:
             current_ssids = {n.ssid for n in networks}
         except Exception:
@@ -416,7 +440,6 @@ class WifiUploadAgent:
     # =========================================================
     def _fast_telemetry_loop(self) -> None:
         pass
-
 
 
 # =========================================================
