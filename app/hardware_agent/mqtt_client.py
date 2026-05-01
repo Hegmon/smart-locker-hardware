@@ -86,9 +86,12 @@ class MqttClient:
 
     def publish(self, topic: str, payload: dict):
         if not self._connected:
+            print(f"[MQTT] Not connected, skipping publish to {topic}")
             return
 
-        self.client.publish(topic, json.dumps(payload), qos=1)
+        print(f"[MQTT] Publishing to {topic}: {json.dumps(payload)[:200]}...")
+        result = self.client.publish(topic, json.dumps(payload), qos=1)
+        print(f"[MQTT] Publish result: {result.rc}")
 
     # =========================================================
     # HANDLER REGISTRATION
@@ -115,7 +118,7 @@ class MqttClient:
             # service-based subscription (CLEAN ARCH)
             client.subscribe("devices/+/services/+/request", qos=1)
 
-            print("[MQTT] Connected & subscribed")
+            print(f"[MQTT] Connected to {self.host}:{self.port} & subscribed")
 
         else:
             print(f"[MQTT] Connection failed rc={rc}")
