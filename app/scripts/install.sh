@@ -23,6 +23,8 @@ sudo apt-get install -y \
   python3 \
   python3-venv \
   python3-pip \
+  python3-dev \
+  python3-gi \
   build-essential \
   pkg-config \
   git \
@@ -31,6 +33,8 @@ sudo apt-get install -y \
   dbus \
   libdbus-1-dev \
   libdbus-glib-1-dev \
+  libffi-dev \
+  libssl-dev \
   bluez \
   bluetooth \
   rfkill \
@@ -78,10 +82,34 @@ else
 fi
 
 echo "⚠️ Ensuring DBus and Python DBus bindings are installed (avoid common DBus errors)"
-sudo apt-get install -y dbus-user-session python3-dbus python3-dev || true
+sudo apt-get install -y dbus-user-session python3-dbus || true
 
 echo "🧩 Installing optional Python extras (BLE/MQTT) into virtualenv"
-pip install --no-cache-dir paho-mqtt requests pydbus dbus-python || true
+pip install --no-cache-dir paho-mqtt requests pydbus || true
+
+# Ensure the `dbus` module is importable in the virtualenv. Try pip install first,
+# if that fails recreate the venv with --system-site-packages to use system python3-dbus.
+echo "🔎 Verifying Python 'dbus' module availability in the venv"
+if python -c "import dbus" >/dev/null 2>&1; then
+  echo "✅ 'dbus' module is available in the venv"
+else
+  echo "⚠️ 'dbus' not found in venv — attempting pip install dbus-python"
+  if pip install --no-cache-dir dbus-python >/dev/null 2>&1; then
+    echo "✅ Successfully installed dbus-python into venv"
+  else
+    echo "❗ pip install dbus-python failed — recreating venv with system-site-packages"
+    deactivate >/dev/null 2>&1 || true
+    rm -rf "$VENV_DIR"
+    python3 -m venv --system-site-packages "$VENV_DIR"
+    # shellcheck source=/dev/null
+    source "$VENV_DIR/bin/activate"
+    if python -c "import dbus" >/dev/null 2>&1; then
+      echo "✅ 'dbus' available via system-site-packages"
+    else
+      echo "❌ 'dbus' still not importable — check system python3-dbus installation"
+    fi
+  fi
+fi
 
 echo "🔐 Enable systemd user lingering so user services can run without a user session"
 sudo loginctl enable-linger "$(whoami)" || true
