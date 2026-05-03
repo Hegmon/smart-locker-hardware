@@ -8,3 +8,14 @@ DEVICE_ID=QBOX-001
 # Optional: device UUID as registered in Django backend
 # If set, it must match the backend registration.
 DEVICE_UUID=abc123-def456-ghi789
+
+# Optional: public playback endpoint returned by the streaming agent.
+# Use this when the backend/mobile app should not use the Pi LAN IP directly.
+# Examples:
+# STREAM_PUBLIC_HOST=backend.qbox.sa
+# STREAM_PUBLIC_SCHEME=https
+# STREAM_PUBLIC_PORT=443
+# STREAM_PUBLIC_BASE_PATH=
+#
+# If you reverse proxy MediaMTX under a path, set it here:
+# STREAM_PUBLIC_BASE_PATH=/media
