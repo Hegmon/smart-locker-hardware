@@ -34,7 +34,7 @@ from .device_config import get_device_config
 from .ffmpeg_manager import FFmpegManager
 from .mqtt_handler import StreamingMQTTClient
 from .stream_verifier import StreamVerifier
-from .urls import build_hls_url, build_rtsp_url, get_lan_ip_address
+from .urls import build_hls_url, build_rtsp_url
 
 
 class StreamingAgent:
@@ -45,10 +45,17 @@ class StreamingAgent:
         self._device_config = get_device_config()
         self.device_id = self._device_config["device_id"]
         self.device_uuid = self._device_config.get("device_uuid", "")
+        self.mediamtx_host = self._device_config.get("mediamtx_host") or "127.0.0.1"
+        self.mediamtx_rtsp_port = self._safe_int(
+            self._device_config.get("mediamtx_rtsp_port"),
+            8554,
+        )
         
         logger.info("Initializing Streaming Agent")
         logger.info("  device_id: %s", self.device_id)
         logger.info("  device_uuid: %s", self.device_uuid or "(not set)")
+        logger.info("  mediamtx_host: %s", self.mediamtx_host)
+        logger.info("  mediamtx_rtsp_port: %s", self.mediamtx_rtsp_port)
         
         # Components
         self.detector = CameraDetector()
@@ -66,6 +73,15 @@ class StreamingAgent:
         if val is None:
             return default
         return val.strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _safe_int(value: object, default: int) -> int:
+        try:
+            if value in (None, ""):
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
     
     def initialize(self) -> None:
         """Initialize all components"""
@@ -83,6 +99,8 @@ class StreamingAgent:
         # 2. Initialize FFmpeg manager
         self.ffmpeg_manager = FFmpegManager(
             device_id=self.device_id,
+            mediamtx_host=self.mediamtx_host,
+            rtsp_port=self.mediamtx_rtsp_port,
             on_stream_status_change=self._on_stream_status_change
         )
         
@@ -90,9 +108,12 @@ class StreamingAgent:
         for cam_type, cam_info in cameras.items():
             self.ffmpeg_manager.add_stream(cam_type, cam_info.device_path)
         
-        # 3. Initialize stream verifier (always use LAN IP for on-device HLS checks)
-        lan_ip = get_lan_ip_address()
-        self.verifier = StreamVerifier(device_id=self.device_id, mediamtx_host=lan_ip)
+        # 3. Initialize verifier using configured RTSP publish target and public HLS URL.
+        self.verifier = StreamVerifier(
+            device_id=self.device_id,
+            mediamtx_host=self.mediamtx_host,
+            rtsp_port=self.mediamtx_rtsp_port,
+        )
         
         # 4. Initialize MQTT client if device_uuid available
         if self.device_uuid:
