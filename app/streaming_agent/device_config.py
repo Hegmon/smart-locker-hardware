@@ -1,11 +1,12 @@
 """
-Device Identity Configuration
-Reads device_id and device_uuid from app/config/backend_device.json.
-Also supports /etc/qbox-device.conf override.
+Device and stream configuration helpers.
+Reads identity from app/config/backend_device.json and optional overrides
+from /etc/qbox-device.conf.
 """
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 
@@ -53,6 +54,25 @@ def _load_override() -> dict[str, str]:
     return result
 
 
+def get_optional_config(key: str, default: str = "") -> str:
+    """Read an optional config value from override or backend state."""
+    override = _load_override()
+    state = _load_backend_json()
+
+    value = (
+        os.getenv(key.upper())
+        or os.getenv(key.lower())
+        or
+        override.get(key.upper())
+        or override.get(key.lower())
+        or state.get(key)
+        or state.get(key.upper())
+    )
+    if value is None:
+        return default
+    return str(value).strip()
+
+
 def load_device_id() -> str:
     """
     Load device_id from backend state or config override.
@@ -85,7 +105,7 @@ def get_device_config() -> dict[str, str]:
     Get full device configuration.
     
     Returns:
-        {"device_id": str, "device_uuid": str}
+        {"device_id": str, "device_uuid": str, ...optional stream config}
     """
     override = _load_override()
     state = _load_backend_json()
@@ -110,4 +130,8 @@ def get_device_config() -> dict[str, str]:
     return {
         "device_id": str(device_id).strip(),
         "device_uuid": str(device_uuid).strip(),
+        "stream_public_host": get_optional_config("STREAM_PUBLIC_HOST"),
+        "stream_public_scheme": get_optional_config("STREAM_PUBLIC_SCHEME"),
+        "stream_public_port": get_optional_config("STREAM_PUBLIC_PORT"),
+        "stream_public_base_path": get_optional_config("STREAM_PUBLIC_BASE_PATH"),
     }
