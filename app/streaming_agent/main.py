@@ -92,7 +92,7 @@ class StreamingAgent:
         # 3. Initialize stream verifier (use LAN IP for HLS checks)
         from .urls import get_lan_ip_address
         lan_ip = get_lan_ip_address()
-        self.verifier = StreamVerifier(device_id=self.device_id, host=lan_ip)
+        self.verifier = StreamVerifier(device_id=self.device_id, mediamtx_host=lan_ip)
         
         # 4. Initialize MQTT client if device_uuid available
         if self.device_uuid:
