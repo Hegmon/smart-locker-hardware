@@ -59,7 +59,6 @@ class StreamingAgent:
         self.auto_start = self._read_bool_env("STREAM_AUTO_START", True)
     
     @staticmethod
-    @staticmethod
     def _read_bool_env(name: str, default: bool = False) -> bool:
         import os
         val = os.getenv(name)
@@ -90,8 +89,10 @@ class StreamingAgent:
         for cam_type, cam_info in cameras.items():
             self.ffmpeg_manager.add_stream(cam_type, cam_info.device_path)
         
-        # 3. Initialize stream verifier
-        self.verifier = StreamVerifier(device_id=self.device_id)
+        # 3. Initialize stream verifier (use LAN IP for HLS checks)
+        from .urls import get_lan_ip_address
+        lan_ip = get_lan_ip_address()
+        self.verifier = StreamVerifier(device_id=self.device_id, host=lan_ip)
         
         # 4. Initialize MQTT client if device_uuid available
         if self.device_uuid:
