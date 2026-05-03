@@ -12,6 +12,10 @@ Environment=PYTHONUNBUFFERED=1
 Environment=STREAM_AUTO_START=true
 Environment=MQTT_HOST=69.62.125.223
 Environment=MQTT_PORT=1883
+# Optional public playback URL override if not using /etc/qbox-device.conf
+# Environment=STREAM_PUBLIC_HOST=backend.qbox.sa
+# Environment=STREAM_PUBLIC_SCHEME=https
+# Environment=STREAM_PUBLIC_PORT=443
 # Uncomment and set if MQTT auth needed
 # Environment=MQTT_USERNAME=qbox
 # Environment=MQTT_PASSWORD=strongpassword123
