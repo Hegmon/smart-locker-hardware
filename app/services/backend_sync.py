@@ -16,6 +16,7 @@ from app.core.config import (
     QBOX_DEVICE_REGISTRATION_URL,
     QBOX_TELEMETRY_URL,
 )
+from app.streaming_agent.device_config import get_optional_config
 from app.services.backend_state import load_backend_state, save_backend_state
 from app.services.hardware_manager import get_camera_inventory, get_system_metrics
 from app.utils.logger import get_logger
@@ -59,9 +60,14 @@ def _build_registration_payload() -> dict[str, Any]:
     version = APP_VERSION
     if not version.startswith('v'):
         version = f"v{version}"
+
+    # Allow the device to advertise a public stream hostname instead of its
+    # private LAN address when the backend generates playback URLs.
+    public_host = get_optional_config("STREAM_PUBLIC_HOST")
+
     return {
         "name": QBOX_DEVICE_NAME,
-        "ip_address": _get_ip_address(),
+        "ip_address": public_host or _get_ip_address(),
         "version": version,
         "is_active": True,
         "status": "Online",
