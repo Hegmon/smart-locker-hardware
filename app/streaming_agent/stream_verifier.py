@@ -15,6 +15,7 @@ from urllib.error import URLError, HTTPError
 import requests
 
 from .constants import VERIFY_TIMEOUT, VERIFY_RETRY_COUNT, MEDIAMTX_HOST, MEDIAMTX_HLS_PORT
+from .urls import build_hls_url, build_rtsp_url
 
 logger = logging.getLogger(__name__)
 
@@ -107,19 +108,26 @@ class StreamVerifier:
         self,
         device_id: str,
         mediamtx_host: str = MEDIAMTX_HOST,
+        rtsp_port: int = 8554,
         hls_port: int = MEDIAMTX_HLS_PORT,
     ):
         self.device_id = device_id
         self.mediamtx_host = mediamtx_host
+        self.rtsp_port = rtsp_port
         self.hls_port = hls_port
     
     def build_hls_url(self, stream_type: str) -> str:
         """Build HLS URL for a stream type"""
-        return f"http://{self.mediamtx_host}:{self.hls_port}/hls/{self.device_id}/{stream_type}/index.m3u8"
+        return build_hls_url(stream_type, device_id=self.device_id)
     
-    def build_rtsp_url(self, stream_type: str, rtsp_port: int = 8554) -> str:
+    def build_rtsp_url(self, stream_type: str) -> str:
         """Build RTSP URL for a stream type"""
-        return f"rtsp://{self.mediamtx_host}:{rtsp_port}/{self.device_id}/{stream_type}"
+        return build_rtsp_url(
+            stream_type,
+            device_id=self.device_id,
+            host=self.mediamtx_host,
+            port=self.rtsp_port,
+        )
     
     def verify_stream(self, stream_type: str) -> Tuple[bool, Optional[str], dict]:
         """
