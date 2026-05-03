@@ -9,8 +9,8 @@ from __future__ import annotations
 import socket
 from typing import Optional
 
+from .device_config import get_optional_config
 from .constants import (
-    HLS_URL_TEMPLATE,
     RTSP_URL_TEMPLATE,
     MEDIAMTX_HOST,
     MEDIAMTX_HLS_PORT,
@@ -18,6 +18,45 @@ from .constants import (
     STREAM_TYPE_INTERNAL,
     STREAM_TYPE_EXTERNAL,
 )
+
+
+def _normalize_base_path(base_path: str) -> str:
+    base_path = (base_path or "").strip()
+    if not base_path:
+        return ""
+    return "/" + base_path.strip("/")
+
+
+def _resolve_stream_endpoint_defaults() -> tuple[str, str, Optional[int], str]:
+    """
+    Resolve the playback endpoint clients should use.
+    Defaults to LAN IP + mediamtx port unless overridden.
+    """
+    scheme = get_optional_config("STREAM_PUBLIC_SCHEME", "http") or "http"
+    host = get_optional_config("STREAM_PUBLIC_HOST") or get_lan_ip_address()
+    port_value = get_optional_config("STREAM_PUBLIC_PORT")
+    base_path = _normalize_base_path(get_optional_config("STREAM_PUBLIC_BASE_PATH"))
+
+    port: Optional[int]
+    if port_value:
+        try:
+            port = int(port_value)
+        except ValueError:
+            port = MEDIAMTX_HLS_PORT
+    else:
+        port = MEDIAMTX_HLS_PORT
+
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        port = None
+
+    return scheme, host, port, base_path
+
+
+def _build_http_base_url(scheme: str, host: str, port: Optional[int], base_path: str = "") -> str:
+    base = f"{scheme}://{host}"
+    if port is not None:
+        base = f"{base}:{port}"
+    return f"{base}{base_path}"
 
 
 def get_lan_ip_address() -> str:
@@ -68,18 +107,19 @@ def build_hls_url(
         from .device_config import load_device_id
         device_id = load_device_id()
     
-    if host is None:
-        host = get_lan_ip_address()
-    
-    if port is None:
-        port = MEDIAMTX_HLS_PORT
-    
-    return HLS_URL_TEMPLATE.format(
-        host=host,
-        port=port,
-        device_id=device_id,
-        stream_type=stream_type,
-    )
+    base_path = ""
+    scheme = "http"
+
+    if host is None and port is None:
+        scheme, host, port, base_path = _resolve_stream_endpoint_defaults()
+    else:
+        if host is None:
+            host = get_lan_ip_address()
+        if port is None:
+            port = MEDIAMTX_HLS_PORT
+
+    base_url = _build_http_base_url(scheme, host, port, base_path)
+    return f"{base_url}/hls/{device_id}/{stream_type}/index.m3u8"
 
 
 def build_rtsp_url(
@@ -135,9 +175,6 @@ def get_all_stream_urls(
     if device_id is None:
         from .device_config import load_device_id
         device_id = load_device_id()
-    
-    if host is None:
-        host = get_lan_ip_address()
     
     result = {}
     for st in [STREAM_TYPE_INTERNAL, STREAM_TYPE_EXTERNAL]:
