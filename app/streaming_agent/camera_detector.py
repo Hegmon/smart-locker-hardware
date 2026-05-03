@@ -15,6 +15,8 @@ import os
 from glob import glob
 from typing import NamedTuple, Optional
 
+from .device_config import get_optional_config
+
 
 class CameraInfo(NamedTuple):
     """Information about a detected camera"""
@@ -27,8 +29,16 @@ class CameraDetector:
     """Detects and classifies cameras for streaming"""
     
     def __init__(self):
-        self.internal_device = os.getenv("INTERNAL_CAMERA_DEVICE", "/dev/video0")
-        self.external_device = os.getenv("EXTERNAL_CAMERA_DEVICE", "/dev/video2")
+        self.internal_device = (
+            os.getenv("INTERNAL_CAMERA_DEVICE")
+            or get_optional_config("INTERNAL_CAMERA_DEVICE")
+            or "/dev/video0"
+        )
+        self.external_device = (
+            os.getenv("EXTERNAL_CAMERA_DEVICE")
+            or get_optional_config("EXTERNAL_CAMERA_DEVICE")
+            or "/dev/video2"
+        )
     
     def detect_cameras(self) -> list[CameraInfo]:
         """
@@ -41,22 +51,23 @@ class CameraDetector:
         if not devices:
             return []
         
-        # If env vars are explicitly set to specific paths, use them
-        if os.getenv("INTERNAL_CAMERA_DEVICE") or os.getenv("EXTERNAL_CAMERA_DEVICE"):
+        # If camera paths are explicitly configured, use them.
+        if self.internal_device or self.external_device:
             result = []
-            if os.getenv("INTERNAL_CAMERA_DEVICE") and os.path.exists(self.internal_device):
+            if self.internal_device and os.path.exists(self.internal_device):
                 result.append(CameraInfo(
                     device_path=self.internal_device,
                     camera_type="internal",
                     index=0
                 ))
-            if os.getenv("EXTERNAL_CAMERA_DEVICE") and os.path.exists(self.external_device):
+            if self.external_device and os.path.exists(self.external_device):
                 result.append(CameraInfo(
                     device_path=self.external_device,
                     camera_type="external",
                     index=1 if result else 0
                 ))
-            return result
+            if result:
+                return result
         
         # Auto-detection based on common Raspberry Pi patterns
         cameras = []
