@@ -11,14 +11,13 @@ DEVICE_UUID=abc123-def456-ghi789
 
 # MediaMTX RTSP publish target.
 # For VPS-backed production streaming, point this to your server.
-# Example:
-# MEDIAMTX_HOST=backend.qbox.sa
-# MEDIAMTX_RTSP_PORT=8554
+MEDIAMTX_HOST=backend.qbox.sa
+MEDIAMTX_RTSP_PORT=8554
 
 # Optional: public playback endpoint returned by the streaming agent.
 # Use this when the backend/mobile app should not use the Pi LAN IP directly.
 # Examples:
-# STREAM_PUBLIC_BASE_URL=https://backend.qbox.sa
+STREAM_PUBLIC_BASE_URL=https://backend.qbox.sa
 # STREAM_PUBLIC_HOST=backend.qbox.sa
 # STREAM_PUBLIC_SCHEME=https
 # STREAM_PUBLIC_PORT=443
