@@ -12,12 +12,9 @@ Environment=PYTHONUNBUFFERED=1
 Environment=STREAM_AUTO_START=true
 Environment=MQTT_HOST=69.62.125.223
 Environment=MQTT_PORT=1883
-# VPS MediaMTX publish target
-# Environment=MEDIAMTX_HOST=backend.qbox.sa
-# Environment=MEDIAMTX_RTSP_PORT=8554
-#
-# Public playback URL returned in MQTT/status responses
-# Environment=STREAM_PUBLIC_BASE_URL=https://backend.qbox.sa
+Environment=MEDIAMTX_HOST=backend.qbox.sa
+Environment=MEDIAMTX_RTSP_PORT=8554
+Environment=STREAM_PUBLIC_BASE_URL=https://backend.qbox.sa
 # Uncomment and set if MQTT auth needed
 # Environment=MQTT_USERNAME=qbox
 # Environment=MQTT_PASSWORD=strongpassword123
