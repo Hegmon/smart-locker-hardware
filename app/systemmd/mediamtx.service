@@ -1,0 +1,23 @@
+[Unit]
+Description=MediaMTX RTSP/HLS Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment=MEDIAMTX_HOME=/etc/mediamtx
+ExecStart=/usr/local/bin/mediamtx -config /etc/mediamtx/mediamtx.yml
+Restart=always
+RestartSec=5
+
+# Allow network binding
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# Output
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
