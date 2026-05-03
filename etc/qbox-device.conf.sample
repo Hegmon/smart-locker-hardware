@@ -1,0 +1,10 @@
+# Qbox Device Configuration
+# This file is read by the streaming agent and other services.
+# Place it at /etc/qbox-device.conf (system-wide)
+
+# Required: unique device identifier used in stream URLs
+DEVICE_ID=QBOX-001
+
+# Optional: device UUID as registered in Django backend
+# If set, it must match the backend registration.
+DEVICE_UUID=abc123-def456-ghi789
