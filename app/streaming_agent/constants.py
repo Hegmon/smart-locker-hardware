@@ -4,7 +4,7 @@
 # MediaMTX ports and host
 MEDIAMTX_RTSP_PORT = 8554
 MEDIAMTX_HLS_PORT = 8888
-MEDIAMTX_HOST = "127.0.0.1"  # Local access; external URL uses LAN IP
+MEDIAMTX_HOST = "backend.qbox.sa"  # Default production RTSP publish target
 
 # Stream URL templates
 HLS_URL_TEMPLATE = "http://{host}:{port}/hls/{device_id}/{stream_type}/index.m3u8"
