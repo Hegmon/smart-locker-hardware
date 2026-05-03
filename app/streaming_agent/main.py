@@ -29,7 +29,7 @@ logger = logging.getLogger("streaming_agent")
 
 # Import components
 from .camera_detector import CameraDetector
-from .constants import CAMERA_EXTERNAL, CAMERA_INTERNAL
+from .constants import CAMERA_EXTERNAL, CAMERA_INTERNAL, MEDIAMTX_HOST, MEDIAMTX_RTSP_PORT
 from .device_config import get_device_config
 from .ffmpeg_manager import FFmpegManager
 from .mqtt_handler import StreamingMQTTClient
@@ -45,10 +45,10 @@ class StreamingAgent:
         self._device_config = get_device_config()
         self.device_id = self._device_config["device_id"]
         self.device_uuid = self._device_config.get("device_uuid", "")
-        self.mediamtx_host = self._device_config.get("mediamtx_host") or "127.0.0.1"
+        self.mediamtx_host = self._device_config.get("mediamtx_host") or MEDIAMTX_HOST
         self.mediamtx_rtsp_port = self._safe_int(
             self._device_config.get("mediamtx_rtsp_port"),
-            8554,
+            MEDIAMTX_RTSP_PORT,
         )
         
         logger.info("Initializing Streaming Agent")
