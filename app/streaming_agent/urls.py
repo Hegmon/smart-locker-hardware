@@ -27,11 +27,18 @@ def _normalize_base_path(base_path: str) -> str:
     return "/" + base_path.strip("/")
 
 
-def _resolve_stream_endpoint_defaults() -> tuple[str, str, Optional[int], str]:
+def _strip_trailing_slash(value: str) -> str:
+    return value.rstrip("/")
+
+
+def _resolve_public_base_url() -> str:
     """
-    Resolve the playback endpoint clients should use.
-    Defaults to LAN IP + mediamtx port unless overridden.
+    Resolve the public playback base URL used by mobile/web clients.
     """
+    explicit_base_url = get_optional_config("STREAM_PUBLIC_BASE_URL")
+    if explicit_base_url:
+        return _strip_trailing_slash(explicit_base_url)
+
     scheme = get_optional_config("STREAM_PUBLIC_SCHEME", "http") or "http"
     host = get_optional_config("STREAM_PUBLIC_HOST") or get_lan_ip_address()
     port_value = get_optional_config("STREAM_PUBLIC_PORT")
@@ -49,7 +56,7 @@ def _resolve_stream_endpoint_defaults() -> tuple[str, str, Optional[int], str]:
     if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
         port = None
 
-    return scheme, host, port, base_path
+    return _build_http_base_url(scheme, host, port, base_path)
 
 
 def _build_http_base_url(scheme: str, host: str, port: Optional[int], base_path: str = "") -> str:
@@ -107,18 +114,16 @@ def build_hls_url(
         from .device_config import load_device_id
         device_id = load_device_id()
     
-    base_path = ""
-    scheme = "http"
-
     if host is None and port is None:
-        scheme, host, port, base_path = _resolve_stream_endpoint_defaults()
+        base_url = _resolve_public_base_url()
+        return f"{base_url}/hls/{device_id}/{stream_type}/index.m3u8"
     else:
         if host is None:
             host = get_lan_ip_address()
         if port is None:
             port = MEDIAMTX_HLS_PORT
 
-    base_url = _build_http_base_url(scheme, host, port, base_path)
+    base_url = _build_http_base_url("http", host, port)
     return f"{base_url}/hls/{device_id}/{stream_type}/index.m3u8"
 
 
@@ -146,10 +151,17 @@ def build_rtsp_url(
         device_id = load_device_id()
     
     if host is None:
-        host = MEDIAMTX_HOST  # default 127.0.0.1
+        host = get_optional_config("MEDIAMTX_HOST") or MEDIAMTX_HOST
     
     if port is None:
-        port = MEDIAMTX_RTSP_PORT
+        port_value = get_optional_config("MEDIAMTX_RTSP_PORT")
+        if port_value:
+            try:
+                port = int(port_value)
+            except ValueError:
+                port = MEDIAMTX_RTSP_PORT
+        else:
+            port = MEDIAMTX_RTSP_PORT
     
     return RTSP_URL_TEMPLATE.format(
         host=host,
