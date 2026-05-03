@@ -163,4 +163,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable fastapi.service wifi-reconnect.service wifi-upload-agent.service
 sudo systemctl restart fastapi.service wifi-reconnect.service wifi-upload-agent.service
 
-echo "✅ INSTALLATION COMPLETE - Pi4 WiFi + BLE Agent Ready"
+# =========================================================
+# OPTIONAL: Streaming components (MediaMTX + Streaming Agent)
+# =========================================================
+echo ""
+echo "🔴 Installing streaming components (MediaMTX + Streaming Agent)..."
+"$PROJECT_DIR/app/scripts/install_mediamtx.sh"
+"$PROJECT_DIR/app/scripts/install_streaming.sh"
+
+echo "✅ INSTALLATION COMPLETE - Smart Locker Hardware Ready (WiFi + Streaming)"
