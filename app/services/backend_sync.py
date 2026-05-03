@@ -4,6 +4,7 @@ import socket
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -63,7 +64,10 @@ def _build_registration_payload() -> dict[str, Any]:
 
     # Allow the device to advertise a public stream hostname instead of its
     # private LAN address when the backend generates playback URLs.
+    public_base_url = get_optional_config("STREAM_PUBLIC_BASE_URL")
     public_host = get_optional_config("STREAM_PUBLIC_HOST")
+    if public_base_url and not public_host:
+        public_host = urlsplit(public_base_url).hostname or ""
 
     return {
         "name": QBOX_DEVICE_NAME,
