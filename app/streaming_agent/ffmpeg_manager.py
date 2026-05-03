@@ -18,14 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable
 
-from .constants import (
-    FFMPEG_INPUT_OPTIONS,
-    FFMPEG_ENCODE_VIDEO,
-    FFMPEG_OUTPUT_OPTIONS,
-    PROCESS_CHECK_INTERVAL,
-    RESTART_MAX_ATTEMPTS,
-    RESTART_BACKOFF,
-)
+from .constants import PROCESS_CHECK_INTERVAL, RESTART_MAX_ATTEMPTS, RESTART_BACKOFF
 
 logger = logging.getLogger(__name__)
 
@@ -161,50 +154,31 @@ class FFmpegManager:
         logger.info("FFmpeg monitoring stopped")
     
     def _build_ffmpeg_cmd(self, stream: StreamProcess) -> list[str]:
-        """Build FFmpeg command for a given stream"""
+        """Build FFmpeg command matching the known-good Pi publish command."""
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning"]
-        
-        # Global low-latency input flags
+
         cmd.extend([
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
-            "-probesize", "32",
-            "-analyzeduration", "0",
+            "-f", "v4l2",
+            "-framerate", "10",
+            "-video_size", "1280x720",
+            "-i", stream.device_path,
         ])
-        
-        # Input format
-        cmd.extend(["-f", "v4l2"])
-        
-        # Camera-specific tweaks
-        if stream.camera_type == "external":
-            # USB cameras often need larger queue
-            cmd.extend(["-thread_queue_size", "512"])
-        
-        cmd.extend(["-i", stream.device_path])
-        
-        # Video encoding - ensure baseline compatibility
+
         cmd.extend([
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-tune", "zerolatency",
-            "-profile:v", "baseline",
-            "-level", "3.1",
-            "-vf", "scale=1280:720,format=yuv420p",  # Convert to 4:2:0 for baseline
-            "-b:v", "800k",
-            "-maxrate", "1000k",
-            "-bufsize", "1200k",
-            "-r", "30",
+            "-pix_fmt", "yuv420p",
         ])
-        
-        # RTSP output
+
         cmd.extend([
             "-f", "rtsp",
             "-rtsp_transport", "tcp",
         ])
-        
+
         output_url = f"rtsp://{self.mediamtx_host}:{self.rtsp_port}/{self.device_id}/{stream.camera_type}"
         cmd.append(output_url)
-        
+
         return cmd
     
     def _start_ffmpeg(self, stream: StreamProcess) -> bool:
