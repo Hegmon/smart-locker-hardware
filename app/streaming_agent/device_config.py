@@ -1,17 +1,31 @@
 """
 Device Identity Configuration
-Loads device_id and device_uuid from the existing backend state.
-Falls back to /etc/qbox-device.conf for override if provided.
+Reads device_id and device_uuid from app/config/backend_device.json.
+Also supports /etc/qbox-device.conf override.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 
 # Optional override file (takes precedence)
 DEVICE_CONFIG_PATH = Path("/etc/qbox-device.conf")
+
+# Path to backend_device.json (relative to this file)
+# device_config.py is in app/streaming_agent/
+# backend_device.json is in app/config/
+STATE_FILE = Path(__file__).resolve().parent.parent / "config" / "backend_device.json"
+
+
+def _load_backend_json() -> dict:
+    """Load backend_device.json safely"""
+    try:
+        if STATE_FILE.exists():
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[WARN] Failed to read backend state from {STATE_FILE}: {e}")
+    return {}
 
 
 def _load_override() -> dict[str, str]:
@@ -39,16 +53,6 @@ def _load_override() -> dict[str, str]:
     return result
 
 
-def load_backend_state_safe() -> dict:
-    """Safely load existing backend_device.json (registered by Django)"""
-    try:
-        # Import here to avoid potential circular import
-        from app.services.backend_state import load_backend_state
-        return load_backend_state()
-    except Exception:
-        return {}
-
-
 def load_device_id() -> str:
     """
     Load device_id from backend state or config override.
@@ -64,7 +68,7 @@ def load_device_id() -> str:
     if device_id:
         return str(device_id).strip()
     
-    state = load_backend_state_safe()
+    state = _load_backend_json()
     device_id = state.get("device_id") or state.get("DEVICE_ID")
     if device_id:
         return str(device_id).strip()
@@ -84,7 +88,7 @@ def get_device_config() -> dict[str, str]:
         {"device_id": str, "device_uuid": str}
     """
     override = _load_override()
-    state = load_backend_state_safe()
+    state = _load_backend_json()
     
     # Resolve device_id
     device_id = (
@@ -94,7 +98,7 @@ def get_device_config() -> dict[str, str]:
     if not device_id:
         raise RuntimeError(
             "device_id not found. Ensure backend registration completed "
-            "or set /etc/qbox-device.conf"
+            "or set /etc/qbox-device.conf. Expected file at: " + str(STATE_FILE)
         )
     
     # Resolve device_uuid
