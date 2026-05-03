@@ -9,6 +9,11 @@ DEVICE_ID=QBOX-001
 # If set, it must match the backend registration.
 DEVICE_UUID=abc123-def456-ghi789
 
+# Explicit camera device mapping. Set these to the nodes that actually work
+# with your ffmpeg test commands.
+INTERNAL_CAMERA_DEVICE=/dev/video0
+EXTERNAL_CAMERA_DEVICE=/dev/video2
+
 # MediaMTX RTSP publish target.
 # For VPS-backed production streaming, point this to your server.
 MEDIAMTX_HOST=backend.qbox.sa
