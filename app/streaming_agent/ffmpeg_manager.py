@@ -257,6 +257,7 @@ class FFmpegManager:
         while self._running:
             time.sleep(PROCESS_CHECK_INTERVAL)
             
+            failed_streams = []
             with self._lock:
                 for camera_type, stream in self._streams.items():
                     if stream.status != "running" or not stream.process:
@@ -280,8 +281,12 @@ class FFmpegManager:
                         if self.on_stream_status_change:
                             self.on_stream_status_change(camera_type, "error")
                         
-                        # Attempt restart
-                        self._attempt_restart(stream)
+                        # Defer restart outside lock to avoid deadlock
+                        failed_streams.append(stream)
+            
+            # Restart failed streams (outside lock)
+            for stream in failed_streams:
+                self._attempt_restart(stream)
     
     def _attempt_restart(self, stream: StreamProcess) -> bool:
         """Attempt to restart a failed stream with backoff"""
