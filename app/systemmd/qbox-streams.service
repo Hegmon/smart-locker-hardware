@@ -15,6 +15,9 @@ Environment=MQTT_PORT=1883
 Environment=MEDIAMTX_HOST=backend.qbox.sa
 Environment=MEDIAMTX_RTSP_PORT=8554
 Environment=STREAM_PUBLIC_BASE_URL=https://backend.qbox.sa
+# Optional explicit camera mapping if auto-detection picks the wrong node
+# Environment=INTERNAL_CAMERA_DEVICE=/dev/video0
+# Environment=EXTERNAL_CAMERA_DEVICE=/dev/video2
 # Uncomment and set if MQTT auth needed
 # Environment=MQTT_USERNAME=qbox
 # Environment=MQTT_PASSWORD=strongpassword123
