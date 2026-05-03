@@ -130,8 +130,13 @@ def get_device_config() -> dict[str, str]:
     return {
         "device_id": str(device_id).strip(),
         "device_uuid": str(device_uuid).strip(),
+        "stream_public_base_url": get_optional_config("STREAM_PUBLIC_BASE_URL"),
         "stream_public_host": get_optional_config("STREAM_PUBLIC_HOST"),
         "stream_public_scheme": get_optional_config("STREAM_PUBLIC_SCHEME"),
         "stream_public_port": get_optional_config("STREAM_PUBLIC_PORT"),
         "stream_public_base_path": get_optional_config("STREAM_PUBLIC_BASE_PATH"),
+        "mediamtx_host": get_optional_config("MEDIAMTX_HOST"),
+        "mediamtx_rtsp_port": get_optional_config("MEDIAMTX_RTSP_PORT"),
+        "mediamtx_hls_host": get_optional_config("MEDIAMTX_HLS_HOST"),
+        "mediamtx_hls_port": get_optional_config("MEDIAMTX_HLS_PORT"),
     }
