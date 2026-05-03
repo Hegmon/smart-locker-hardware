@@ -34,6 +34,7 @@ from .device_config import get_device_config
 from .ffmpeg_manager import FFmpegManager
 from .mqtt_handler import StreamingMQTTClient
 from .stream_verifier import StreamVerifier
+from .urls import build_hls_url, build_rtsp_url, get_lan_ip_address
 
 
 class StreamingAgent:
@@ -89,8 +90,7 @@ class StreamingAgent:
         for cam_type, cam_info in cameras.items():
             self.ffmpeg_manager.add_stream(cam_type, cam_info.device_path)
         
-        # 3. Initialize stream verifier (use LAN IP for HLS checks)
-        from .urls import get_lan_ip_address
+        # 3. Initialize stream verifier (always use LAN IP for on-device HLS checks)
         lan_ip = get_lan_ip_address()
         self.verifier = StreamVerifier(device_id=self.device_id, mediamtx_host=lan_ip)
         
@@ -177,7 +177,7 @@ class StreamingAgent:
             all_ok = True
             for st in [CAMERA_INTERNAL, CAMERA_EXTERNAL]:
                 ok = self.ffmpeg_manager.start_stream(st)
-                results[st] = {"started": ok}
+                results[st] = {"started": ok, **self._stream_urls(st)}
                 if not ok:
                     all_ok = False
             status = "SUCCESS" if all_ok else "PARTIAL"
@@ -188,6 +188,7 @@ class StreamingAgent:
                 "status": "SUCCESS" if ok else "ERROR",
                 "stream_type": stream_type,
                 "started": ok,
+                **self._stream_urls(stream_type),
             }
     
     def _cmd_stop(self, stream_type: str) -> dict:
@@ -210,7 +211,7 @@ class StreamingAgent:
             for st in [CAMERA_INTERNAL, CAMERA_EXTERNAL]:
                 self.ffmpeg_manager.stop_stream(st)
                 ok = self.ffmpeg_manager.start_stream(st)
-                results[st] = {"restarted": ok}
+                results[st] = {"restarted": ok, **self._stream_urls(st)}
             return {"status": "SUCCESS", "streams": results}
         else:
             self.ffmpeg_manager.stop_stream(stream_type)
@@ -219,21 +220,33 @@ class StreamingAgent:
                 "status": "SUCCESS" if ok else "ERROR",
                 "stream_type": stream_type,
                 "restarted": ok,
+                **self._stream_urls(stream_type),
             }
     
     def _cmd_status(self, stream_type: str) -> dict:
         """Get stream status"""
         if stream_type == "all":
+            streams = self.ffmpeg_manager.get_all_status()
+            for st, status in streams.items():
+                status.update(self._stream_urls(st))
             return {
                 "status": "SUCCESS",
-                "streams": self.ffmpeg_manager.get_all_status(),
+                "streams": streams,
             }
         else:
             s = self.ffmpeg_manager.get_stream_status(stream_type)
             if s:
+                s.update(self._stream_urls(stream_type))
                 return {"status": "SUCCESS", "stream": s}
             else:
                 return {"status": "ERROR", "message": f"Unknown stream: {stream_type}"}
+
+    def _stream_urls(self, stream_type: str) -> dict:
+        """Build stream URLs for responses and status events."""
+        return {
+            "hls_url": build_hls_url(stream_type, device_id=self.device_id),
+            "rtsp_url": build_rtsp_url(stream_type, device_id=self.device_id),
+        }
     
     def _on_stream_status_change(self, camera_type: str, new_status: str) -> None:
         """Callback when a stream's status changes"""
@@ -243,6 +256,7 @@ class StreamingAgent:
                 "type": "stream_status",
                 "camera_type": camera_type,
                 "status": new_status,
+                **self._stream_urls(camera_type),
             })
     
     def run(self) -> None:
