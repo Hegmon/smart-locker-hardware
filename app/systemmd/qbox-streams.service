@@ -1,0 +1,40 @@
+[Unit]
+Description=Smart Locker Streaming Agent (FFmpeg + MQTT)
+After=network-online.target mediamtx.service
+Wants=network-online.target mediamtx.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__PROJECT_DIR__
+
+Environment=PYTHONUNBUFFERED=1
+Environment=STREAM_AUTO_START=true
+Environment=MQTT_HOST=69.62.125.223
+Environment=MQTT_PORT=1883
+# Uncomment and set if MQTT auth needed
+# Environment=MQTT_USERNAME=qbox
+# Environment=MQTT_PASSWORD=strongpassword123
+
+ExecStart=__PROJECT_DIR__/.venv/bin/python -m app.streaming_agent.main
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Access to video devices (camera)
+DeviceAllow=/dev/video0 rw
+DeviceAllow=/dev/video1 rw
+DeviceAllow=/dev/video2 rw
+DeviceAllow=/dev/video3 rw
+
+# Prevent CPU loops
+CPUQuota=80%
+
+# Output
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
