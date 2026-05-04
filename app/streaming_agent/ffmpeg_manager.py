@@ -81,6 +81,7 @@ class FFmpegManager:
     def _input_format_candidates(self, formats: list[str]) -> list[str]:
         """
         Select input formats in failover order: MJPEG preferred, then YUYV.
+        If formats list is empty, try auto-detection (empty string).
         """
         fmt_lower = [f.lower() for f in formats]
         candidates: list[str] = []
@@ -92,6 +93,7 @@ class FFmpegManager:
             if pref in fmt_lower:
                 candidates.append("yuyv422")
                 break
+        # If no known formats detected, try auto-detection
         if not candidates:
             candidates.append("")
         return candidates
@@ -204,13 +206,23 @@ class FFmpegManager:
     def _start_ffmpeg(self, stream: StreamProcess) -> bool:
         """Start FFmpeg subprocess with proper error handling."""
         last_error = ""
-        for input_format in self._input_format_candidates(stream.formats):
+        candidates = self._input_format_candidates(stream.formats)
+        
+        logger.info(
+            "Attempting to start FFmpeg for %s: device=%s, detected_formats=%s, candidates=%s",
+            stream.camera_type,
+            stream.device_path,
+            ",".join(stream.formats) or "none",
+            candidates,
+        )
+        
+        for input_format in candidates:
             cmd = self._build_ffmpeg_cmd(stream, input_format)
             logger.info(
-                "Starting FFmpeg for %s: selected camera device=%s reason=formats=%s command=%s",
+                "Starting FFmpeg for %s: selected camera device=%s format=%s command=%s",
                 stream.camera_type,
                 stream.device_path,
-                ",".join(stream.formats) or "auto",
+                input_format or "auto",
                 " ".join(cmd),
             )
 
