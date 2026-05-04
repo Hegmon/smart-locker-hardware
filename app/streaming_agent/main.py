@@ -88,10 +88,14 @@ class StreamingAgent:
         logger.info("=== Initializing Streaming Agent ===")
         
         # 1. Detect cameras
+        logger.info("--- Camera Detection Phase ---")
         cameras = self.detector.get_cameras_for_streaming()
         logger.info("Detected cameras: %s", list(cameras.keys()))
         for cam_type, cam_info in cameras.items():
             logger.info("  %s: %s", cam_type, cam_info.device_path)
+            logger.info("    Formats: %s", cam_info.formats)
+            logger.info("    Resolutions: %s", cam_info.resolutions)
+            logger.info("    Reason: %s", cam_info.reason)
         
         if not cameras:
             logger.warning("No cameras detected! Streaming will not start.")
