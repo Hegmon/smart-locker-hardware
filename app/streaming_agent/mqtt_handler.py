@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import uuid
 from typing import Any, Callable, Optional
 
@@ -19,6 +20,11 @@ logger = logging.getLogger(__name__)
 
 class StreamingMQTTClient:
     """MQTT client specialized for streaming control commands"""
+    
+    # Exponential backoff configuration for reconnect
+    RECONNECT_BACKOFF_BASE = 1.0  # seconds
+    RECONNECT_BACKOFF_MAX = 60.0  # seconds
+    RECONNECT_BACKOFF_MULTIPLIER = 2.0
     
     def __init__(
         self,
@@ -43,13 +49,27 @@ class StreamingMQTTClient:
         self._connected = False
         self._client: Optional[mqtt.Client] = None
         
+        # Reconnect state
+        self._reconnect_delay = self.RECONNECT_BACKOFF_BASE
+        self._reconnect_attempts = 0
+        self._manual_disconnect = False  # Track intentional disconnects
+        
         from threading import Lock
         self._lock = Lock()
+        
+        # Generate unique client_id to avoid session conflicts (rc=7)
+        # Include device_id, device_uuid, and random suffix for uniqueness
+        random_suffix = uuid.uuid4().hex[:8]
+        self._client_id = f"qbox-stream-{self.device_id}-{self.device_uuid}-{random_suffix}"
+        logger.info("Generated unique MQTT client_id: %s", self._client_id)
     
     def connect(self) -> None:
-        """Start MQTT connection"""
-        client_id = f"qbox-stream-{self.device_id}"
-        self._client = mqtt.Client(client_id=client_id, clean_session=True)
+        """Start MQTT connection with unique client_id and exponential backoff"""
+        self._manual_disconnect = False
+        self._reconnect_delay = self.RECONNECT_BACKOFF_BASE
+        self._reconnect_attempts = 0
+        
+        self._client = mqtt.Client(client_id=self._client_id, clean_session=True)
         
         if self.username and self.password:
             self._client.username_pw_set(self.username, self.password)
@@ -58,12 +78,44 @@ class StreamingMQTTClient:
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
         
-        logger.info("Connecting MQTT to %s:%d as %s", self.host, self.port, client_id)
+        logger.info("Connecting MQTT to %s:%d as %s", self.host, self.port, self._client_id)
         self._client.connect_async(self.host, self.port, self.keepalive)
         self._client.loop_start()
     
+    def _reconnect_with_backoff(self) -> None:
+        """Attempt to reconnect with exponential backoff"""
+        if self._manual_disconnect:
+            logger.debug("Skipping reconnect: manual disconnect requested")
+            return
+        
+        self._reconnect_attempts += 1
+        delay = min(self._reconnect_delay, self.RECONNECT_BACKOFF_MAX)
+        
+        logger.info(
+            "MQTT reconnect attempt %d in %.1f seconds (delay base: %.1f)",
+            self._reconnect_attempts, delay, self._reconnect_delay
+        )
+        
+        import time
+        time.sleep(delay)
+        
+        # Increase delay for next time (exponential backoff)
+        self._reconnect_delay *= self.RECONNECT_BACKOFF_MULTIPLIER
+        
+        try:
+            if self._client:
+                self._client.reconnect()
+        except Exception as e:
+            logger.error("MQTT reconnect failed: %s", e)
+            # Schedule another reconnect attempt
+            import threading
+            timer = threading.Timer(self._reconnect_delay, self._reconnect_with_backoff)
+            timer.daemon = True
+            timer.start()
+    
     def disconnect(self) -> None:
         """Stop MQTT connection"""
+        self._manual_disconnect = True
         if self._client:
             self._client.loop_stop()
             self._client.disconnect()
@@ -75,21 +127,61 @@ class StreamingMQTTClient:
         if rc == 0:
             with self._lock:
                 self._connected = True
+                self._reconnect_delay = self.RECONNECT_BACKOFF_BASE
+                self._reconnect_attempts = 0
             logger.info("MQTT connected successfully")
             # Subscribe to stream command topic
             topic = f"devices/{self.device_uuid}/services/stream/request"
             client.subscribe(topic, qos=1)
             logger.info("Subscribed to %s", topic)
         else:
-            logger.error("MQTT connection failed with rc=%d", rc)
+            # Log full error reason for rc=7 and other codes
+            error_msg = self._mqtt_error_message(rc)
+            logger.error(
+                "MQTT connection failed with rc=%d: %s",
+                rc, error_msg
+            )
+            with self._lock:
+                self._connected = False
     
     def _on_disconnect(self, client, userdata, rc):
         with self._lock:
             self._connected = False
+        
+        # Log full error reason including rc=7 details
+        error_msg = self._mqtt_error_message(rc)
+        
         if rc != 0:
-            logger.warning("MQTT unexpected disconnect, rc=%d", rc)
+            logger.warning(
+                "MQTT unexpected disconnect, rc=%d: %s",
+                rc, error_msg
+            )
+            # Trigger reconnection with exponential backoff
+            if not self._manual_disconnect:
+                import threading
+                timer = threading.Timer(
+                    self.RECONNECT_BACKOFF_BASE,
+                    self._reconnect_with_backoff
+                )
+                timer.daemon = True
+                timer.start()
         else:
             logger.info("MQTT disconnected cleanly")
+    
+    @staticmethod
+    def _mqtt_error_message(rc: int) -> str:
+        """Get human-readable error message for MQTT return codes"""
+        errors = {
+            0: "Connection accepted",
+            1: "Connection refused - unacceptable protocol version",
+            2: "Connection refused - invalid client identifier",
+            3: "Connection refused - server unavailable",
+            4: "Connection refused - bad username or password",
+            5: "Connection refused - not authorized",
+            6: "Reserved for future use",
+            7: "Connection refused - session conflict (client_id in use) or not authorized",
+        }
+        return errors.get(rc, f"Unknown error code {rc}")
     
     def _on_message(self, client, userdata, msg):
         try:
