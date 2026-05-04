@@ -68,6 +68,36 @@ class CameraDetector:
             or get_optional_config("EXTERNAL_CAMERA_DEVICE")
         )
 
+    def _list_v4l2_devices(self) -> list[str]:
+        """Enumerate /dev/video nodes from v4l2-ctl, falling back to glob."""
+        devices: list[str] = []
+        try:
+            result = subprocess.run(
+                ["v4l2-ctl", "--list-devices"],
+                capture_output=True,
+                text=True,
+                timeout=self.FORMAT_PROBE_TIMEOUT,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    candidate = line.strip()
+                    if candidate.startswith("/dev/video"):
+                        devices.append(candidate)
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            pass
+
+        if not devices:
+            devices = glob("/dev/video*")
+
+        return sorted(set(devices), key=self._device_sort_key)
+
+    @staticmethod
+    def _device_sort_key(device_path: str) -> tuple[int, str]:
+        try:
+            return (int(device_path.replace("/dev/video", "")), device_path)
+        except ValueError:
+            return (999, device_path)
+
     def _get_device_name(self, device_path: str) -> str:
         """Read the video device's friendly name from sysfs."""
         try:
