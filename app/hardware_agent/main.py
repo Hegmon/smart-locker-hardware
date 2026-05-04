@@ -370,6 +370,25 @@ class WifiUploadAgent:
                 logger.exception("Unexpected WiFi connect failure for %s", ssid)
                 last_error = str(exc)
 
+            current_status = get_connected_wifi_details()
+            if current_status.get("connected_ssid") == ssid:
+                self._handle_wifi_observation(current_status, source="mqtt-late-success")
+                response = {
+                    "status": "SUCCESS",
+                    "ssid": ssid,
+                    "message": "Connected",
+                    "details": {"late_success": True, "error": last_error},
+                }
+                if command_id:
+                    self.publish_command_result(
+                        command_id,
+                        "SUCCESS",
+                        ssid,
+                        "Connected",
+                        {"late_success": True, "error": last_error},
+                    )
+                return response
+
             if previous and previous != ssid:
                 try:
                     result = reconnect_saved_wifi(previous)
