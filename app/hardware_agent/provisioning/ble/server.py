@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import threading
+import subprocess
+import time
 
 import dbus
 import dbus.mainloop.glib
@@ -74,10 +76,7 @@ class BLEServer:
             adapter = self._get_adapter()
             device_name = get_device_name()
 
-            adapter.Set("org.bluez.Adapter1", "Alias", device_name)
-            adapter.Set("org.bluez.Adapter1", "Powered", dbus.Boolean(1))
-            adapter.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(1))
-            adapter.Set("org.bluez.Adapter1", "Pairable", dbus.Boolean(1))
+            self._prepare_adapter(adapter, device_name)
 
             app = Application(self.bus)
             service = SmartLockerService(self.bus, self.handler)
@@ -158,3 +157,47 @@ class BLEServer:
     def _get_adapter(self):
         obj = self.bus.get_object(BLUEZ_SERVICE_NAME, ADAPTER_PATH)
         return dbus.Interface(obj, "org.freedesktop.DBus.Properties")
+
+    def _prepare_adapter(self, adapter, device_name: str) -> None:
+        self._run_best_effort(["rfkill", "unblock", "bluetooth"])
+        self._run_best_effort(["bluetoothctl", "power", "on"])
+        self._run_best_effort(["hciconfig", "hci0", "up"])
+
+        self._set_adapter_property(adapter, "Alias", device_name, required=False)
+        self._set_adapter_property(adapter, "Powered", dbus.Boolean(1), required=True)
+        self._set_adapter_property(adapter, "Pairable", dbus.Boolean(1), required=False)
+        self._set_adapter_property(adapter, "Discoverable", dbus.Boolean(1), required=False)
+        self._set_adapter_property(adapter, "DiscoverableTimeout", dbus.UInt32(0), required=False)
+        self._set_adapter_property(adapter, "PairableTimeout", dbus.UInt32(0), required=False)
+
+    def _set_adapter_property(self, adapter, name: str, value, *, required: bool) -> bool:
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                adapter.Set("org.bluez.Adapter1", name, value)
+                logger.info("BLE adapter %s set to %s", name, value)
+                return True
+            except dbus.exceptions.DBusException as exc:
+                last_error = exc
+                logger.warning(
+                    "BLE adapter %s failed on attempt %d/3: %s",
+                    name,
+                    attempt + 1,
+                    exc,
+                )
+                self._run_best_effort(["rfkill", "unblock", "bluetooth"])
+                self._run_best_effort(["bluetoothctl", "power", "on"])
+                time.sleep(1)
+
+        if required and last_error is not None:
+            raise last_error
+        return False
+
+    @staticmethod
+    def _run_best_effort(command: list[str]) -> None:
+        try:
+            subprocess.run(command, capture_output=True, text=True, timeout=5, check=False)
+        except FileNotFoundError:
+            logger.debug("BLE helper command not found: %s", command[0])
+        except Exception as exc:
+            logger.debug("BLE helper command failed (%s): %s", " ".join(command), exc)
