@@ -229,6 +229,8 @@ class CameraDetector:
             return "mjpeg"
         if "yuyv" in fmt_lower or "yuyv422" in fmt_lower or "yuv422" in fmt_lower:
             return "yuyv422"
+        if "h264" in fmt_lower:
+            return "h264"
         return None
 
     def _ffmpeg_can_open(self, device_path: str, formats: List[str]) -> tuple[bool, str]:
