@@ -4,7 +4,7 @@ Main entry point for the camera streaming system.
 
 Architecture:
 - Camera Detection: auto-detect internal vs external cameras
-- FFmpeg Manager: manage subprocesses, auto-restart on failure
+- FFmpeg Stream Supervisor: resilient stream engine with health monitoring
 - MQTT Handler: respond to stream control commands
 - Stream Verifier: validate RTSP + HLS output
 
@@ -31,7 +31,7 @@ logger = logging.getLogger("streaming_agent")
 from .camera_detector import CameraDetector
 from .constants import CAMERA_EXTERNAL, CAMERA_INTERNAL, MEDIAMTX_HOST, MEDIAMTX_RTSP_PORT
 from .device_config import get_device_config
-from .ffmpeg_manager import FFmpegManager
+from .ffmpeg_manager import FFmpegStreamEngine, ProductionCameraPipeline
 from .mqtt_handler import StreamingMQTTClient
 from .stream_verifier import StreamVerifier
 from .urls import build_hls_url, build_rtsp_url
@@ -59,7 +59,8 @@ class StreamingAgent:
         
         # Components
         self.detector = CameraDetector()
-        self.ffmpeg_manager: Optional[FFmpegManager] = None
+        self.ffmpeg_manager: Optional[FFmpegStreamEngine] = None
+        self.pipeline: Optional[ProductionCameraPipeline] = None
         self.mqtt_client: Optional[StreamingMQTTClient] = None
         self.verifier: Optional[StreamVerifier] = None
         
@@ -73,7 +74,7 @@ class StreamingAgent:
         if val is None:
             return default
         return val.strip().lower() in {"1", "true", "yes", "on"}
-
+    
     @staticmethod
     def _safe_int(value: object, default: int) -> int:
         try:
@@ -100,23 +101,48 @@ class StreamingAgent:
         if not cameras:
             logger.warning("No cameras detected! Streaming will not start.")
         
-        # 2. Initialize FFmpeg manager
-        self.ffmpeg_manager = FFmpegManager(
+        # 2. Initialize Production Camera Pipeline
+        # This provides isolated, resilient streaming per camera
+        self.pipeline = ProductionCameraPipeline(
             device_id=self.device_id,
             mediamtx_host=self.mediamtx_host,
-            rtsp_port=self.mediamtx_rtsp_port,
-            on_stream_status_change=self._on_stream_status_change
+            mediamtx_rtsp_port=self.mediamtx_rtsp_port,
         )
         
-        # Register cameras
-        for cam_type, cam_info in cameras.items():
-            self.ffmpeg_manager.add_stream(
-                cam_type,
-                cam_info.device_path,
-                getattr(cam_info, 'formats', [])
-            )
+        # Setup cameras in pipeline
+        internal_device = None
+        external_device = None
         
-        # 3. Initialize verifier using configured RTSP publish target and public HLS URL.
+        if "internal" in cameras:
+            internal_device = cameras["internal"].device_path
+        if "external" in cameras:
+            external_device = cameras["external"].device_path
+        
+        # If no cameras detected via detector, try manual detection
+        if not internal_device and not external_device:
+            logger.info("No cameras from detector, attempting manual detection...")
+            import glob
+            video_devices = sorted(glob.glob("/dev/video*"))
+            if len(video_devices) >= 1:
+                internal_device = video_devices[0]
+            if len(video_devices) >= 2:
+                external_device = video_devices[1]
+        
+        if internal_device:
+            logger.info("Setting up internal camera: %s", internal_device)
+        if external_device:
+            logger.info("Setting up external camera: %s", external_device)
+        
+        try:
+            self.pipeline.setup_cameras(
+                internal_device=internal_device,
+                external_device=external_device,
+            )
+        except Exception as e:
+            logger.error("Failed to setup pipeline: %s", e)
+            # Continue anyway - pipeline may work with partial setup
+        
+        # 3. Initialize verifier
         self.verifier = StreamVerifier(
             device_id=self.device_id,
             mediamtx_host=self.mediamtx_host,
@@ -201,75 +227,91 @@ class StreamingAgent:
     
     def _cmd_start(self, stream_type: str) -> dict:
         """Start stream(s)"""
+        if not self.pipeline:
+            return {"status": "ERROR", "message": "Pipeline not initialized"}
+        
         if stream_type == "all":
-            results = {}
-            all_ok = True
-            for st in [CAMERA_INTERNAL, CAMERA_EXTERNAL]:
-                ok = self.ffmpeg_manager.start_stream(st)
-                results[st] = {"started": ok, **self._stream_urls(st)}
-                if not ok:
-                    all_ok = False
-            status = "SUCCESS" if all_ok else "PARTIAL"
-            return {"status": status, "streams": results}
+            self.pipeline.start()
+            return {"status": "SUCCESS", "started": "all"}
         else:
-            ok = self.ffmpeg_manager.start_stream(stream_type)
-            return {
-                "status": "SUCCESS" if ok else "ERROR",
-                "stream_type": stream_type,
-                "started": ok,
-                **self._stream_urls(stream_type),
-            }
+            # Start specific stream via pipeline
+            # For backward compatibility, use ffmpeg_manager if available
+            if self.ffmpeg_manager:
+                ok = self.ffmpeg_manager.start_stream(stream_type)
+                return {
+                    "status": "SUCCESS" if ok else "ERROR",
+                    "stream_type": stream_type,
+                    "started": ok,
+                    **self._stream_urls(stream_type),
+                }
+            return {"status": "ERROR", "message": "No stream manager available"}
     
     def _cmd_stop(self, stream_type: str) -> dict:
         """Stop stream(s)"""
         if stream_type == "all":
-            self.ffmpeg_manager.stop_all()
+            if self.ffmpeg_manager:
+                self.ffmpeg_manager.stop_all()
             return {"status": "SUCCESS", "stopped_all": True}
         else:
-            ok = self.ffmpeg_manager.stop_stream(stream_type)
-            return {
-                "status": "SUCCESS" if ok else "ERROR",
-                "stream_type": stream_type,
-                "stopped": ok,
-            }
+            if self.ffmpeg_manager:
+                ok = self.ffmpeg_manager.stop_stream(stream_type)
+                return {
+                    "status": "SUCCESS" if ok else "ERROR",
+                    "stream_type": stream_type,
+                    "stopped": ok,
+                }
+            return {"status": "ERROR", "message": "No stream manager available"}
     
     def _cmd_restart(self, stream_type: str) -> dict:
         """Restart stream(s)"""
         if stream_type == "all":
             results = {}
             for st in [CAMERA_INTERNAL, CAMERA_EXTERNAL]:
-                self.ffmpeg_manager.stop_stream(st)
-                ok = self.ffmpeg_manager.start_stream(st)
-                results[st] = {"restarted": ok, **self._stream_urls(st)}
+                if self.ffmpeg_manager:
+                    self.ffmpeg_manager.stop_stream(st)
+                    ok = self.ffmpeg_manager.start_stream(st)
+                    results[st] = {"restarted": ok, **self._stream_urls(st)}
             return {"status": "SUCCESS", "streams": results}
         else:
-            self.ffmpeg_manager.stop_stream(stream_type)
-            ok = self.ffmpeg_manager.start_stream(stream_type)
-            return {
-                "status": "SUCCESS" if ok else "ERROR",
-                "stream_type": stream_type,
-                "restarted": ok,
-                **self._stream_urls(stream_type),
-            }
+            if self.ffmpeg_manager:
+                self.ffmpeg_manager.stop_stream(stream_type)
+                ok = self.ffmpeg_manager.start_stream(stream_type)
+                return {
+                    "status": "SUCCESS" if ok else "ERROR",
+                    "stream_type": stream_type,
+                    "restarted": ok,
+                    **self._stream_urls(stream_type),
+                }
+            return {"status": "ERROR", "message": "No stream manager available"}
     
     def _cmd_status(self, stream_type: str) -> dict:
         """Get stream status"""
-        if stream_type == "all":
-            streams = self.ffmpeg_manager.get_all_status()
-            for st, status in streams.items():
-                status.update(self._stream_urls(st))
+        if self.pipeline:
+            pipeline_status = self.pipeline.get_pipeline_status()
             return {
                 "status": "SUCCESS",
-                "streams": streams,
+                "pipeline": pipeline_status,
             }
-        else:
-            s = self.ffmpeg_manager.get_stream_status(stream_type)
-            if s:
-                s.update(self._stream_urls(stream_type))
-                return {"status": "SUCCESS", "stream": s}
+        
+        if self.ffmpeg_manager:
+            if stream_type == "all":
+                streams = self.ffmpeg_manager.get_all_status()
+                for st, status in streams.items():
+                    status.update(self._stream_urls(st))
+                return {
+                    "status": "SUCCESS",
+                    "streams": streams,
+                }
             else:
-                return {"status": "ERROR", "message": f"Unknown stream: {stream_type}"}
-
+                s = self.ffmpeg_manager.get_stream_status(stream_type)
+                if s:
+                    s.update(self._stream_urls(stream_type))
+                    return {"status": "SUCCESS", "stream": s}
+                else:
+                    return {"status": "ERROR", "message": f"Unknown stream: {stream_type}"}
+        
+        return {"status": "ERROR", "message": "No stream manager available"}
+    
     def _stream_urls(self, stream_type: str) -> dict:
         """Build stream URLs for responses and status events."""
         return {
@@ -277,14 +319,15 @@ class StreamingAgent:
             "rtsp_url": build_rtsp_url(stream_type, device_id=self.device_id),
         }
     
-    def _on_stream_status_change(self, camera_type: str, new_status: str) -> None:
+    def _on_stream_status_change(self, camera_type: str, new_status: str, details: str = "") -> None:
         """Callback when a stream's status changes"""
-        logger.info("Stream %s status changed: %s", camera_type, new_status)
+        logger.info("Stream %s status changed: %s (%s)", camera_type, new_status, details)
         if self.mqtt_client:
             self.mqtt_client.publish_status_event({
                 "type": "stream_status",
                 "camera_type": camera_type,
                 "status": new_status,
+                "details": details,
                 **self._stream_urls(camera_type),
             })
     
@@ -296,18 +339,20 @@ class StreamingAgent:
         
         # Auto-start streams if configured
         if self.auto_start:
-            cameras = self.ffmpeg_manager._streams
-            if cameras:
-                logger.info("Auto-starting %d camera streams...", len(cameras))
-                self.ffmpeg_manager.start_all()
+            logger.info("Auto-start enabled, starting streams...")
+            if self.pipeline:
+                self.pipeline.start()
+            elif self.ffmpeg_manager:
+                cameras = self.ffmpeg_manager._streams
+                if cameras:
+                    logger.info("Auto-starting %d camera streams...", len(cameras))
+                    self.ffmpeg_manager.start_all()
+                else:
+                    logger.warning("No cameras to auto-start")
             else:
-                logger.warning("No cameras to auto-start")
+                logger.warning("No stream manager available for auto-start")
         else:
             logger.info("Auto-start disabled (STREAM_AUTO_START=false)")
-        
-        # Start monitoring
-        if self.ffmpeg_manager:
-            self.ffmpeg_manager.start_monitoring()
         
         # Wait for stop signal
         try:
@@ -321,6 +366,9 @@ class StreamingAgent:
     def shutdown(self) -> None:
         """Clean shutdown"""
         logger.info("=== Shutting down Streaming Agent ===")
+        
+        if self.pipeline:
+            self.pipeline.stop()
         
         if self.ffmpeg_manager:
             self.ffmpeg_manager.stop_monitoring()
