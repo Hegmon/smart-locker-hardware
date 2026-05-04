@@ -36,12 +36,27 @@ def _run(command: list[str], check: bool = True, timeout: int = 12) -> subproces
         )
     except subprocess.TimeoutExpired:
         raise WifiCommandError(f"Timeout: {' '.join(command)}")
+    except subprocess.CalledProcessError as exc:
+        output = (exc.stderr or exc.stdout or "").strip()
+        safe_command = _redact_command(command)
+        if output:
+            raise WifiCommandError(f"{safe_command}: {output}") from exc
+        raise WifiCommandError(f"{safe_command}: exited with status {exc.returncode}") from exc
 
     if check and result.returncode != 0:
         msg = result.stderr.strip() or result.stdout.strip()
-        raise WifiCommandError(f"{' '.join(shlex.quote(c) for c in command)}: {msg}")
+        safe_command = _redact_command(command)
+        raise WifiCommandError(f"{safe_command}: {msg}")
 
     return result
+
+
+def _redact_command(command: list[str]) -> str:
+    redacted = list(command)
+    for index, value in enumerate(redacted[:-1]):
+        if value.lower() in {"password", "psk", "wifi-sec.psk"}:
+            redacted[index + 1] = "********"
+    return " ".join(shlex.quote(c) for c in redacted)
 
 
 # =========================================================
@@ -75,7 +90,8 @@ def _wait_for_connection(ssid: str, timeout: int = 15) -> bool:
             if get_connected_wifi_details().get("connected_ssid") == ssid:
                 return True
         except Exception:
-            time.sleep(1)
+            pass
+        time.sleep(1)
     return False
 
 
@@ -219,8 +235,11 @@ def reconnect_saved_wifi(ssid: str) -> dict[str, Any]:
     def _connect():
         ensure_wifi_radio()
 
-        result = _run(["nmcli", "dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE])
-        if not _wait_for_connection(ssid):
+        result = _run(
+            ["nmcli", "dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE],
+            timeout=30,
+        )
+        if not _wait_for_connection(ssid, timeout=25):
             raise WifiCommandError(f"Reconnect failed:{ssid}")
         return {
             "status": "reconnected",
@@ -247,8 +266,8 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
         cmd = ["nmcli", "dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE]
         if password:
             cmd += ["password", password]
-        result = _run(cmd)
-        if not _wait_for_connection(ssid):
+        result = _run(cmd, timeout=35)
+        if not _wait_for_connection(ssid, timeout=30):
             raise WifiCommandError(f"Connection failed:{ssid}")
         return {
             "status": "connected",
