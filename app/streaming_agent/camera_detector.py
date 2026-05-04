@@ -224,6 +224,14 @@ class CameraDetector:
         return resolutions
 
     def _preferred_capture_format(self, formats: List[str]) -> Optional[str]:
+        """
+        Select preferred capture format from supported formats.
+        Returns None if no known format is found - FFmpeg will use auto-detection.
+        """
+        if not formats:
+            # Empty format list is OK - FFmpeg can auto-detect
+            return None
+        
         fmt_lower = [f.lower() for f in formats]
         if "mjpeg" in fmt_lower or "mjpg" in fmt_lower:
             return "mjpeg"
@@ -234,9 +242,21 @@ class CameraDetector:
         return None
 
     def _ffmpeg_can_open(self, device_path: str, formats: List[str]) -> tuple[bool, str]:
-        """Probe whether FFmpeg can open the node as a capture device."""
+        """
+        Probe whether FFmpeg can open the node as a capture device.
+        
+        A device is considered VALID if:
+        - /dev/videoX exists
+        - FFmpeg can start successfully (even with warnings)
+        - frames can be produced for at least a few seconds
+        
+        DO NOT reject based on:
+        - empty formats list from v4l2-ctl
+        - ffprobe parsing failures
+        - MJPEG warnings (unable to decode APP fields, deprecated pixel format)
+        """
         input_format = self._preferred_capture_format(formats)
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2"]
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-f", "v4l2"]
         if input_format:
             cmd.extend(["-input_format", input_format])
         cmd.extend([
@@ -252,28 +272,51 @@ class CameraDetector:
         ])
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         except FileNotFoundError:
             return True, "ffmpeg not installed; accepted after v4l2 format probe"
         except subprocess.TimeoutExpired:
-            return True, "ffmpeg open probe timed out; accepted for streaming manager retry"
+            # Timeout could mean device is slow but functional - accept it
+            return True, "ffmpeg open probe timed out; device may be slow but accepted"
         except Exception as exc:
             return False, str(exc)
 
         output = (result.stderr + result.stdout).strip()
         lower = output.lower()
+        
+        # Success: FFmpeg produced a frame
         if result.returncode == 0:
-            return True, f"ffmpeg opened with {input_format or 'auto'}"
+            return True, f"ffmpeg opened and captured frame with {input_format or 'auto'}"
+        
+        # Device busy - this is a transient state, not a camera failure
         if "device or resource busy" in lower or "resource busy" in lower:
             return True, "device busy; streaming manager will free blocker"
-        if (
-            "inappropriate ioctl" in lower
-            or "not a video capture device" in lower
-            or "no formats found" in lower
-            or "vidioc_enum_fmt" in lower
-        ):
-            return False, output or "invalid v4l2 capture device"
-        return False, output or f"ffmpeg open probe failed with code {result.returncode}"
+        
+        # MJPEG warnings are NON-FATAL - downgrade to info, don't reject camera
+        mjpeg_warnings = [
+            "unable to decode app fields",
+            "deprecated pixel format",
+            "first field",
+        ]
+        if any(w in lower for w in mjpeg_warnings):
+            # These are warnings, not errors - camera is still valid
+            return True, f"ffmpeg opened with MJPEG warnings (non-fatal): {output[:200]}"
+        
+        # Fatal errors - camera is truly not accessible
+        fatal_errors = [
+            "inappropriate ioctl",
+            "not a video capture device",
+            "no such device",
+            "permission denied",
+            "invalid argument",
+            "no medium found",
+        ]
+        if any(err in lower for err in fatal_errors):
+            return False, output or "fatal camera error: invalid v4l2 capture device"
+        
+        # Unknown errors - be permissive, let streaming manager handle it
+        # Return True so the camera isn't rejected, but log the issue
+        return True, f"ffmpeg probe had issues but camera accepted: {output[:500]}"
 
     def _is_camera_device(self, device_path: str, name: str) -> bool:
         """Check if device is likely a camera (not a codec/decoder)."""
@@ -287,35 +330,61 @@ class CameraDetector:
                                     override: Optional[str]) -> Optional[str]:
         """
         Select the best device for internal/external role.
-        Ordering: MJPEG > YUYV > any format, prefer lower /dev/video index.
+        
+        Scoring prioritizes:
+        1. Explicit override
+        2. Device that is /dev/video0 (typically internal)
+        3. Bus type (platform > usb)
+        4. Device index (lower is better)
+        
+        Format enumeration is NOT used for selection since it can be incomplete.
+        Instead, we rely on the ffmpeg_can_open probe which tests actual streaming.
         """
         if override and override in candidates:
             return override
 
-        # Score devices based on format quality
+        # Score devices based on bus type and device index
+        # Lower score = better
         scored = []
         for dev in candidates:
             name = self._get_device_name(dev)
-            formats = self._probe_formats(dev)
-            # Score = negative of preferred format rank (higher is better)
-            score = -999
-            for i, fmt in enumerate(self.PREFERRED_FORMATS):
-                if fmt in formats:
-                    score = -i
-                    break
-            scored.append((score, dev, name, formats))
+            bus = self._get_device_bus(dev)
+            
+            # Score: lower is better
+            score = 0
+            
+            # Prefer platform (built-in) over USB
+            if bus == "platform":
+                score += 0
+            elif bus == "usb":
+                score += 100
+            else:
+                score += 200
+            
+            # Prefer lower device number (e.g., /dev/video0)
+            try:
+                dev_num = int(dev.replace("/dev/video", ""))
+                score += dev_num * 10
+            except ValueError:
+                score += 999
+            
+            # Bonus for internal name keywords
+            name_lower = name.lower()
+            if any(kw in name_lower for kw in self.INTERNAL_NAME_KEYWORDS):
+                score -= 50
+            
+            scored.append((score, dev, name))
 
-        # Sort by score descending, then by device index.
-        scored.sort(key=lambda x: (-x[0], self._device_sort_key(x[1])))
+        # Sort by score ascending, then by device index
+        scored.sort(key=lambda x: (x[0], self._device_sort_key(x[1])))
 
         if scored:
             best = scored[0]
             logger.info(
-                "Selected %s camera: %s (%s), formats=%s, score=%s",
+                "Selected %s camera: %s (%s), score=%s",
                 role,
                 best[1],
                 best[2],
-                best[3],
                 best[0],
             )
             return best[1]
@@ -326,7 +395,14 @@ class CameraDetector:
                        candidate_formats: dict[str, List[str]]) -> dict[str, str]:
         """
         Determine which physical camera is internal vs external.
-        Returns dict mapping role -> physical_id.
+        
+        Strategy:
+        1. Handle explicit overrides
+        2. Classify remaining by bus type (platform = internal, usb = external)
+        3. Use name heuristics for USB cameras
+        4. Pick best device based on bus and device index
+        
+        Format enumeration is NOT used for role resolution.
         """
         internal_phys = None
         external_phys = None
@@ -388,28 +464,38 @@ class CameraDetector:
     def _pick_best_camera(self, phys_ids: List[str],
                           candidates: dict[str, str],
                           candidate_formats: dict[str, List[str]]) -> Optional[str]:
-        """Select best camera from list: prefers MJPEG, then lower dev index."""
+        """
+        Select best camera from list.
+        
+        Prioritizes:
+        1. /dev/video0 (typically internal/built-in)
+        2. Lower device index
+        
+        Format enumeration is not used for selection since it can be incomplete
+        and the ffmpeg probe already validated the device.
+        """
         best_phys = None
-        best_rank = 999
-        best_devnum = 999
+        best_score = 999
 
         for phys_id in phys_ids:
-            formats = candidate_formats.get(phys_id, [])
-            # Find rank of best preferred format
-            fmt_lower = [f.lower() for f in formats]
-            rank = next((i for i, pref in enumerate(self.PREFERRED_FORMATS)
-                        if pref in fmt_lower), 999)
-
             dev_path = candidates[phys_id]
-            # Extract numeric part for tie-breaking
+            
+            # Score: lower is better
+            score = 0
+            
+            # Strong preference for /dev/video0
+            if dev_path == "/dev/video0":
+                score -= 1000
+            
+            # Prefer lower device number
             try:
                 dev_num = int(dev_path.replace("/dev/video", ""))
+                score += dev_num
             except ValueError:
-                dev_num = 999
-
-            if (rank < best_rank) or (rank == best_rank and dev_num < best_devnum):
-                best_rank = rank
-                best_devnum = dev_num
+                score += 999
+            
+            if score < best_score:
+                best_score = score
                 best_phys = phys_id
 
         return best_phys if best_phys else (phys_ids[0] if phys_ids else None)
@@ -417,7 +503,14 @@ class CameraDetector:
     def _resolve_internal_external(self, valid_cameras: List[str]) -> dict:
         """
         Determine which camera is internal vs external.
-        Returns dict with 'internal' and 'external' keys (may be empty).
+        
+        Strategy:
+        1. Handle explicit overrides
+        2. Classify remaining by bus type (platform = internal, usb = external)
+        3. Use name heuristics for USB cameras
+        4. Pick best device based on bus and device index
+        
+        Format enumeration is NOT used for role resolution.
         """
         internal = None
         external = None
@@ -521,21 +614,24 @@ class CameraDetector:
 
             phys_id = self._get_physical_device_id(dev) or dev  # fallback to dev path
 
-            # Score this node (prefer MJPEG if formats known)
-            def node_score(fmt_list: List[str], dev_path: str) -> int:
-                device_bonus = -100 if dev_path == "/dev/video0" else 0
-                if not fmt_list:
-                    return 500 + device_bonus
-                for i, pref in enumerate(self.PREFERRED_FORMATS):
-                    if pref in [f.lower() for f in fmt_list]:
-                        return -i + device_bonus
-                return 200 + device_bonus
+            # Score this node based on device index and bus type
+            # NOT based on format enumeration (which can be incomplete)
+            # Lower score = better
+            def node_score(dev_path: str) -> int:
+                score = 0
+                # Strong preference for /dev/video0 (typically internal)
+                if dev_path == "/dev/video0":
+                    score -= 1000
+                # Prefer lower device number
+                try:
+                    dev_num = int(dev_path.replace("/dev/video", ""))
+                    score += dev_num * 10
+                except ValueError:
+                    score += 999
+                return score
 
-            current_score = node_score(formats, dev)
-            existing_score = node_score(
-                candidate_formats.get(phys_id, []),
-                candidates.get(phys_id, ""),
-            )
+            current_score = node_score(dev)
+            existing_score = node_score(candidates.get(phys_id, ""))
 
             if phys_id not in candidates or current_score < existing_score:
                 candidates[phys_id] = dev
