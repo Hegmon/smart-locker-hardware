@@ -476,6 +476,11 @@ class CameraDetector:
         classify as internal/external, and select best node per camera.
         """
         all_devices = self._list_v4l2_devices()
+        
+        # Ensure /dev/video0 is tested first if present
+        all_devices.sort(key=self._device_sort_key)
+        
+        logger.info("=== Camera Detection: Probing %d device(s) ===", len(all_devices))
 
         # Step 1: Gather candidate nodes and compute physical device ID
         candidates: dict[str, str] = {}   # phys_id -> best node path
@@ -483,6 +488,7 @@ class CameraDetector:
         candidate_formats: dict[str, List[str]] = {}   # phys_id -> formats
         candidate_resolutions: dict[str, List[str]] = {}   # phys_id -> resolutions
         candidate_reasons: dict[str, str] = {}   # phys_id -> validation reason
+        candidate_ffmpeg_results: dict[str, str] = {}   # phys_id -> ffmpeg probe result
 
         for dev in all_devices:
             name = self._get_device_name(dev)
@@ -493,18 +499,20 @@ class CameraDetector:
                 continue
 
             formats = self._probe_formats(dev)
-            preferred_format = self._preferred_capture_format(formats)
-            if not preferred_format:
-                logger.info(
-                    "Skipping invalid camera node: %s (%s), no MJPEG/YUYV formats",
-                    dev,
-                    name,
-                )
-                continue
-
-            can_open, reason = self._ffmpeg_can_open(dev, formats)
+            logger.info("Device %s (%s) formats from enumeration: %s", dev, name, formats)
+            
+            # CRITICAL FIX: Do NOT reject cameras based solely on format enumeration
+            # Always attempt ffmpeg probe regardless of format list results
+            # This handles cases where v4l2-ctl enumeration is incomplete but ffmpeg works
+            
+            can_open, ffmpeg_reason = self._ffmpeg_can_open(dev, formats)
+            
+            # Log ffmpeg test result for debugging
+            logger.info("Device %s (%s) ffmpeg probe: can_open=%s, reason=%s", 
+                       dev, name, can_open, ffmpeg_reason)
+            
             if not can_open:
-                logger.info("Skipping invalid camera node: %s (%s), %s", dev, name, reason)
+                logger.info("Skipping invalid camera node: %s (%s), %s", dev, name, ffmpeg_reason)
                 continue
 
             resolutions = self._probe_resolutions(dev)
@@ -532,7 +540,8 @@ class CameraDetector:
                 candidate_names[phys_id] = name
                 candidate_formats[phys_id] = formats
                 candidate_resolutions[phys_id] = resolutions
-                candidate_reasons[phys_id] = reason
+                candidate_reasons[phys_id] = ffmpeg_reason
+                candidate_ffmpeg_results[phys_id] = ffmpeg_reason
 
         if not candidates:
             logger.warning("No valid camera devices found")
@@ -542,12 +551,12 @@ class CameraDetector:
         logger.info("Found %d physical camera(s)", len(candidates))
         for phys_id, dev in candidates.items():
             logger.info(
-                "Camera candidate: %s (%s), formats=%s, resolutions=%s, reason=%s",
+                "Camera candidate: %s (%s), formats=%s, resolutions=%s, ffmpeg=%s",
                 dev,
                 candidate_names[phys_id],
                 candidate_formats[phys_id],
                 candidate_resolutions.get(phys_id, []),
-                candidate_reasons.get(phys_id, ""),
+                candidate_ffmpeg_results.get(phys_id, ""),
             )
 
         # Step 2: Resolve roles using bus + name heuristics
@@ -578,6 +587,7 @@ class CameraDetector:
                 reason=candidate_reasons.get(phys_id, ""),
             ))
 
+        logger.info("=== Camera Detection Complete: %d role(s) assigned ===", len(result))
         return result
 
     def get_internal_camera(self) -> Optional[CameraInfo]:
