@@ -1,10 +1,10 @@
 """
 Camera Detection and Classification with Format Probing
 Auto-detects valid camera devices, filters out codec/media nodes,
-and selects optimal cameras based on format support (MJPEG > YUYV).
+and selects optimal cameras based on format support (MJPEG > YUYV > H264).
 
 Strategy:
-- Use v4l2-ctl to enumerate supported formats for each /dev/videoX
+- Use FFmpeg-based format probing (not just V4L2 enumeration)
 - Filter out codec/ISP/HEVC devices by name heuristics
 - Prefer MJPEG-capable devices for internal/external roles
 - Fallback to YUYV if MJPEG unavailable
@@ -53,7 +53,7 @@ class CameraDetector:
     ]
 
     # Preferred formats (ordered by preference)
-    PREFERRED_FORMATS = ["mjpeg", "mjpg", "yuyv", "yuyv422", "yuv422"]
+    PREFERRED_FORMATS = ["mjpeg", "mjpg", "yuyv", "yuyv422", "yuv422", "h264"]
 
     FORMAT_PROBE_TIMEOUT = 3  # seconds
 
@@ -606,3 +606,4 @@ class CameraDetector:
 
     def get_cameras_for_streaming(self) -> dict[str, CameraInfo]:
         return {cam.camera_type: cam for cam in self.detect_cameras()}
+
