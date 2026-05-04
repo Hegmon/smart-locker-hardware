@@ -1,32 +1,62 @@
 """
-Camera Detection and Classification
-Auto-detects internal (CSI/platform) vs external (USB) cameras on Raspberry Pi.
+Camera Detection and Classification with Format Probing
+Auto-detects valid camera devices, filters out codec/media nodes,
+and selects optimal cameras based on format support (MJPEG > YUYV).
 
-Logic:
-- INTERNAL_CAMERA_DEVICE and EXTERNAL_CAMERA_DEVICE env vars override auto-detection
-- Uses sysfs to check device bus (platform/PCI vs USB) for accurate classification
-- Falls back to positional heuristic if sysfs is unavailable
+Strategy:
+- Use v4l2-ctl to enumerate supported formats for each /dev/videoX
+- Filter out codec/ISP/HEVC devices by name heuristics
+- Prefer MJPEG-capable devices for internal/external roles
+- Fallback to YUYV if MJPEG unavailable
+- Support explicit overrides via INTERNAL_CAMERA_DEVICE / EXTERNAL_CAMERA_DEVICE
 """
+
 from __future__ import annotations
 
+import json
+import logging
 import os
+import subprocess
+import sys
 from glob import glob
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, List
 
 from .device_config import get_optional_config
 
+logger = logging.getLogger(__name__)
+
 
 class CameraInfo(NamedTuple):
-    """Information about a detected camera"""
+    """Information about a detected camera with format support"""
     device_path: str
     camera_type: str  # "internal" or "external"
-    index: int  # 0-based index among detected cameras
+    index: int
+    formats: List[str]  # supported pixel formats
+    name: str  # friendly name from sysfs
+    resolutions: List[str] = []
+    reason: str = ""
 
 
 class CameraDetector:
-    """Detects and classifies cameras for streaming"""
-    
+    """Detects, classifies, and selects optimal cameras for streaming"""
+
+    # Keywords that indicate a non-camera device
+    NON_CAMERA_KEYWORDS = [
+        "codec", "isp", "hevc", "h264", "h265", "encoder",
+        "decoder", "component", "render", "display"
+    ]
+
+    # Name keywords that suggest integrated/built-in camera
+    INTERNAL_NAME_KEYWORDS = [
+        "integrated", "built-in", "internal", "onboard", "imx"
+    ]
+
+    # Preferred formats (ordered by preference)
+    PREFERRED_FORMATS = ["mjpeg", "mjpg", "yuyv", "yuyv422", "yuv422"]
+
+    FORMAT_PROBE_TIMEOUT = 3  # seconds
+
     def __init__(self):
         # Explicit overrides from env/config (None if not set)
         self.override_internal = (
@@ -37,40 +67,8 @@ class CameraDetector:
             os.getenv("EXTERNAL_CAMERA_DEVICE")
             or get_optional_config("EXTERNAL_CAMERA_DEVICE")
         )
-    
-    def _get_device_bus(self, device_path: str) -> Optional[str]:
-        """
-        Check sysfs to determine the bus type of a video device.
-        Returns "platform" for internal/CSI, "usb" for external USB, or None if unknown.
-        """
-        try:
-            # /sys/class/video4linux/videoX -> /sys/devices/.../videoX
-            video_dir = Path(f"/sys/class/video4linux/{Path(device_path).name}")
-            if not video_dir.exists():
-                return None
-            
-            # Follow the 'device' symlink to get the physical device
-            device_link = video_dir / "device"
-            if not device_link.exists() or not device_link.is_symlink():
-                return None
-            
-            # Resolve the symlink target
-            target = os.readlink(device_link)
-            
-            # Check if the device path indicates USB or platform/PCI
-            if "/usb" in target or "/usb" in str(Path(target).parents):
-                return "usb"
-            elif "/platform" in target:
-                return "platform"
-            # Some PCI devices may not have explicit usb in path but under pci
-            elif "/pci" in target:
-                return "pci"  # could be capture card etc
-            else:
-                return None
-        except (OSError, ValueError):
-            return None
-    
-    def _get_device_name(self, device_path: str) -> Optional[str]:
+
+    def _get_device_name(self, device_path: str) -> str:
         """Read the video device's friendly name from sysfs."""
         try:
             name_file = Path(f"/sys/class/video4linux/{Path(device_path).name}/name")
@@ -78,93 +76,381 @@ class CameraDetector:
                 return name_file.read_text().strip()
         except Exception:
             pass
-        return None
-    
-    def detect_cameras(self) -> list[CameraInfo]:
+        return ""
+
+    def _get_device_bus(self, device_path: str) -> Optional[str]:
+        """Check sysfs to determine the bus type of a video device."""
+        try:
+            video_dir = Path(f"/sys/class/video4linux/{Path(device_path).name}")
+            if not video_dir.exists():
+                return None
+            device_link = video_dir / "device"
+            if not device_link.exists() or not device_link.is_symlink():
+                return None
+            target = os.readlink(device_link)
+            if "/usb" in target or "/usb" in str(Path(target).parents):
+                return "usb"
+            elif "/platform" in target:
+                return "platform"
+            elif "/pci" in target:
+                return "pci"
+            return None
+        except (OSError, ValueError):
+            return None
+
+    def _get_physical_device_id(self, device_path: str) -> Optional[str]:
         """
-        Detect available video devices and classify them.
-        
-        Strategy:
-        1. Use sysfs to determine bus type (platform=internal, usb=external)
-        2. If no platform cameras, use device name heuristics to guess internal among USB
-        3. Positional fallback if all else fails (first device = internal)
-        4. Apply explicit overrides if configured (forces a device to internal/external)
+        Get a stable identifier for the physical device (e.g., USB bus address).
+        Returns None if unavailable.
         """
-        devices = sorted(glob("/dev/video*"))
-        
-        if not devices:
-            return []
-        
-        # Partition devices by bus type using sysfs
-        platform_cameras: list[str] = []
-        usb_cameras: list[str] = []
-        unclassified: list[str] = []
-        
-        for device in devices:
-            bus = self._get_device_bus(device)
-            if bus == "platform":
-                platform_cameras.append(device)
-            elif bus == "usb":
-                usb_cameras.append(device)
-            else:
-                unclassified.append(device)
-        
-        # Determine internal and external sets
-        internal_set = set(platform_cameras)
-        external_set: set[str] = set(usb_cameras) | set(unclassified)
-        
-        # If no internal camera yet, try to infer from USB device name
-        if not internal_set and external_set:
-            for dev in sorted(external_set):
-                name = self._get_device_name(dev)
-                if name and any(kw in name.lower() for kw in ["integrated", "built-in", "internal", "onboard"]):
-                    internal_set.add(dev)
-                    external_set.remove(dev)
+        try:
+            video_dir = Path(f"/sys/class/video4linux/{Path(device_path).name}")
+            if not video_dir.exists():
+                return None
+            device_link = video_dir / "device"
+            if not device_link.exists() or not device_link.is_symlink():
+                return None
+            # Resolve to physical device path, strip /sys/fs prefix
+            target = os.readlink(device_link)
+            # Convert to absolute path under /sys
+            abs_target = (video_dir.parent / target).resolve()
+            # The physical device is usually a few levels up from videoX
+            # e.g., .../devices/pci0000:00/.../3-6:1.0 -> use 3-6:1.0
+            # We'll use the full resolved path as a unique ID
+            return str(abs_target)
+        except Exception:
+            return None
+
+    def _probe_formats(self, device_path: str) -> List[str]:
+        """Use v4l2-ctl or ffmpeg to get supported pixel formats."""
+        formats = []
+
+        # Try v4l2-ctl first (fast, clean output)
+        try:
+            result = subprocess.run(
+                ["v4l2-ctl", "--device", device_path, "--list-formats"],
+                capture_output=True, text=True, timeout=self.FORMAT_PROBE_TIMEOUT
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith("'") and "'" in line:
+                        fmt = line.split("'")[1].lower()
+                        formats.append(fmt)
+                if formats:
+                    return formats
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            pass
+
+        # Fallback: use ffmpeg to enumerate formats
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-f", "v4l2", "-list_formats", "all",
+                    "-i", device_path
+                ],
+                capture_output=True, text=True, timeout=self.FORMAT_PROBE_TIMEOUT
+            )
+            # Parse format list from stderr
+            output = result.stderr + result.stdout
+            for line in output.splitlines():
+                line = line.strip().lower()
+                # Look for format codes like: 'mjpg' / 'mjpeg' / 'yuyv422' etc.
+                if "'" in line:
+                    parts = line.split("'")
+                    if len(parts) >= 2:
+                        fmt = parts[1]
+                        # Only include known raw/compressed formats
+                        if fmt not in formats:
+                            formats.append(fmt)
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            pass
+
+        return formats
+
+    def _is_camera_device(self, device_path: str, name: str) -> bool:
+        """Check if device is likely a camera (not a codec/decoder)."""
+        name_lower = name.lower()
+        if any(kw in name_lower for kw in self.NON_CAMERA_KEYWORDS):
+            return False
+        # Accept if name passes filter; we'll try streaming even if we can't probe formats
+        return True
+
+    def _find_best_device_for_role(self, candidates: List[str],
+                                    role: str,
+                                    override: Optional[str]) -> Optional[str]:
+        """
+        Select the best device for internal/external role.
+        Ordering: MJPEG > YUYV > any format, prefer lower /dev/video index.
+        """
+        if override and override in candidates:
+            return override
+
+        # Score devices based on format quality
+        scored = []
+        for dev in candidates:
+            name = self._get_device_name(dev)
+            formats = self._probe_formats(dev)
+            # Score = negative of preferred format rank (higher is better)
+            score = -999
+            for i, fmt in enumerate(self.PREFERRED_FORMATS):
+                if fmt in formats:
+                    score = -i
                     break
-            # If still no internal, fall back to first device
-            if not internal_set:
-                first = devices[0]
-                internal_set.add(first)
-                external_set.discard(first)
-        
-        # Apply explicit overrides (force classification)
-        if self.override_internal and os.path.exists(self.override_internal):
-            internal_set.add(self.override_internal)
-            external_set.discard(self.override_internal)
-        if self.override_external and os.path.exists(self.override_external):
-            external_set.add(self.override_external)
-            internal_set.discard(self.override_external)
-        
-        # Build CameraInfo list
-        result = []
-        for idx, device in enumerate(devices):
-            cam_type = "internal" if device in internal_set else "external"
-            result.append(CameraInfo(
-                device_path=device,
-                camera_type=cam_type,
-                index=idx
-            ))
+            scored.append((score, dev, name, formats))
+
+        # Sort by score descending, then by device path
+        scored.sort(key=lambda x: (-x[0], x[1]))
+
+        if scored:
+            best = scored[0]
+            print(f"[INFO] Selected {role} camera: {best[1]} "
+                  f"({best[2]}), formats: {best[3]}, score: {best[0]}")
+            return best[1]
+        return None
+
+    def _resolve_roles(self, candidates: dict[str, str],
+                       candidate_names: dict[str, str],
+                       candidate_formats: dict[str, List[str]]) -> dict[str, str]:
+        """
+        Determine which physical camera is internal vs external.
+        Returns dict mapping role -> physical_id.
+        """
+        internal_phys = None
+        external_phys = None
+
+        # Handle explicit overrides - map device path to phys_id
+        if self.override_internal:
+            for phys_id, dev in candidates.items():
+                if dev == self.override_internal:
+                    internal_phys = phys_id
+                    break
+        if self.override_external:
+            for phys_id, dev in candidates.items():
+                if dev == self.override_external:
+                    external_phys = phys_id
+                    break
+
+        # Pool of remaining physical cameras
+        remaining_phys = [p for p in candidates.keys()
+                         if p not in {internal_phys, external_phys}]
+
+        # Classify remaining by bus
+        platform_phys = []
+        usb_phys = []
+        for phys_id in remaining_phys:
+            dev_node = candidates[phys_id]
+            bus = self._get_device_bus(dev_node)
+            if bus == "platform":
+                platform_phys.append(phys_id)
+            elif bus == "usb":
+                usb_phys.append(phys_id)
+
+        # Assign internal
+        if not internal_phys:
+            if platform_phys:
+                internal_phys = self._pick_best_camera(platform_phys, candidates, candidate_formats)
+            elif usb_phys:
+                # Name heuristic among USB
+                for phys_id in usb_phys:
+                    name = candidate_names[phys_id].lower()
+                    if any(kw in name for kw in self.INTERNAL_NAME_KEYWORDS):
+                        internal_phys = phys_id
+                        break
+                if not internal_phys:
+                    internal_phys = usb_phys[0]
+
+        # Assign external from remaining
+        if not external_phys:
+            pool = [p for p in remaining_phys if p != internal_phys]
+            if pool:
+                external_phys = self._pick_best_camera(pool, candidates, candidate_formats)
+
+        result = {}
+        if internal_phys:
+            result["internal"] = internal_phys
+        if external_phys:
+            result["external"] = external_phys
         return result
-    
+
+    def _pick_best_camera(self, phys_ids: List[str],
+                          candidates: dict[str, str],
+                          candidate_formats: dict[str, List[str]]) -> Optional[str]:
+        """Select best camera from list: prefers MJPEG, then lower dev index."""
+        best_phys = None
+        best_rank = 999
+        best_devnum = 999
+
+        for phys_id in phys_ids:
+            formats = candidate_formats.get(phys_id, [])
+            # Find rank of best preferred format
+            fmt_lower = [f.lower() for f in formats]
+            rank = next((i for i, pref in enumerate(self.PREFERRED_FORMATS)
+                        if pref in fmt_lower), 999)
+
+            dev_path = candidates[phys_id]
+            # Extract numeric part for tie-breaking
+            try:
+                dev_num = int(dev_path.replace("/dev/video", ""))
+            except ValueError:
+                dev_num = 999
+
+            if (rank < best_rank) or (rank == best_rank and dev_num < best_devnum):
+                best_rank = rank
+                best_devnum = dev_num
+                best_phys = phys_id
+
+        return best_phys if best_phys else (phys_ids[0] if phys_ids else None)
+
+    def _resolve_internal_external(self, valid_cameras: List[str]) -> dict:
+        """
+        Determine which camera is internal vs external.
+        Returns dict with 'internal' and 'external' keys (may be empty).
+        """
+        internal = None
+        external = None
+
+        # Handle explicit overrides first
+        if self.override_internal and self.override_internal in valid_cameras:
+            internal = self.override_internal
+        if self.override_external and self.override_external in valid_cameras:
+            external = self.override_external
+
+        # Remove overrides from pool
+        remaining = [dev for dev in valid_cameras
+                     if dev not in {internal, external}]
+
+        # Classify remaining by bus type
+        platform_cams = []
+        usb_cams = []
+        for dev in remaining:
+            bus = self._get_device_bus(dev)
+            if bus == "platform":
+                platform_cams.append(dev)
+            elif bus == "usb":
+                usb_cams.append(dev)
+
+        # Strategy:
+        # - If we already have internal from override: fine
+        # - Else: pick platform cameras first; if none, use name heuristic on USB
+        if not internal:
+            if platform_cams:
+                internal = self._find_best_device_for_role(
+                    platform_cams, "internal", None)
+            elif usb_cams:
+                # Try to identify built-in USB camera by name
+                built_in = None
+                for dev in usb_cams:
+                    name = self._get_device_name(dev).lower()
+                    if any(kw in name for kw in self.INTERNAL_NAME_KEYWORDS):
+                        built_in = dev
+                        break
+                internal = built_in or usb_cams[0]
+
+        # Assign external from remaining pool
+        if not external:
+            pool = [d for d in remaining if d != internal]
+            if pool:
+                external = self._find_best_device_for_role(pool, "external", None)
+
+        result = {}
+        if internal:
+            result["internal"] = internal
+        if external:
+            result["external"] = external
+        return result
+
+    def detect_cameras(self) -> List[CameraInfo]:
+        """
+        Detect all valid camera devices, de-duplicate physical devices,
+        classify as internal/external, and select best node per camera.
+        """
+        all_devices = sorted(glob("/dev/video*"))
+
+        # Step 1: Gather candidate nodes and compute physical device ID
+        candidates: dict[str, str] = {}   # phys_id -> best node path
+        candidate_names: dict[str, str] = {}   # phys_id -> friendly name
+        candidate_formats: dict[str, List[str]] = {}   # phys_id -> formats
+
+        for dev in all_devices:
+            name = self._get_device_name(dev)
+
+            # Filter out non-camera devices early
+            if not self._is_camera_device(dev, name):
+                print(f"[INFO] Skipping non-camera device: {dev} ({name})")
+                continue
+
+            formats = self._probe_formats(dev)
+            # Even if format probing fails, we'll include the device (FFmpeg will decide)
+
+            phys_id = self._get_physical_device_id(dev) or dev  # fallback to dev path
+
+            # Score this node (prefer MJPEG if formats known)
+            def node_score(fmt_list: List[str]) -> int:
+                if not fmt_list:
+                    return 500  # unknown formats = middle priority
+                for i, pref in enumerate(self.PREFERRED_FORMATS):
+                    if pref in [f.lower() for f in fmt_list]:
+                        return -i
+                return 200  # non-mjpeg/yuyv formats
+
+            current_score = node_score(formats)
+            existing_score = node_score(candidate_formats.get(phys_id, []))
+
+            if phys_id not in candidates or current_score < existing_score:
+                candidates[phys_id] = dev
+                candidate_names[phys_id] = name
+                candidate_formats[phys_id] = formats
+
+        if not candidates:
+            logger.warning("No valid camera devices found")
+            return []
+
+        # Log summary
+        print(f"[INFO] Found {len(candidates)} physical camera(s):")
+        for phys_id, dev in candidates.items():
+            print(f"  {dev} ({candidate_names[phys_id]}) -> {candidate_formats[phys_id]}")
+
+        # Step 2: Resolve roles using bus + name heuristics
+        roles = self._resolve_roles(candidates, candidate_names, candidate_formats)
+
+        # Step 3: Build CameraInfo for each role
+        result = []
+        if roles.get("internal"):
+            phys_id = roles["internal"]
+            result.append(CameraInfo(
+                device_path=candidates[phys_id],
+                camera_type="internal",
+                index=0,
+                formats=candidate_formats[phys_id],
+                name=candidate_names[phys_id],
+            ))
+        if roles.get("external"):
+            phys_id = roles["external"]
+            result.append(CameraInfo(
+                device_path=candidates[phys_id],
+                camera_type="external",
+                index=1,
+                formats=candidate_formats[phys_id],
+                name=candidate_names[phys_id],
+            ))
+
+        return result
+
     def get_internal_camera(self) -> Optional[CameraInfo]:
-        """Get internal camera if available"""
         for cam in self.detect_cameras():
             if cam.camera_type == "internal":
                 return cam
         return None
-    
+
     def get_external_camera(self) -> Optional[CameraInfo]:
-        """Get external camera if available"""
         for cam in self.detect_cameras():
             if cam.camera_type == "external":
                 return cam
         return None
-    
+
     def get_cameras_for_streaming(self) -> dict[str, CameraInfo]:
-        """
-        Return dict with keys 'internal' and 'external' if cameras available.
-        Missing cameras are simply omitted from the dict.
-        """
         result = {}
         internal = self.get_internal_camera()
         if internal:
