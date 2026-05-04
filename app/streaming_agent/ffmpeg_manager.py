@@ -81,21 +81,26 @@ class FFmpegManager:
     def _input_format_candidates(self, formats: list[str]) -> list[str]:
         """
         Select input formats in failover order: MJPEG preferred, then YUYV.
-        If formats list is empty, try auto-detection (empty string).
+        NEVER uses auto-detection for V4L2 devices - explicit format required.
+        Returns empty list if no supported formats found (should fail gracefully).
         """
         fmt_lower = [f.lower() for f in formats]
         candidates: list[str] = []
+        
+        # Priority 1: MJPEG (preferred for bandwidth/quality)
         for pref in ["mjpeg", "mjpg"]:
             if pref in fmt_lower:
                 candidates.append("mjpeg")
                 break
+        
+        # Priority 2: YUYV (fallback)
         for pref in ["yuyv", "yuyv422", "yuv422"]:
             if pref in fmt_lower:
                 candidates.append("yuyv422")
                 break
-        # If no known formats detected, try auto-detection
-        if not candidates:
-            candidates.append("")
+        
+        # NO AUTO-FALLBACK: Return empty list if no supported formats
+        # This ensures FFmpeg never uses auto-detection which causes black/frozen streams
         return candidates
 
     def _is_device_busy(self, device_path: str) -> bool:
@@ -138,8 +143,8 @@ class FFmpegManager:
         video_size: str = "640x480",
     ) -> list[str]:
         """
-        Build FFmpeg command with optimal input format.
-        Returns None if format selection fails critically.
+        Build FFmpeg command with EXPLICIT input format.
+        NEVER uses auto-detection for V4L2 devices.
         """
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning"]
         cmd.extend([
@@ -148,8 +153,17 @@ class FFmpegManager:
             "-video_size", video_size,
         ])
 
-        if input_format:
-            cmd.extend(["-input_format", input_format])
+        # CRITICAL: Always use explicit input_format
+        # Empty string or None means format selection failed and should not reach here
+        if not input_format:
+            logger.error(
+                "CRITICAL: No input format specified for %s (device=%s). "
+                "This should never happen - format selection must fail before building command.",
+                stream.camera_type, stream.device_path
+            )
+            raise ValueError(f"No input format specified for {stream.camera_type}")
+        
+        cmd.extend(["-input_format", input_format])
 
         cmd.extend(["-i", stream.device_path])
 
@@ -172,9 +186,9 @@ class FFmpegManager:
         cmd.append(output_url)
 
         logger.info(
-            "Built FFmpeg cmd for %s: device=%s, input_format=%s",
+            "Built FFmpeg cmd for %s: device=%s, input_format=%s, resolution=%s",
             stream.camera_type, stream.device_path,
-            input_format or "auto",
+            input_format, video_size,
         )
         return cmd
 
@@ -208,21 +222,45 @@ class FFmpegManager:
         last_error = ""
         candidates = self._input_format_candidates(stream.formats)
         
+        # Determine video size based on camera type
+        # Internal camera: 640x480 (stable, lower bandwidth)
+        # External camera: 1280x720 (preferred resolution)
+        if stream.camera_type == "internal":
+            video_size = "640x480"
+        else:
+            video_size = "1280x720"
+        
         logger.info(
-            "Attempting to start FFmpeg for %s: device=%s, detected_formats=%s, candidates=%s",
+            "Attempting to start FFmpeg for %s: device=%s, detected_formats=%s, candidates=%s, resolution=%s",
             stream.camera_type,
             stream.device_path,
             ",".join(stream.formats) or "none",
-            candidates,
+            candidates if candidates else "NO_SUPPORTED_FORMATS",
+            video_size,
         )
         
+        # CRITICAL: Never use auto-detection for V4L2 devices
+        # If no supported formats found, fail immediately with clear error
+        if not candidates:
+            stream.last_error = (
+                f"No supported V4L2 formats (MJPEG/YUYV) detected for {stream.device_path}. "
+                f"Detected: {', '.join(stream.formats) if stream.formats else 'none'}. "
+                f"Auto-detection is disabled to prevent black/frozen streams."
+            )
+            stream.status = "error"
+            logger.error("%s", stream.last_error)
+            if self.on_stream_status_change:
+                self.on_stream_status_change(stream.camera_type, "error")
+            return False
+        
         for input_format in candidates:
-            cmd = self._build_ffmpeg_cmd(stream, input_format)
+            cmd = self._build_ffmpeg_cmd(stream, input_format, video_size)
             logger.info(
-                "Starting FFmpeg for %s: selected camera device=%s format=%s command=%s",
+                "Starting FFmpeg for %s: device=%s, format=%s, resolution=%s, command=%s",
                 stream.camera_type,
                 stream.device_path,
-                input_format or "auto",
+                input_format,
+                video_size,
                 " ".join(cmd),
             )
 
@@ -243,9 +281,9 @@ class FFmpegManager:
                     )
                     last_error = stderr.strip() or f"ffmpeg exited with code {returncode}"
                     logger.warning(
-                        "FFmpeg failed to open %s with %s: %s",
+                        "FFmpeg failed to open %s with format=%s: %s",
                         stream.device_path,
-                        input_format or "auto",
+                        input_format,
                         last_error[:500],
                     )
                     if self._handle_start_failure(stream, last_error):
@@ -257,16 +295,17 @@ class FFmpegManager:
                 stream.last_start_time = time.time()
                 stream.last_error = None
                 stream.last_command = cmd
-                stream.selected_format = input_format or None
-                stream.selected_size = "640x480"
+                stream.selected_format = input_format
+                stream.selected_size = video_size
                 stream.status = "running"
 
                 logger.info(
-                    "FFmpeg started for %s (PID: %d, device=%s, format=%s)",
+                    "FFmpeg started for %s (PID: %d, device=%s, format=%s, resolution=%s)",
                     stream.camera_type,
                     stream.process.pid,
                     stream.device_path,
-                    input_format or "auto",
+                    input_format,
+                    video_size,
                 )
 
                 if self.on_stream_status_change:
@@ -285,7 +324,7 @@ class FFmpegManager:
                 logger.exception("Failed to start FFmpeg for %s", stream.camera_type)
                 break
 
-        stream.last_error = last_error or "No suitable input format"
+        stream.last_error = last_error or f"All format attempts failed for {stream.camera_type}"
         stream.status = "error"
 
         if self.on_stream_status_change:
