@@ -106,7 +106,11 @@ class StreamingAgent:
         
         # Register cameras
         for cam_type, cam_info in cameras.items():
-            self.ffmpeg_manager.add_stream(cam_type, cam_info.device_path)
+            self.ffmpeg_manager.add_stream(
+                cam_type,
+                cam_info.device_path,
+                getattr(cam_info, 'formats', [])
+            )
         
         # 3. Initialize verifier using configured RTSP publish target and public HLS URL.
         self.verifier = StreamVerifier(
