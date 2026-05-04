@@ -199,12 +199,85 @@ class CameraDetector:
 
         return formats
 
+    def _probe_resolutions(self, device_path: str) -> List[str]:
+        """Return known frame sizes from v4l2-ctl."""
+        resolutions: list[str] = []
+        try:
+            result = subprocess.run(
+                ["v4l2-ctl", "--device", device_path, "--list-formats-ext"],
+                capture_output=True,
+                text=True,
+                timeout=self.FORMAT_PROBE_TIMEOUT,
+            )
+            if result.returncode != 0:
+                return resolutions
+
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                marker = "Size: Discrete "
+                if marker in line:
+                    size = line.split(marker, 1)[1].strip()
+                    if size and size not in resolutions:
+                        resolutions.append(size)
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            pass
+        return resolutions
+
+    def _preferred_capture_format(self, formats: List[str]) -> Optional[str]:
+        fmt_lower = [f.lower() for f in formats]
+        if "mjpeg" in fmt_lower or "mjpg" in fmt_lower:
+            return "mjpeg"
+        if "yuyv" in fmt_lower or "yuyv422" in fmt_lower or "yuv422" in fmt_lower:
+            return "yuyv422"
+        return None
+
+    def _ffmpeg_can_open(self, device_path: str, formats: List[str]) -> tuple[bool, str]:
+        """Probe whether FFmpeg can open the node as a capture device."""
+        input_format = self._preferred_capture_format(formats)
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2"]
+        if input_format:
+            cmd.extend(["-input_format", input_format])
+        cmd.extend([
+            "-video_size",
+            "640x480",
+            "-i",
+            device_path,
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        except FileNotFoundError:
+            return True, "ffmpeg not installed; accepted after v4l2 format probe"
+        except subprocess.TimeoutExpired:
+            return True, "ffmpeg open probe timed out; accepted for streaming manager retry"
+        except Exception as exc:
+            return False, str(exc)
+
+        output = (result.stderr + result.stdout).strip()
+        lower = output.lower()
+        if result.returncode == 0:
+            return True, f"ffmpeg opened with {input_format or 'auto'}"
+        if "device or resource busy" in lower or "resource busy" in lower:
+            return True, "device busy; streaming manager will free blocker"
+        if (
+            "inappropriate ioctl" in lower
+            or "not a video capture device" in lower
+            or "no formats found" in lower
+            or "vidioc_enum_fmt" in lower
+        ):
+            return False, output or "invalid v4l2 capture device"
+        return False, output or f"ffmpeg open probe failed with code {result.returncode}"
+
     def _is_camera_device(self, device_path: str, name: str) -> bool:
         """Check if device is likely a camera (not a codec/decoder)."""
         name_lower = name.lower()
         if any(kw in name_lower for kw in self.NON_CAMERA_KEYWORDS):
             return False
-        # Accept if name passes filter; we'll try streaming even if we can't probe formats
         return True
 
     def _find_best_device_for_role(self, candidates: List[str],
@@ -230,13 +303,19 @@ class CameraDetector:
                     break
             scored.append((score, dev, name, formats))
 
-        # Sort by score descending, then by device path
-        scored.sort(key=lambda x: (-x[0], x[1]))
+        # Sort by score descending, then by device index.
+        scored.sort(key=lambda x: (-x[0], self._device_sort_key(x[1])))
 
         if scored:
             best = scored[0]
-            print(f"[INFO] Selected {role} camera: {best[1]} "
-                  f"({best[2]}), formats: {best[3]}, score: {best[0]}")
+            logger.info(
+                "Selected %s camera: %s (%s), formats=%s, score=%s",
+                role,
+                best[1],
+                best[2],
+                best[3],
+                best[0],
+            )
             return best[1]
         return None
 
@@ -289,7 +368,7 @@ class CameraDetector:
                         internal_phys = phys_id
                         break
                 if not internal_phys:
-                    internal_phys = usb_phys[0]
+                    internal_phys = self._pick_best_camera(usb_phys, candidates, candidate_formats)
 
         # Assign external from remaining
         if not external_phys:
@@ -396,51 +475,80 @@ class CameraDetector:
         Detect all valid camera devices, de-duplicate physical devices,
         classify as internal/external, and select best node per camera.
         """
-        all_devices = sorted(glob("/dev/video*"))
+        all_devices = self._list_v4l2_devices()
 
         # Step 1: Gather candidate nodes and compute physical device ID
         candidates: dict[str, str] = {}   # phys_id -> best node path
         candidate_names: dict[str, str] = {}   # phys_id -> friendly name
         candidate_formats: dict[str, List[str]] = {}   # phys_id -> formats
+        candidate_resolutions: dict[str, List[str]] = {}   # phys_id -> resolutions
+        candidate_reasons: dict[str, str] = {}   # phys_id -> validation reason
 
         for dev in all_devices:
             name = self._get_device_name(dev)
 
             # Filter out non-camera devices early
             if not self._is_camera_device(dev, name):
-                print(f"[INFO] Skipping non-camera device: {dev} ({name})")
+                logger.info("Skipping non-camera device: %s (%s)", dev, name)
                 continue
 
             formats = self._probe_formats(dev)
-            # Even if format probing fails, we'll include the device (FFmpeg will decide)
+            preferred_format = self._preferred_capture_format(formats)
+            if not preferred_format:
+                logger.info(
+                    "Skipping invalid camera node: %s (%s), no MJPEG/YUYV formats",
+                    dev,
+                    name,
+                )
+                continue
+
+            can_open, reason = self._ffmpeg_can_open(dev, formats)
+            if not can_open:
+                logger.info("Skipping invalid camera node: %s (%s), %s", dev, name, reason)
+                continue
+
+            resolutions = self._probe_resolutions(dev)
 
             phys_id = self._get_physical_device_id(dev) or dev  # fallback to dev path
 
             # Score this node (prefer MJPEG if formats known)
-            def node_score(fmt_list: List[str]) -> int:
+            def node_score(fmt_list: List[str], dev_path: str) -> int:
+                device_bonus = -100 if dev_path == "/dev/video0" else 0
                 if not fmt_list:
-                    return 500  # unknown formats = middle priority
+                    return 500 + device_bonus
                 for i, pref in enumerate(self.PREFERRED_FORMATS):
                     if pref in [f.lower() for f in fmt_list]:
-                        return -i
-                return 200  # non-mjpeg/yuyv formats
+                        return -i + device_bonus
+                return 200 + device_bonus
 
-            current_score = node_score(formats)
-            existing_score = node_score(candidate_formats.get(phys_id, []))
+            current_score = node_score(formats, dev)
+            existing_score = node_score(
+                candidate_formats.get(phys_id, []),
+                candidates.get(phys_id, ""),
+            )
 
             if phys_id not in candidates or current_score < existing_score:
                 candidates[phys_id] = dev
                 candidate_names[phys_id] = name
                 candidate_formats[phys_id] = formats
+                candidate_resolutions[phys_id] = resolutions
+                candidate_reasons[phys_id] = reason
 
         if not candidates:
             logger.warning("No valid camera devices found")
             return []
 
         # Log summary
-        print(f"[INFO] Found {len(candidates)} physical camera(s):")
+        logger.info("Found %d physical camera(s)", len(candidates))
         for phys_id, dev in candidates.items():
-            print(f"  {dev} ({candidate_names[phys_id]}) -> {candidate_formats[phys_id]}")
+            logger.info(
+                "Camera candidate: %s (%s), formats=%s, resolutions=%s, reason=%s",
+                dev,
+                candidate_names[phys_id],
+                candidate_formats[phys_id],
+                candidate_resolutions.get(phys_id, []),
+                candidate_reasons.get(phys_id, ""),
+            )
 
         # Step 2: Resolve roles using bus + name heuristics
         roles = self._resolve_roles(candidates, candidate_names, candidate_formats)
@@ -455,6 +563,8 @@ class CameraDetector:
                 index=0,
                 formats=candidate_formats[phys_id],
                 name=candidate_names[phys_id],
+                resolutions=candidate_resolutions.get(phys_id, []),
+                reason=candidate_reasons.get(phys_id, ""),
             ))
         if roles.get("external"):
             phys_id = roles["external"]
@@ -464,6 +574,8 @@ class CameraDetector:
                 index=1,
                 formats=candidate_formats[phys_id],
                 name=candidate_names[phys_id],
+                resolutions=candidate_resolutions.get(phys_id, []),
+                reason=candidate_reasons.get(phys_id, ""),
             ))
 
         return result
@@ -481,11 +593,4 @@ class CameraDetector:
         return None
 
     def get_cameras_for_streaming(self) -> dict[str, CameraInfo]:
-        result = {}
-        internal = self.get_internal_camera()
-        if internal:
-            result["internal"] = internal
-        external = self.get_external_camera()
-        if external:
-            result["external"] = external
-        return result
+        return {cam.camera_type: cam for cam in self.detect_cameras()}
