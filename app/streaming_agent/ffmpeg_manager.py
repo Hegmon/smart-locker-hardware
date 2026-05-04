@@ -82,6 +82,25 @@ class FormatScanner:
         "external": ["1280x720", "1920x1080", "640x480"],
     }
     
+    # Explicit camera profiles for known devices
+    # These provide fallback when format probing is unreliable
+    CAMERA_PROFILES = {
+        "/dev/video0": {
+            "type": "internal",
+            "preferred_format": "yuyv422",
+            "fallback_formats": ["yuyv", "mjpeg", "auto"],
+            "resolution": "640x480",
+            "framerate": 30,
+        },
+        "/dev/video2": {
+            "type": "external",
+            "preferred_format": "mjpeg",
+            "fallback_formats": ["yuyv422", "h264", "auto"],
+            "resolution": "1280x720",
+            "framerate": 25,
+        },
+    }
+    
     @classmethod
     def probe_device(cls, device_path: str) -> CameraFormatProfile:
         """
@@ -233,6 +252,20 @@ class FormatScanner:
         cls, device_path: str, supported_formats: List[str]
     ) -> List[str]:
         """Determine safe resolutions for this device."""
+        # Check explicit camera profiles first
+        if device_path in cls.CAMERA_PROFILES:
+            profile = cls.CAMERA_PROFILES[device_path]
+            # Use type-specific defaults as base
+            camera_type = profile["type"]
+            resolutions = list(cls.SAFE_RESOLUTIONS.get(camera_type, ["640x480"]))
+            # Put the profile's preferred resolution first
+            if profile["resolution"] in resolutions:
+                resolutions.remove(profile["resolution"])
+                resolutions.insert(0, profile["resolution"])
+            else:
+                resolutions.insert(0, profile["resolution"])
+            return resolutions
+        
         # Determine camera type from device path
         camera_type = "external" if "video2" in device_path else "internal"
         
@@ -368,11 +401,22 @@ class FFmpegStreamEngine:
             if not safe_resolutions:
                 safe_resolutions = ["640x480"]
             
+            # Use explicit camera profile if available for this device
+            device_profile = FormatScanner.CAMERA_PROFILES.get(profile.device, {})
+            
             # Use highest safe resolution for external, lower for internal
             if camera_type == "external":
-                selected_res = safe_resolutions[0]  # Highest available
+                # Prefer profile resolution if available
+                if device_profile and "resolution" in device_profile:
+                    selected_res = device_profile["resolution"]
+                else:
+                    selected_res = safe_resolutions[0]  # Highest available
             else:
-                selected_res = "640x480"  # Stable default
+                # Internal camera - prefer 640x480 for stability
+                if device_profile and "resolution" in device_profile:
+                    selected_res = device_profile["resolution"]
+                else:
+                    selected_res = "640x480"  # Stable default
             
             stream = StreamProcess(
                 camera_type=camera_type,
@@ -426,6 +470,25 @@ class FFmpegStreamEngine:
         Tries formats in priority order until one works.
         """
         format_chain = stream.get_format_chain()
+        
+        # Check for explicit camera profile to override format chain
+        device_profile = FormatScanner.CAMERA_PROFILES.get(stream.device_path, {})
+        if device_profile and "preferred_format" in device_profile:
+            # Reorder format chain to prioritize the profile's preferred format
+            preferred = device_profile["preferred_format"]
+            fallbacks = device_profile.get("fallback_formats", [])
+            # Build new chain: preferred first, then fallbacks, then remaining
+            new_chain = []
+            if preferred and preferred not in new_chain:
+                new_chain.append(preferred)
+            for fb in fallbacks:
+                if fb and fb not in new_chain:
+                    new_chain.append(fb)
+            # Add remaining formats from original chain
+            for fmt in format_chain:
+                if fmt not in new_chain:
+                    new_chain.append(fmt)
+            format_chain = new_chain
         
         logger.info(
             "=== Starting stream: %s (device=%s) ===",
@@ -580,13 +643,24 @@ class FFmpegStreamEngine:
         
         When input_format is empty string, omits -input_format flag
         to allow FFmpeg auto-detection (last resort fallback).
+        
+        Uses explicit camera profiles for known devices to ensure
+        correct format and resolution selection.
         """
+        device_path = stream.device_path
+        
+        # Check for explicit camera profile
+        profile = FormatScanner.CAMERA_PROFILES.get(device_path, {})
+        
+        # Determine framerate from profile or default
+        framerate = profile.get("framerate", 25)
+        
         cmd = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel", "warning",
             "-f", "v4l2",
-            "-framerate", "25",
+            "-framerate", str(framerate),
             "-video_size", stream.selected_resolution,
             "-fflags", "nobuffer",
             "-flags", "low_delay",
@@ -597,7 +671,7 @@ class FFmpegStreamEngine:
         if input_format:
             cmd.extend(["-input_format", input_format])
         
-        cmd.extend(["-i", stream.device_path])
+        cmd.extend(["-i", device_path])
         
         # Encoding options optimized for Raspberry Pi
         cmd.extend([
