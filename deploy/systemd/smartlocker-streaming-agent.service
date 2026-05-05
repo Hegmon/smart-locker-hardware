@@ -2,7 +2,6 @@
 Description=Smart Locker Streaming Agent
 After=network-online.target smartlocker-hardware-agent.service
 Wants=network-online.target smartlocker-hardware-agent.service
-Requires=smartlocker-hardware-agent.service
 
 [Service]
 Type=simple
@@ -17,6 +16,7 @@ ExecStartPre=/usr/bin/test -d /etc/smartlocker
 ExecStart=/bin/sh -c 'cd __PROJECT_DIR__ && exec __PROJECT_DIR__/venv/bin/python -m app.streaming_agent.main'
 Restart=always
 RestartSec=3
+StartLimitIntervalSec=0
 StateDirectory=smartlocker
 LogsDirectory=smartlocker
 StandardOutput=append:/var/log/smartlocker/streaming-agent.log
