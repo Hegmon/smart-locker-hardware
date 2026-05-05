@@ -58,6 +58,29 @@ def get_light_status() -> dict[str, Any]:
     }
 
 
+def initialize_gpio_with_retry(max_attempts: int = 3, delay_seconds: float = 1.0) -> dict[str, Any]:
+    last_error: str | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            status = get_light_status()
+            if status["gpio_available"] or not status["configured_pin"]:
+                return {
+                    "initialized": True,
+                    "attempts": attempt,
+                    "gpio_available": status["gpio_available"],
+                }
+            last_error = "configured GPIO pin but /dev/gpiochip0 is not available"
+        except Exception as exc:
+            last_error = str(exc)
+        time.sleep(delay_seconds)
+
+    return {
+        "initialized": False,
+        "attempts": max_attempts,
+        "error": last_error or "unknown gpio initialization error",
+    }
+
+
 def get_system_hardware_status() -> dict[str, Any]:
     libcamera_result = _run_command(["libcamera-hello", "--list-cameras"])
     libcamera_available = libcamera_result is not None
