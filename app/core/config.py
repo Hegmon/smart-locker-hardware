@@ -4,101 +4,120 @@ import os
 from pathlib import Path
 from dataclasses import dataclass
 
+from app.deployment.device_identity import ensure_device_id
+from app.deployment.runtime_config import (
+    get_bool_setting,
+    get_float_setting,
+    get_int_setting,
+    get_path_setting,
+    get_str_setting,
+)
 from app.services.backend_state import load_backend_state
 # ---------------- BASIC SYSTEM CONFIG ----------------
-APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
-APP_PORT = int(os.getenv("APP_PORT", "8000"))
-APP_VERSION = os.getenv("APP_VERSION", "v1.0.0")
-WIFI_INTERFACE = os.getenv("WIFI_INTERFACE", "wlan0")
-HOTSPOT_CONNECTION = os.getenv("HOTSPOT_CONNECTION", "SmartLockerHotspot")
-HOTSPOT_SSID = os.getenv("HOTSPOT_SSID", "SmartLocker-Setup")
-HOTSPOT_PASSWORD = os.getenv("HOTSPOT_PASSWORD", "SmartLocker123")
-QBOX_DEVICE_NAME = os.getenv("QBOX_DEVICE_NAME", os.getenv("HOSTNAME", "QboxPi4"))[:25]
-MQTT_HOST = os.getenv("MQTT_HOST", "69.62.125.223")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_KEEPALIVE = int(os.getenv("MQTT_KEEPALIVE", "60"))
-MQTT_USERNAME = os.getenv("MQTT_USERNAME", "qbox")
-MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "strongpassword123")
+APP_HOST = get_str_setting("APP_HOST", "0.0.0.0")
+APP_PORT = get_int_setting("APP_PORT", 8000)
+APP_VERSION = get_str_setting("APP_VERSION", "v1.0.0")
+WIFI_INTERFACE = get_str_setting("WIFI_INTERFACE", "wlan0")
+HOTSPOT_CONNECTION = get_str_setting("HOTSPOT_CONNECTION", "SmartLockerHotspot")
+HOTSPOT_SSID = get_str_setting("HOTSPOT_SSID", "SmartLocker-Setup")
+HOTSPOT_PASSWORD = get_str_setting("HOTSPOT_PASSWORD", "SmartLocker123")
+QBOX_DEVICE_NAME = get_str_setting(
+    "QBOX_DEVICE_NAME",
+    get_str_setting("HOSTNAME", ensure_device_id()),
+)[:25]
+MQTT_HOST = get_str_setting("MQTT_HOST", "69.62.125.223")
+MQTT_PORT = get_int_setting("MQTT_PORT", 1883)
+MQTT_KEEPALIVE = get_int_setting("MQTT_KEEPALIVE", 60)
+MQTT_USERNAME = get_str_setting("MQTT_USERNAME", "qbox")
+MQTT_PASSWORD = get_str_setting("MQTT_PASSWORD", "strongpassword123")
 
-QBOX_DEVICE_REGISTRATION_URL = os.getenv(
+QBOX_DEVICE_REGISTRATION_URL = get_str_setting(
     "QBOX_DEVICE_REGISTRATION_URL",
     "https://backend.qbox.sa/devices/",
 )
-QBOX_TELEMETRY_URL = os.getenv(
+QBOX_TELEMETRY_URL = get_str_setting(
     "QBOX_TELEMETRY_URL",
     "https://backend.qbox.sa/devices-telemetry/",
 )
-QBOX_BACKEND_TIMEOUT_SECONDS = float(os.getenv("QBOX_BACKEND_TIMEOUT_SECONDS", "10"))
-QBOX_AUTO_REGISTER = os.getenv("QBOX_AUTO_REGISTER", "true").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-LOCKER_DEFAULT_STATUS = os.getenv("LOCKER_DEFAULT_STATUS", "LOCKED")
+QBOX_BACKEND_TIMEOUT_SECONDS = get_float_setting("QBOX_BACKEND_TIMEOUT_SECONDS", 10.0)
+QBOX_AUTO_REGISTER = get_bool_setting("QBOX_AUTO_REGISTER", True)
+LOCKER_DEFAULT_STATUS = get_str_setting("LOCKER_DEFAULT_STATUS", "LOCKED")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_DIR = BASE_DIR / "config"
 
-QBOX_WIFI_AGENT_BASE_URL = os.getenv(
+QBOX_WIFI_AGENT_BASE_URL = get_str_setting(
     "QBOX_WIFI_AGENT_BASE_URL",
     "https://backend.qbox.sa",
 ).rstrip("/")
-QBOX_WIFI_AGENT_DEVICE_ID = os.getenv("QBOX_WIFI_AGENT_DEVICE_ID", "").strip()
-QBOX_WIFI_AGENT_SCAN_INTERVAL_SECONDS = int(
-    os.getenv("QBOX_WIFI_AGENT_SCAN_INTERVAL_SECONDS", "60")
+QBOX_WIFI_AGENT_DEVICE_ID = get_str_setting(
+    "QBOX_WIFI_AGENT_DEVICE_ID",
+    ensure_device_id(),
+).strip()
+QBOX_WIFI_AGENT_SCAN_INTERVAL_SECONDS = get_int_setting(
+    "QBOX_WIFI_AGENT_SCAN_INTERVAL_SECONDS",
+    60,
 )
-QBOX_WIFI_AGENT_HEARTBEAT_SECONDS = int(
-    os.getenv("QBOX_WIFI_AGENT_HEARTBEAT_SECONDS", "300")
+QBOX_WIFI_AGENT_HEARTBEAT_SECONDS = get_int_setting(
+    "QBOX_WIFI_AGENT_HEARTBEAT_SECONDS",
+    300,
 )
-QBOX_WIFI_AGENT_REQUEST_TIMEOUT_SECONDS = float(
-    os.getenv("QBOX_WIFI_AGENT_REQUEST_TIMEOUT_SECONDS", "15")
+QBOX_WIFI_AGENT_REQUEST_TIMEOUT_SECONDS = get_float_setting(
+    "QBOX_WIFI_AGENT_REQUEST_TIMEOUT_SECONDS",
+    15.0,
 )
-QBOX_WIFI_AGENT_RETRY_MAX_ATTEMPTS = int(
-    os.getenv("QBOX_WIFI_AGENT_RETRY_MAX_ATTEMPTS", "3")
+QBOX_WIFI_AGENT_RETRY_MAX_ATTEMPTS = get_int_setting(
+    "QBOX_WIFI_AGENT_RETRY_MAX_ATTEMPTS",
+    3,
 )
-QBOX_WIFI_AGENT_RETRY_BASE_DELAY_SECONDS = float(
-    os.getenv("QBOX_WIFI_AGENT_RETRY_BASE_DELAY_SECONDS", "2")
+QBOX_WIFI_AGENT_RETRY_BASE_DELAY_SECONDS = get_float_setting(
+    "QBOX_WIFI_AGENT_RETRY_BASE_DELAY_SECONDS",
+    2.0,
 )
-QBOX_WIFI_AGENT_MAX_BATCH_SIZE = int(
-    os.getenv("QBOX_WIFI_AGENT_MAX_BATCH_SIZE", "20")
+QBOX_WIFI_AGENT_MAX_BATCH_SIZE = get_int_setting(
+    "QBOX_WIFI_AGENT_MAX_BATCH_SIZE",
+    20,
 )
-QBOX_WIFI_AGENT_MAX_RETRY_DELAY_SECONDS = int(
-    os.getenv("QBOX_WIFI_AGENT_MAX_RETRY_DELAY_SECONDS", "300")
+QBOX_WIFI_AGENT_MAX_RETRY_DELAY_SECONDS = get_int_setting(
+    "QBOX_WIFI_AGENT_MAX_RETRY_DELAY_SECONDS",
+    300,
 )
-QBOX_WIFI_AGENT_SIGNAL_CHANGE_THRESHOLD = int(
-    os.getenv("QBOX_WIFI_AGENT_SIGNAL_CHANGE_THRESHOLD", "8")
+QBOX_WIFI_AGENT_SIGNAL_CHANGE_THRESHOLD = get_int_setting(
+    "QBOX_WIFI_AGENT_SIGNAL_CHANGE_THRESHOLD",
+    8,
 )
-QBOX_WIFI_AGENT_COMMAND_POLL_INTERVAL_SECONDS = int(
-    os.getenv("QBOX_WIFI_AGENT_COMMAND_POLL_INTERVAL_SECONDS", "15")
+QBOX_WIFI_AGENT_COMMAND_POLL_INTERVAL_SECONDS = get_int_setting(
+    "QBOX_WIFI_AGENT_COMMAND_POLL_INTERVAL_SECONDS",
+    15,
 )
-QBOX_WIFI_AGENT_STATE_HEARTBEAT_SECONDS = int(
-    os.getenv("QBOX_WIFI_AGENT_STATE_HEARTBEAT_SECONDS", "300")
+QBOX_WIFI_AGENT_STATE_HEARTBEAT_SECONDS = get_int_setting(
+    "QBOX_WIFI_AGENT_STATE_HEARTBEAT_SECONDS",
+    300,
 )
-QBOX_WIFI_AGENT_SCAN_ENDPOINT = os.getenv(
+QBOX_WIFI_AGENT_SCAN_ENDPOINT = get_str_setting(
     "QBOX_WIFI_AGENT_SCAN_ENDPOINT",
     "",
 ).strip()
-QBOX_WIFI_AGENT_STATE_ENDPOINT = os.getenv(
+QBOX_WIFI_AGENT_STATE_ENDPOINT = get_str_setting(
     "QBOX_WIFI_AGENT_STATE_ENDPOINT",
     "",
 ).strip()
-QBOX_WIFI_AGENT_COMMAND_ENDPOINT = os.getenv(
+QBOX_WIFI_AGENT_COMMAND_ENDPOINT = get_str_setting(
     "QBOX_WIFI_AGENT_COMMAND_ENDPOINT",
     "",
 ).strip()
-QBOX_WIFI_AGENT_COMMAND_RESULT_ENDPOINT_TEMPLATE = os.getenv(
+QBOX_WIFI_AGENT_COMMAND_RESULT_ENDPOINT_TEMPLATE = get_str_setting(
     "QBOX_WIFI_AGENT_COMMAND_RESULT_ENDPOINT_TEMPLATE",
     "",
 ).strip()
-QBOX_WIFI_AGENT_STATE_FILE = os.getenv(
+QBOX_WIFI_AGENT_STATE_FILE = str(get_path_setting(
     "QBOX_WIFI_AGENT_STATE_FILE",
     str(CONFIG_DIR / "wifi_agent_state.json"),
-)
-QBOX_WIFI_AGENT_QUEUE_FILE = os.getenv(
+))
+QBOX_WIFI_AGENT_QUEUE_FILE = str(get_path_setting(
     "QBOX_WIFI_AGENT_QUEUE_FILE",
     str(CONFIG_DIR / "wifi_agent_queue.json"),
-)
+))
 
 # ---------------- AGENT CONFIG ----------------
 @dataclass(frozen=True)
