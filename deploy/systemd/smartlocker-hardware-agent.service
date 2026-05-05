@@ -1,0 +1,37 @@
+[Unit]
+Description=Smart Locker Hardware Agent
+After=network-online.target smartlocker-device-registry.service NetworkManager.service dbus.service bluetooth.service
+Wants=network-online.target smartlocker-device-registry.service NetworkManager.service bluetooth.service
+Requires=smartlocker-device-registry.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/smart-locker-hardware
+Environment=PYTHONUNBUFFERED=1
+Environment=SMARTLOCKER_CONFIG_JSON=/etc/smartlocker/config.json
+Environment=SMARTLOCKER_DEVICE_ID_FILE=/etc/smartlocker/device_id
+Environment=SMARTLOCKER_BACKEND_STATE_FILE=/var/lib/smartlocker/backend_device.json
+Environment=QBOX_WIFI_AGENT_STATE_FILE=/var/lib/smartlocker/wifi_agent_state.json
+Environment=QBOX_WIFI_AGENT_QUEUE_FILE=/var/lib/smartlocker/wifi_agent_queue.json
+ExecStartPre=/usr/bin/test -x /opt/smart-locker-hardware/venv/bin/python
+ExecStartPre=/usr/bin/test -d /etc/smartlocker
+ExecStart=/opt/smart-locker-hardware/venv/bin/python -m app.hardware_agent.main
+Restart=always
+RestartSec=3
+StateDirectory=smartlocker
+LogsDirectory=smartlocker
+StandardOutput=append:/var/log/smartlocker/hardware-agent.log
+StandardError=append:/var/log/smartlocker/hardware-agent.log
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+ProtectSystem=false
+ProtectHome=false
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+DeviceAllow=/dev/rfkill rw
+DeviceAllow=/dev/ttyAMA0 rw
+PrivateDevices=false
+
+[Install]
+WantedBy=multi-user.target
