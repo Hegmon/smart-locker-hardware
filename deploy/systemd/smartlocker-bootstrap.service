@@ -1,0 +1,24 @@
+[Unit]
+Description=Smart Locker Bootstrap
+DefaultDependencies=no
+After=local-fs.target NetworkManager.service network-online.target
+Before=network-online.target smartlocker-device-registry.service smartlocker-hardware-agent.service smartlocker-streaming-agent.service
+Wants=NetworkManager.service network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/smart-locker-hardware
+Environment=PYTHONUNBUFFERED=1
+Environment=SMARTLOCKER_CONFIG_JSON=/etc/smartlocker/config.json
+Environment=SMARTLOCKER_DEVICE_ID_FILE=/etc/smartlocker/device_id
+ExecStartPre=/usr/bin/test -x /opt/smart-locker-hardware/venv/bin/python
+ExecStart=/opt/smart-locker-hardware/venv/bin/python -m app.deployment.bootstrap
+Restart=on-failure
+RestartSec=3
+RemainAfterExit=yes
+StandardOutput=append:/var/log/smartlocker/bootstrap.log
+StandardError=append:/var/log/smartlocker/bootstrap.log
+
+[Install]
+WantedBy=multi-user.target
