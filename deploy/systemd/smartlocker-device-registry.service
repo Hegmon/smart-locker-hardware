@@ -1,8 +1,7 @@
 [Unit]
 Description=Smart Locker Device Registry
 After=network-online.target smartlocker-bootstrap.service
-Wants=network-online.target
-Requires=smartlocker-bootstrap.service
+Wants=network-online.target smartlocker-bootstrap.service
 
 [Service]
 Type=simple
