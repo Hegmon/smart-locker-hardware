@@ -6,14 +6,16 @@ import threading
 from typing import Any
 import subprocess
 
+from app.deployment.runtime_config import get_str_setting
+
 #========================================================================================
 # CONFIG
 #======================================================================================
-DEFAULT_INTERFACE = os.getenv("WIFI_INTERFACE", "wlan0")
+DEFAULT_INTERFACE = get_str_setting("WIFI_INTERFACE", "wlan0")
 
-DEFAULT_HOTSPOT_CONNECTION = os.getenv("HOTSPOT_CONNECTION", "SmartLockerHotspot")
-DEFAULT_HOTSPOT_SSID = os.getenv("HOTSPOT_SSID", "SmartLocker-Setup")
-DEFAULT_HOTSPOT_PASSWORD = os.getenv("HOTSPOT_PASSWORD", "SmartLocker123")
+DEFAULT_HOTSPOT_CONNECTION = get_str_setting("HOTSPOT_CONNECTION", "SmartLockerHotspot")
+DEFAULT_HOTSPOT_SSID = get_str_setting("HOTSPOT_SSID", "SmartLocker-Setup")
+DEFAULT_HOTSPOT_PASSWORD = get_str_setting("HOTSPOT_PASSWORD", "SmartLocker123")
 _WIFI_LOCK = threading.Lock()
 
 #=================================================================================
