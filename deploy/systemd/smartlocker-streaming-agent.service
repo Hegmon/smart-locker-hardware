@@ -1,0 +1,32 @@
+[Unit]
+Description=Smart Locker Streaming Agent
+After=network-online.target smartlocker-hardware-agent.service
+Wants=network-online.target smartlocker-hardware-agent.service
+Requires=smartlocker-hardware-agent.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/smart-locker-hardware
+Environment=PYTHONUNBUFFERED=1
+Environment=SMARTLOCKER_CONFIG_JSON=/etc/smartlocker/config.json
+Environment=SMARTLOCKER_DEVICE_ID_FILE=/etc/smartlocker/device_id
+Environment=SMARTLOCKER_BACKEND_STATE_FILE=/var/lib/smartlocker/backend_device.json
+ExecStartPre=/usr/bin/test -x /opt/smart-locker-hardware/venv/bin/python
+ExecStartPre=/usr/bin/test -d /etc/smartlocker
+ExecStart=/opt/smart-locker-hardware/venv/bin/python -m app.streaming_agent.main
+Restart=always
+RestartSec=3
+StateDirectory=smartlocker
+LogsDirectory=smartlocker
+StandardOutput=append:/var/log/smartlocker/streaming-agent.log
+StandardError=append:/var/log/smartlocker/streaming-agent.log
+DeviceAllow=/dev/video0 rw
+DeviceAllow=/dev/video1 rw
+DeviceAllow=/dev/video2 rw
+DeviceAllow=/dev/video3 rw
+PrivateDevices=false
+CPUQuota=80%%
+
+[Install]
+WantedBy=multi-user.target
