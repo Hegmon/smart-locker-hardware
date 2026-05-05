@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="${1:-/home/hassaanqazi/Documents/smart-locker-hardware}"
+PROJECT_DIR="${1:-$(pwd)}"
 SYSTEMD_DIR="/etc/systemd/system"
 CONFIG_DIR="/etc/smartlocker"
 LOGROTATE_DIR="/etc/logrotate.d"
+
+if [[ ! -d "$PROJECT_DIR" ]]; then
+  echo "Project directory does not exist: $PROJECT_DIR" >&2
+  exit 1
+fi
+
+if [[ ! -x "$PROJECT_DIR/venv/bin/python" ]]; then
+  echo "Missing Python runtime at: $PROJECT_DIR/venv/bin/python" >&2
+  exit 1
+fi
 
 mkdir -p "$CONFIG_DIR"
 mkdir -p /var/lib/smartlocker
@@ -24,7 +34,8 @@ for unit in \
   smartlocker-hardware-agent.service \
   smartlocker-streaming-agent.service
 do
-  cp "$PROJECT_DIR/deploy/systemd/$unit" "$SYSTEMD_DIR/$unit"
+  sed "s|__PROJECT_DIR__|$PROJECT_DIR|g" \
+    "$PROJECT_DIR/deploy/systemd/$unit" > "$SYSTEMD_DIR/$unit"
 done
 
 cp "$PROJECT_DIR/deploy/logrotate/smartlocker" "$LOGROTATE_DIR/smartlocker"
