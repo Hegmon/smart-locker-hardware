@@ -2,7 +2,6 @@
 Description=Smart Locker Hardware Agent
 After=network-online.target smartlocker-device-registry.service NetworkManager.service dbus.service bluetooth.service
 Wants=network-online.target smartlocker-device-registry.service NetworkManager.service bluetooth.service
-Requires=smartlocker-device-registry.service
 
 [Service]
 Type=simple
@@ -19,6 +18,7 @@ ExecStartPre=/usr/bin/test -d /etc/smartlocker
 ExecStart=/bin/sh -c 'cd __PROJECT_DIR__ && exec __PROJECT_DIR__/venv/bin/python -m app.hardware_agent.main'
 Restart=always
 RestartSec=3
+StartLimitIntervalSec=0
 StateDirectory=smartlocker
 LogsDirectory=smartlocker
 StandardOutput=append:/var/log/smartlocker/hardware-agent.log
