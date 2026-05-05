@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="${1:-/opt/smart-locker-hardware}"
+PROJECT_DIR="${1:-/home/hassaanqazi/Documents/smart-locker-hardware}"
 SYSTEMD_DIR="/etc/systemd/system"
 CONFIG_DIR="/etc/smartlocker"
 LOGROTATE_DIR="/etc/logrotate.d"
