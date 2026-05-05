@@ -7,16 +7,16 @@ Requires=smartlocker-device-registry.service
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/hassaanqazi/Documents/smart-locker-hardware
+WorkingDirectory=__PROJECT_DIR__
 Environment=PYTHONUNBUFFERED=1
 Environment=SMARTLOCKER_CONFIG_JSON=/etc/smartlocker/config.json
 Environment=SMARTLOCKER_DEVICE_ID_FILE=/etc/smartlocker/device_id
 Environment=SMARTLOCKER_BACKEND_STATE_FILE=/var/lib/smartlocker/backend_device.json
 Environment=QBOX_WIFI_AGENT_STATE_FILE=/var/lib/smartlocker/wifi_agent_state.json
 Environment=QBOX_WIFI_AGENT_QUEUE_FILE=/var/lib/smartlocker/wifi_agent_queue.json
-ExecStartPre=/usr/bin/test -x /home/hassaanqazi/Documents/smart-locker-hardware/venv/bin/python
+ExecStartPre=/usr/bin/test -x __PROJECT_DIR__/venv/bin/python
 ExecStartPre=/usr/bin/test -d /etc/smartlocker
-ExecStart=/home/hassaanqazi/Documents/smart-locker-hardware/venv/bin/python -m app.hardware_agent.main
+ExecStart=/bin/sh -c 'cd __PROJECT_DIR__ && exec __PROJECT_DIR__/venv/bin/python -m app.hardware_agent.main'
 Restart=always
 RestartSec=3
 StateDirectory=smartlocker
