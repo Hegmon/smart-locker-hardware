@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import time
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Any
@@ -17,6 +18,7 @@ from app.core.config import (
     QBOX_DEVICE_REGISTRATION_URL,
     QBOX_TELEMETRY_URL,
 )
+from app.deployment.device_identity import ensure_device_id
 from app.streaming_agent.device_config import get_optional_config
 from app.services.backend_state import load_backend_state, save_backend_state
 from app.services.hardware_manager import get_camera_inventory, get_system_metrics
@@ -24,6 +26,7 @@ from app.utils.logger import get_logger
 
 
 logger = get_logger(__name__)
+REGISTRATION_MAX_ATTEMPTS = 3
 
 
 class BackendSyncError(Exception):
@@ -70,6 +73,7 @@ def _build_registration_payload() -> dict[str, Any]:
         public_host = urlsplit(public_base_url).hostname or ""
 
     return {
+        "device_id": ensure_device_id(),
         "name": QBOX_DEVICE_NAME,
         "ip_address": public_host or _get_ip_address(),
         "version": version,
@@ -102,7 +106,7 @@ def get_backend_sync_status() -> dict[str, Any]:
         "auto_register_enabled": QBOX_AUTO_REGISTER,
         "registered": bool(state.get("device_uuid")),
         "device_uuid": state.get("device_uuid"),
-        "device_id": state.get("device_id"),
+        "device_id": state.get("device_id") or ensure_device_id(),
         "name": state.get("name", QBOX_DEVICE_NAME),
         "registration_url": QBOX_DEVICE_REGISTRATION_URL,
         "telemetry_url": QBOX_TELEMETRY_URL,
@@ -127,22 +131,37 @@ def register_device(force: bool = False) -> dict[str, Any]:
     print(f"[backend-register] payload={payload}", flush=True)
     logger.info("Registering Qbox device with payload: %s", payload)
 
-    try:
-        response = requests.post(
-            QBOX_DEVICE_REGISTRATION_URL,
-            json=payload,
-            timeout=QBOX_BACKEND_TIMEOUT_SECONDS,
-        )
-    except requests.RequestException as exc:
+    response = None
+    last_error: requests.RequestException | None = None
+    for attempt in range(1, REGISTRATION_MAX_ATTEMPTS + 1):
+        try:
+            response = requests.post(
+                QBOX_DEVICE_REGISTRATION_URL,
+                json=payload,
+                timeout=QBOX_BACKEND_TIMEOUT_SECONDS,
+            )
+            break
+        except requests.RequestException as exc:
+            last_error = exc
+            logger.warning(
+                "Registration API attempt %s/%s failed: %s",
+                attempt,
+                REGISTRATION_MAX_ATTEMPTS,
+                exc,
+            )
+            if attempt < REGISTRATION_MAX_ATTEMPTS:
+                time.sleep(attempt)
+
+    if response is None:
         detail = {
             "message": "Failed to call Django registration API.",
             "url": QBOX_DEVICE_REGISTRATION_URL,
             "payload": payload,
-            "error": str(exc),
+            "error": str(last_error) if last_error else "unknown error",
         }
         print(f"[backend-register] request error={detail}", flush=True)
         logger.exception("Django registration API request failed")
-        raise BackendSyncError("Registration request failed", status_code=502, detail=detail) from exc
+        raise BackendSyncError("Registration request failed", status_code=502, detail=detail) from last_error
 
     response_body = _parse_response_body(response)
     print(
