@@ -12,7 +12,6 @@ WorkingDirectory=__PROJECT_DIR__
 Environment=PYTHONUNBUFFERED=1
 Environment=SMARTLOCKER_CONFIG_JSON=/etc/smartlocker/config.json
 Environment=SMARTLOCKER_DEVICE_ID_FILE=/etc/smartlocker/device_id
-ExecStartPre=/usr/bin/test -x __PROJECT_DIR__/venv/bin/python
 ExecStart=/bin/sh -c 'cd __PROJECT_DIR__ && exec __PROJECT_DIR__/venv/bin/python -m app.deployment.bootstrap'
 Restart=on-failure
 RestartSec=3
