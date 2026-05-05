@@ -1,10 +1,11 @@
 import os
 import time
 
+from app.deployment.runtime_config import get_int_setting
 from app.services.wifi_manager import WifiCommandError, get_wifi_status, is_wifi_connected, start_hotspot, stop_hotspot
 
 
-CHECK_INTERVAL_SECONDS = int(os.getenv("WIFI_CHECK_INTERVAL_SECONDS", "15"))
+CHECK_INTERVAL_SECONDS = get_int_setting("WIFI_CHECK_INTERVAL_SECONDS", 15)
 
 
 def maintain_network_mode() -> None:
