@@ -8,9 +8,14 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+from app.deployment.bootstrap import bootstrap_device
+from app.deployment.health_server import AgentHealthServer
+from app.deployment.runtime_config import get_int_setting
+from app.deployment.validation import validate_runtime_configuration
 from app.hardware_agent.config import AgentConfig, load_agent_config
 from app.hardware_agent.mqtt_client import MqttClient
 from app.hardware_agent.provisioning.ble.server import BLEServer
+from app.services.hardware_manager import initialize_gpio_with_retry
 from app.hardware_agent.scanner import WifiScanner
 from app.services.wifi_manager import (
     WifiCommandError,
@@ -54,6 +59,11 @@ class WifiUploadAgent:
 
     def __init__(self, config: AgentConfig):
         self.config = config
+        self.health_server = AgentHealthServer(
+            "0.0.0.0",
+            get_int_setting("HARDWARE_AGENT_HEALTH_PORT", 8091),
+            self._health_payload,
+        )
         self.mqtt = MqttClient(
             host=config.mqtt_host,
             port=config.mqtt_port,
@@ -90,6 +100,12 @@ class WifiUploadAgent:
 
     def start(self):
         logger.info("Starting Smart Locker hardware agent")
+        bootstrap_device()
+        validate_runtime_configuration()
+        gpio_init = initialize_gpio_with_retry()
+        if not gpio_init.get("initialized"):
+            logger.warning("GPIO initialization deferred: %s", gpio_init)
+        self.health_server.start()
         self.mqtt.connect()
         self.mqtt.wait_until_connected(timeout_seconds=3.0)
         self._running = True
@@ -102,6 +118,19 @@ class WifiUploadAgent:
 
         while self._running:
             time.sleep(1)
+
+    def _health_payload(self) -> dict[str, Any]:
+        snapshot = self._snapshot()
+        return {
+            "status": "ok",
+            "service": "hardware_agent",
+            "device_id": self.config.device_id,
+            "mqtt_connected": self.mqtt.is_connected(),
+            "network_state": snapshot.state.value,
+            "connected_ssid": snapshot.connected_ssid,
+            "hotspot_active": snapshot.hotspot_active,
+            "ble_active": snapshot.ble_active,
+        }
 
     def _watchdog_loop(self):
         while self._running:
