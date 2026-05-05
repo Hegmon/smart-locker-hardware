@@ -7,14 +7,14 @@ Requires=smartlocker-bootstrap.service
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/smart-locker-hardware
+WorkingDirectory=/home/hassaanqazi/Documents/smart-locker-hardware
 Environment=PYTHONUNBUFFERED=1
 Environment=SMARTLOCKER_CONFIG_JSON=/etc/smartlocker/config.json
 Environment=SMARTLOCKER_DEVICE_ID_FILE=/etc/smartlocker/device_id
 Environment=SMARTLOCKER_BACKEND_STATE_FILE=/var/lib/smartlocker/backend_device.json
-ExecStartPre=/usr/bin/test -x /opt/smart-locker-hardware/venv/bin/python
+ExecStartPre=/usr/bin/test -x /home/hassaanqazi/Documents/smart-locker-hardware/venv/bin/python
 ExecStartPre=/usr/bin/test -d /etc/smartlocker
-ExecStart=/opt/smart-locker-hardware/venv/bin/python -m uvicorn app.main:app --app-dir /opt/smart-locker-hardware --host 0.0.0.0 --port 8000
+ExecStart=/home/hassaanqazi/Documents/smart-locker-hardware/venv/bin/python -m uvicorn app.main:app --app-dir /home/hassaanqazi/Documents/smart-locker-hardware --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=3
 StateDirectory=smartlocker
