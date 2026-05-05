@@ -8,12 +8,12 @@ Wants=NetworkManager.service network-online.target
 [Service]
 Type=oneshot
 User=root
-WorkingDirectory=/opt/smart-locker-hardware
+WorkingDirectory=/home/hassaanqazi/Documents/smart-locker-hardware
 Environment=PYTHONUNBUFFERED=1
 Environment=SMARTLOCKER_CONFIG_JSON=/etc/smartlocker/config.json
 Environment=SMARTLOCKER_DEVICE_ID_FILE=/etc/smartlocker/device_id
-ExecStartPre=/usr/bin/test -x /opt/smart-locker-hardware/venv/bin/python
-ExecStart=/opt/smart-locker-hardware/venv/bin/python -m app.deployment.bootstrap
+ExecStartPre=/usr/bin/test -x /home/hassaanqazi/Documents/smart-locker-hardware/venv/bin/python
+ExecStart=/home/hassaanqazi/Documents/smart-locker-hardware/venv/bin/python -m app.deployment.bootstrap
 Restart=on-failure
 RestartSec=3
 RemainAfterExit=yes
