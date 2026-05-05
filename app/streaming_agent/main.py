@@ -18,6 +18,12 @@ import signal
 import sys
 import time
 from threading import Event
+from typing import Optional
+
+from app.deployment.bootstrap import bootstrap_device
+from app.deployment.health_server import AgentHealthServer
+from app.deployment.runtime_config import get_bool_setting, get_int_setting, get_str_setting
+from app.deployment.validation import validate_runtime_configuration
 
 # Configure logging early
 logging.basicConfig(
@@ -42,6 +48,7 @@ class StreamingAgent:
     
     def __init__(self):
         self._stop_event = Event()
+        bootstrap_device()
         self._device_config = get_device_config()
         self.device_id = self._device_config["device_id"]
         self.device_uuid = self._device_config.get("device_uuid", "")
@@ -63,9 +70,14 @@ class StreamingAgent:
         self.pipeline: Optional[ProductionCameraPipeline] = None
         self.mqtt_client: Optional[StreamingMQTTClient] = None
         self.verifier: Optional[StreamVerifier] = None
+        self.health_server = AgentHealthServer(
+            "0.0.0.0",
+            get_int_setting("STREAMING_AGENT_HEALTH_PORT", 8092),
+            self._health_payload,
+        )
         
         # Auto-start on boot flag (controlled via env or config)
-        self.auto_start = self._read_bool_env("STREAM_AUTO_START", True)
+        self.auto_start = get_bool_setting("STREAM_AUTO_START", True)
     
     @staticmethod
     def _read_bool_env(name: str, default: bool = False) -> bool:
@@ -87,10 +99,8 @@ class StreamingAgent:
     def initialize(self) -> None:
         """Initialize all components"""
         logger.info("=== Initializing Streaming Agent ===")
-        
-        # 1. Detect cameras
-        logger.info("--- Camera Detection Phase ---")
-        cameras = self.detector.get_cameras_for_streaming()
+
+        cameras = self._detect_cameras_with_retry()
         logger.info("Detected cameras: %s", list(cameras.keys()))
         for cam_type, cam_info in cameras.items():
             logger.info("  %s: %s", cam_type, cam_info.device_path)
@@ -133,14 +143,7 @@ class StreamingAgent:
         if external_device:
             logger.info("Setting up external camera: %s", external_device)
         
-        try:
-            self.pipeline.setup_cameras(
-                internal_device=internal_device,
-                external_device=external_device,
-            )
-        except Exception as e:
-            logger.error("Failed to setup pipeline: %s", e)
-            # Continue anyway - pipeline may work with partial setup
+        self._setup_pipeline_with_retry(internal_device, external_device)
         
         # 3. Initialize verifier
         self.verifier = StreamVerifier(
@@ -157,15 +160,44 @@ class StreamingAgent:
             logger.warning("Register the device with Django backend first")
         
         logger.info("=== Initialization Complete ===")
+
+    def _detect_cameras_with_retry(self, attempts: int = 3) -> dict:
+        logger.info("--- Camera Detection Phase ---")
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.detector.get_cameras_for_streaming()
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Camera detection attempt %s/%s failed: %s", attempt, attempts, exc)
+                time.sleep(attempt)
+        logger.warning("Camera detection unavailable after retries: %s", last_error)
+        return {}
+
+    def _setup_pipeline_with_retry(
+        self,
+        internal_device: str | None,
+        external_device: str | None,
+        attempts: int = 3,
+    ) -> None:
+        for attempt in range(1, attempts + 1):
+            try:
+                self.pipeline.setup_cameras(
+                    internal_device=internal_device,
+                    external_device=external_device,
+                )
+                return
+            except Exception as exc:
+                logger.warning("Pipeline setup attempt %s/%s failed: %s", attempt, attempts, exc)
+                time.sleep(attempt)
+        logger.error("Failed to setup pipeline after retries; continuing without blocking boot")
     
     def _init_mqtt(self) -> None:
         """Initialize MQTT client and register command handler"""
-        import os
-        
-        mqtt_host = os.getenv("MQTT_HOST", "69.62.125.223")
-        mqtt_port = int(os.getenv("MQTT_PORT", "1883"))
-        mqtt_username = os.getenv("MQTT_USERNAME", "qbox")
-        mqtt_password = os.getenv("MQTT_PASSWORD", "strongpassword123")
+        mqtt_host = get_str_setting("MQTT_HOST", "69.62.125.223")
+        mqtt_port = get_int_setting("MQTT_PORT", 1883)
+        mqtt_username = get_str_setting("MQTT_USERNAME", "qbox")
+        mqtt_password = get_str_setting("MQTT_PASSWORD", "strongpassword123")
         
         self.mqtt_client = StreamingMQTTClient(
             host=mqtt_host,
@@ -335,6 +367,8 @@ class StreamingAgent:
         """Main agent run loop"""
         logger.info("=== Starting Streaming Agent ===")
         
+        validate_runtime_configuration()
+        self.health_server.start()
         self.initialize()
         
         # Auto-start streams if configured
@@ -376,8 +410,27 @@ class StreamingAgent:
         
         if self.mqtt_client:
             self.mqtt_client.disconnect()
+
+        self.health_server.stop()
         
         logger.info("=== Shutdown complete ===")
+
+    def _health_payload(self) -> dict:
+        pipeline_status = {}
+        if self.pipeline:
+            try:
+                pipeline_status = self.pipeline.get_pipeline_status()
+            except Exception:
+                pipeline_status = {"status": "unknown"}
+
+        return {
+            "status": "ok",
+            "service": "streaming_agent",
+            "device_id": self.device_id,
+            "mqtt_connected": self.mqtt_client.is_connected() if self.mqtt_client else False,
+            "auto_start": self.auto_start,
+            "pipeline": pipeline_status,
+        }
 
 
 def main() -> int:
