@@ -1,0 +1,26 @@
+[Unit]
+Description=Smart Locker Device Registry
+After=network-online.target smartlocker-bootstrap.service
+Wants=network-online.target
+Requires=smartlocker-bootstrap.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/smart-locker-hardware
+Environment=PYTHONUNBUFFERED=1
+Environment=SMARTLOCKER_CONFIG_JSON=/etc/smartlocker/config.json
+Environment=SMARTLOCKER_DEVICE_ID_FILE=/etc/smartlocker/device_id
+Environment=SMARTLOCKER_BACKEND_STATE_FILE=/var/lib/smartlocker/backend_device.json
+ExecStartPre=/usr/bin/test -x /opt/smart-locker-hardware/venv/bin/python
+ExecStartPre=/usr/bin/test -d /etc/smartlocker
+ExecStart=/opt/smart-locker-hardware/venv/bin/python -m uvicorn app.main:app --app-dir /opt/smart-locker-hardware --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
+StateDirectory=smartlocker
+LogsDirectory=smartlocker
+StandardOutput=append:/var/log/smartlocker/device-registry.log
+StandardError=append:/var/log/smartlocker/device-registry.log
+
+[Install]
+WantedBy=multi-user.target
