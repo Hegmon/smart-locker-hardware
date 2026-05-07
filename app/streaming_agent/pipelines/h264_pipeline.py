@@ -54,5 +54,4 @@ class H264PassthroughPipeline(V4L2Pipeline):
         # H264 passthrough requires camera to support H264
         # This should be verified by capabilities detection
         logger.info(f"H264 passthrough pipeline for {self.config.device_path}")
-        return True</content>
-<parameter name="filePath">/home/hassaanqazi/Documents/smart-locker-hardware/app/streaming_agent/pipelines/h264_pipeline.py
+        return True
