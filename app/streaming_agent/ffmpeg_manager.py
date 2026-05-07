@@ -1367,6 +1367,80 @@ class ProductionCameraPipeline:
                 # Don't raise - external camera failure shouldn't block internal
 
         logger.info("=== Camera setup complete ===")
+
+    def setup_from_registry(self, camera_devices: List[object]) -> None:
+        """
+        Setup multiple camera pipelines from registry devices.
+
+        camera_devices: iterable of objects with attributes:
+            - device_path
+            - classification (with .backend)
+            - capabilities
+
+        This will assign one primary `internal` stream (platform/libcamera preferred)
+        and then create `external`, `external_1`, `external_2`, ... for remaining USB/V4L2 devices.
+        Existing RTSP naming for `internal` and `external` is preserved; additional streams
+        are given unique suffixes so they don't conflict.
+        """
+        logger.info("=== Setting up cameras from registry (%d devices) ===", len(camera_devices))
+
+        # Determine primary internal candidate: prefer libcamera/platform devices
+        primary_internal = None
+        others: List[object] = []
+        for dev in camera_devices:
+            try:
+                backend = getattr(dev.classification, 'backend', None)
+                bus = getattr(dev.capabilities, 'bus_info', None)
+                if not primary_internal and (backend == 'libcamera' or bus == 'platform' or getattr(dev.classification, 'device_type', '') == 'csi'):
+                    primary_internal = dev
+                else:
+                    others.append(dev)
+            except Exception:
+                # Safety: treat as other
+                others.append(dev)
+
+        # If no primary_internal found, pick first device as internal for compatibility
+        if not primary_internal and camera_devices:
+            primary_internal = camera_devices[0]
+            others = [d for d in camera_devices if d is not primary_internal]
+
+        # Assign streams
+        assigned = []  # tuples of (role_name, device_obj, backend)
+
+        if primary_internal:
+            role = 'internal'
+            backend = getattr(primary_internal.classification, 'backend', 'v4l2')
+            assigned.append((role, primary_internal, backend))
+
+        # For others, create external, external_1, external_2...
+        ext_index = 0
+        for dev in others:
+            if getattr(dev.classification, 'device_type', '') == 'csi' or getattr(dev.classification, 'backend', '') == 'libcamera':
+                # treat as internal-like device
+                role = f'internal_{ext_index}' if ext_index > 0 else 'internal'
+            else:
+                role = 'external' if ext_index == 0 else f'external_{ext_index}'
+            backend = getattr(dev.classification, 'backend', 'v4l2')
+            assigned.append((role, dev, backend))
+            ext_index += 1
+
+        # Probe and add to respective engines
+        for role_name, dev, backend in assigned:
+            device_path = getattr(dev, 'device_path', None)
+            if not device_path:
+                logger.warning("Skipping device with no path: %s", dev)
+                continue
+
+            try:
+                profile = self.internal_scanner.probe_device(device_path) if role_name.startswith('internal') else self.external_scanner.probe_device(device_path)
+                # Choose engine: internal_engine for roles starting with 'internal', else external_engine
+                engine = self.internal_engine if role_name.startswith('internal') else self.external_engine
+                engine.add_stream(role_name, profile, backend)
+                logger.info("Added stream %s -> %s (backend=%s)", role_name, device_path, backend)
+            except Exception as e:
+                logger.exception("Failed to add stream for %s (%s): %s", device_path, role_name, e)
+
+        logger.info("=== Registry camera setup complete (%d streams) ===", len(assigned))
     
     def start(self) -> None:
         """Start all camera pipelines."""
