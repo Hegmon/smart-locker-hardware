@@ -198,5 +198,4 @@ class PipelineWatchdog:
                     "error_message": pipeline_status.error_message,
                 }
 
-        return status</content>
-<parameter name="filePath">/home/hassaanqazi/Documents/smart-locker-hardware/app/streaming_agent/watchdog.py
+        return status
