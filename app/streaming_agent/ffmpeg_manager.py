@@ -308,25 +308,27 @@ class StreamProcess:
     device_path: str
     profile: CameraFormatProfile
     process: Optional[subprocess.Popen] = None
-    
+    producer_process: Optional[subprocess.Popen] = None  # For piped libcamera commands
+
     # State tracking
     state: str = STREAM_STATE_STARTING
     selected_format: Optional[str] = None
     selected_resolution: str = "640x480"
-    
+    backend: str = "v4l2"  # "libcamera" or "v4l2"
+
     # Health metrics
     restart_count: int = 0
     consecutive_failures: int = 0
     last_frame_time: float = 0
     last_start_time: float = 0
     last_error: Optional[str] = None
-    
+
     # Command tracking
     last_command: list[str] = field(default_factory=list)
-    
+
     # Thread safety
     lock: threading.RLock = field(default_factory=threading.RLock)
-    
+
     # Watchdog
     watchdog_active: bool = False
     
@@ -386,24 +388,24 @@ class FFmpegStreamEngine:
         
         logger.info("FFmpegStreamEngine initialized for device %s", device_id)
     
-    def add_stream(self, camera_type: str, profile: CameraFormatProfile) -> None:
+    def add_stream(self, camera_type: str, profile: CameraFormatProfile, backend: str = "v4l2") -> None:
         """
-        Register a camera stream with its format profile.
+        Register a camera stream with its format profile and backend type.
         Each stream is independent - no shared state.
         """
         with self._lock:
             if camera_type in self._streams:
                 logger.warning("Stream %s already exists, stopping it first", camera_type)
                 self._stop_stream_internal(camera_type)
-            
+
             # Determine safe resolution
             safe_resolutions = profile.safe_resolutions
             if not safe_resolutions:
                 safe_resolutions = ["640x480"]
-            
+
             # Use explicit camera profile if available for this device
             device_profile = FormatScanner.CAMERA_PROFILES.get(profile.device, {})
-            
+
             # Use highest safe resolution for external, lower for internal
             if camera_type == "external":
                 # Prefer profile resolution if available
@@ -417,7 +419,7 @@ class FFmpegStreamEngine:
                     selected_res = device_profile["resolution"]
                 else:
                     selected_res = "640x480"  # Stable default
-            
+
             stream = StreamProcess(
                 camera_type=camera_type,
                 device_path=profile.device,
@@ -425,13 +427,17 @@ class FFmpegStreamEngine:
                 selected_resolution=selected_res,
                 state=STREAM_STATE_STARTING,
             )
-            
+
+            # Store backend information for command building
+            stream.backend = backend
+
             self._streams[camera_type] = stream
-            
+
             logger.info(
-                "Added stream: %s -> %s (profile: %s, resolution: %s)",
+                "Added stream: %s -> %s (backend=%s, profile: %s, resolution: %s)",
                 camera_type,
                 profile.device,
+                backend,
                 json.dumps(profile.to_dict()),
                 selected_res,
             )
@@ -517,24 +523,57 @@ class FFmpegStreamEngine:
             # Build and start FFmpeg
             cmd = self._build_ffmpeg_command(stream, input_format)
             format_label = "auto" if not input_format else input_format
-            
+
             logger.info(
-                "Attempt %d/%d: Starting FFmpeg for %s with format=%s",
+                "Attempt %d/%d: Starting pipeline for %s with backend=%s, format=%s",
                 format_idx + 1,
                 len(format_chain),
                 stream.camera_type,
+                stream.backend,
                 format_label,
             )
-            logger.debug("FFmpeg command: %s", " ".join(cmd))
-            
+            logger.debug("Command: %s", " ".join(cmd) if isinstance(cmd, list) else str(cmd))
+
             try:
-                stream.process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    stdin=subprocess.DEVNULL,
-                    preexec_fn=os.setsid,
-                )
+                if stream.backend == "libcamera" and "|" in cmd:
+                    # Handle piped libcamera commands
+                    pipe_idx = cmd.index("|")
+                    producer_cmd = cmd[:pipe_idx]
+                    consumer_cmd = cmd[pipe_idx + 1:]
+
+                    logger.info("Starting piped libcamera pipeline: %s | %s",
+                              " ".join(producer_cmd), " ".join(consumer_cmd))
+
+                    # Start producer (rpicam-vid)
+                    producer = subprocess.Popen(
+                        producer_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        preexec_fn=os.setsid,
+                    )
+
+                    # Start consumer (ffmpeg) with producer's stdout as input
+                    stream.process = subprocess.Popen(
+                        consumer_cmd,
+                        stdin=producer.stdout,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        preexec_fn=os.setsid,
+                    )
+
+                    # Store both processes for cleanup
+                    stream.producer_process = producer
+
+                else:
+                    # Handle regular single-command pipelines (V4L2)
+                    stream.process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        preexec_fn=os.setsid,
+                    )
                 
                 # Wait and check if process started successfully
                 time.sleep(2)
@@ -639,67 +678,111 @@ class FFmpegStreamEngine:
         self, stream: StreamProcess, input_format: str
     ) -> List[str]:
         """
-        Build FFmpeg command for a stream.
-        
+        Build FFmpeg command for a stream, with backend-aware input handling.
+
+        For libcamera devices: uses rpicam-vid or libcamera-vid piped to ffmpeg
+        For v4l2 devices: uses direct ffmpeg V4L2 input (existing behavior)
+
         When input_format is empty string, omits -input_format flag
         to allow FFmpeg auto-detection (last resort fallback).
-        
-        Uses explicit camera profiles for known devices to ensure
-        correct format and resolution selection.
         """
         device_path = stream.device_path
-        
+        backend = stream.backend
+
         # Check for explicit camera profile
         profile = FormatScanner.CAMERA_PROFILES.get(device_path, {})
-        
+
         # Determine framerate from profile or default
         framerate = profile.get("framerate", 25)
-        
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel", "warning",
-            "-f", "v4l2",
-            "-framerate", str(framerate),
-            "-video_size", stream.selected_resolution,
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
-        ]
-        
-        # Add -input_format only when explicitly specified
-        # Empty string means use FFmpeg auto-detection
-        if input_format:
-            cmd.extend(["-input_format", input_format])
-        
-        cmd.extend(["-i", device_path])
-        
-        # Encoding options optimized for Raspberry Pi
-        cmd.extend([
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-pix_fmt", "yuv420p",
-            "-g", "10",
-            "-keyint_min", "10",
-            "-b:v", "1000k",
-            "-maxrate", "1500k",
-            "-bufsize", "2000k",
-        ])
-        
-        # RTSP output
-        cmd.extend([
-            "-f", "rtsp",
-            "-rtsp_transport", "tcp",
-        ])
-        
-        # Output URL
-        output_url = (
-            f"rtsp://{self.mediamtx_host}:{self.mediamtx_rtsp_port}/"
-            f"{self.device_id}/{stream.camera_type}"
-        )
-        cmd.append(output_url)
-        
-        return cmd
+
+        if backend == "libcamera":
+            # For libcamera devices, use rpicam-vid piped to ffmpeg
+            logger.info("Building libcamera pipeline for %s", device_path)
+
+            # Try rpicam-vid first (preferred for Raspberry Pi)
+            rpicam_cmd = [
+                "rpicam-vid",
+                "-t", "0",  # infinite duration
+                "--inline",  # inline headers
+                "--nopreview",  # no preview window
+                "-o", "-",  # output to stdout
+                "--width", stream.selected_resolution.split("x")[0],
+                "--height", stream.selected_resolution.split("x")[1],
+                "--framerate", str(framerate),
+            ]
+
+            # Build ffmpeg command to consume rpicam-vid output
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "warning",
+                "-f", "h264",  # rpicam-vid outputs H264
+                "-i", "-",  # read from stdin (piped from rpicam-vid)
+                "-c:v", "copy",  # copy stream without re-encoding
+                "-f", "rtsp",
+                "-rtsp_transport", "tcp",
+            ]
+
+            # Output URL
+            output_url = (
+                f"rtsp://{self.mediamtx_host}:{self.mediamtx_rtsp_port}/"
+                f"{self.device_id}/{stream.camera_type}"
+            )
+            cmd.append(output_url)
+
+            # Combine rpicam-vid and ffmpeg with pipe
+            full_cmd = rpicam_cmd + ["|"] + cmd
+            return full_cmd
+
+        else:
+            # For V4L2 devices, use existing FFmpeg V4L2 input logic
+            logger.info("Building V4L2 pipeline for %s", device_path)
+
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "warning",
+                "-f", "v4l2",
+                "-framerate", str(framerate),
+                "-video_size", stream.selected_resolution,
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
+            ]
+
+            # Add -input_format only when explicitly specified
+            # Empty string means use FFmpeg auto-detection
+            if input_format:
+                cmd.extend(["-input_format", input_format])
+
+            cmd.extend(["-i", device_path])
+
+            # Encoding options optimized for Raspberry Pi
+            cmd.extend([
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-pix_fmt", "yuv420p",
+                "-g", "10",
+                "-keyint_min", "10",
+                "-b:v", "1000k",
+                "-maxrate", "1500k",
+                "-bufsize", "2000k",
+            ])
+
+            # RTSP output
+            cmd.extend([
+                "-f", "rtsp",
+                "-rtsp_transport", "tcp",
+            ])
+
+            # Output URL
+            output_url = (
+                f"rtsp://{self.mediamtx_host}:{self.mediamtx_rtsp_port}/"
+                f"{self.device_id}/{stream.camera_type}"
+            )
+            cmd.append(output_url)
+
+            return cmd
     
     def _is_device_busy_error(self, error: str) -> bool:
         """Check if error indicates device is busy."""
@@ -753,26 +836,48 @@ class FFmpegStreamEngine:
         stream = self._streams[camera_type]
         
         with stream.lock:
+            # Stop consumer process (ffmpeg)
             if stream.process:
                 try:
-                    logger.info("Stopping FFmpeg for %s (PID: %d)",
+                    logger.info("Stopping consumer process for %s (PID: %d)",
                               stream.camera_type, stream.process.pid)
-                    
+
                     os.killpg(os.getpgid(stream.process.pid), signal.SIGTERM)
-                    
+
                     try:
                         stream.process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        logger.warning("FFmpeg did not exit, sending SIGKILL")
+                        logger.warning("Consumer process did not exit, sending SIGKILL")
                         os.killpg(os.getpgid(stream.process.pid), signal.SIGKILL)
                         stream.process.wait()
-                    
+
                 except Exception as exc:
-                    logger.exception("Error stopping FFmpeg for %s", camera_type)
+                    logger.exception("Error stopping consumer process for %s", camera_type)
                     stream.last_error = str(exc)
-                
+
                 finally:
                     stream.process = None
+
+            # Stop producer process (rpicam-vid) if it exists
+            if stream.producer_process:
+                try:
+                    logger.info("Stopping producer process for %s (PID: %d)",
+                              stream.camera_type, stream.producer_process.pid)
+
+                    os.killpg(os.getpgid(stream.producer_process.pid), signal.SIGTERM)
+
+                    try:
+                        stream.producer_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        logger.warning("Producer process did not exit, sending SIGKILL")
+                        os.killpg(os.getpgid(stream.producer_process.pid), signal.SIGKILL)
+                        stream.producer_process.wait()
+
+                except Exception as exc:
+                    logger.exception("Error stopping producer process for %s", camera_type)
+
+                finally:
+                    stream.producer_process = None
             
             old_state = stream.state
             stream.state = STREAM_STATE_STARTING
@@ -803,6 +908,7 @@ class FFmpegStreamEngine:
                 return {
                     "camera_type": stream.camera_type,
                     "device_path": stream.device_path,
+                    "backend": stream.backend,
                     "state": stream.state,
                     "selected_format": stream.selected_format,
                     "selected_resolution": stream.selected_resolution,
@@ -810,6 +916,7 @@ class FFmpegStreamEngine:
                     "consecutive_failures": stream.consecutive_failures,
                     "last_error": stream.last_error,
                     "pid": stream.process.pid if stream.process else None,
+                    "producer_pid": stream.producer_process.pid if stream.producer_process else None,
                     "is_running": stream.process is not None and stream.process.poll() is None,
                     "profile": stream.profile.to_dict(),
                 }
@@ -886,19 +993,33 @@ class FFmpegStreamEngine:
                     stream.process.stderr.read().decode(errors="replace")
                     if stream.process.stderr else ""
                 )
-                
+
                 logger.warning(
                     "Stream %s process died (code %d): %s",
                     stream.camera_type,
                     returncode,
                     stderr[:300],
                 )
-                
+
                 stream.state = STREAM_STATE_RECOVERING
                 stream.last_error = f"Process died: {stderr[:200]}"
-                
+
                 self._restart_stream(stream)
                 return
+
+            # For libcamera pipelines, also check producer process
+            if stream.backend == "libcamera" and stream.producer_process:
+                producer_returncode = stream.producer_process.poll()
+                if producer_returncode is not None:
+                    logger.warning(
+                        "Stream %s producer process died (code %d)",
+                        stream.camera_type,
+                        producer_returncode,
+                    )
+                    stream.state = STREAM_STATE_RECOVERING
+                    stream.last_error = f"Producer process died: {producer_returncode}"
+                    self._restart_stream(stream)
+                    return
             
             # Check frame rate (simplified - check if process is producing output)
             # In production, you'd parse FFmpeg stats or use fpsdetect
@@ -1210,37 +1331,41 @@ class ProductionCameraPipeline:
         self,
         internal_device: str,
         external_device: Optional[str] = None,
+        internal_backend: str = "v4l2",
+        external_backend: str = "v4l2",
     ) -> None:
         """
-        Setup camera pipelines with format probing.
-        
+        Setup camera pipelines with format probing and backend classification.
+
         Args:
             internal_device: Path to internal camera (e.g., /dev/video0)
             external_device: Path to external camera (e.g., /dev/video2)
+            internal_backend: Backend type for internal camera ("libcamera" or "v4l2")
+            external_backend: Backend type for external camera ("libcamera" or "v4l2")
         """
         logger.info("=== Setting up camera pipelines ===")
-        
+
         # Probe and setup internal camera
-        logger.info("Probing internal camera: %s", internal_device)
+        logger.info("Probing internal camera: %s (backend=%s)", internal_device, internal_backend)
         try:
             internal_profile = self.internal_scanner.probe_device(internal_device)
-            self.internal_engine.add_stream("internal", internal_profile)
-            logger.info("Internal camera ready: %s", internal_profile.preferred_format)
+            self.internal_engine.add_stream("internal", internal_profile, internal_backend)
+            logger.info("Internal camera ready: %s (backend=%s)", internal_profile.preferred_format, internal_backend)
         except Exception as e:
             logger.error("Failed to setup internal camera: %s", e)
             raise
-        
+
         # Probe and setup external camera (if provided)
         if external_device:
-            logger.info("Probing external camera: %s", external_device)
+            logger.info("Probing external camera: %s (backend=%s)", external_device, external_backend)
             try:
                 external_profile = self.external_scanner.probe_device(external_device)
-                self.external_engine.add_stream("external", external_profile)
-                logger.info("External camera ready: %s", external_profile.preferred_format)
+                self.external_engine.add_stream("external", external_profile, external_backend)
+                logger.info("External camera ready: %s (backend=%s)", external_profile.preferred_format, external_backend)
             except Exception as e:
                 logger.error("Failed to setup external camera: %s", e)
                 # Don't raise - external camera failure shouldn't block internal
-        
+
         logger.info("=== Camera setup complete ===")
     
     def start(self) -> None:
