@@ -67,5 +67,4 @@ class MJPEGPipeline(V4L2Pipeline):
         rtsp_url = f"rtsp://{self.config.rtsp_host}:{self.config.rtsp_port}/{stream_name}"
         cmd.append(rtsp_url)
 
-        return cmd</content>
-<parameter name="filePath">/home/hassaanqazi/Documents/smart-locker-hardware/app/streaming_agent/pipelines/mjpeg_pipeline.py
+        return cmd
