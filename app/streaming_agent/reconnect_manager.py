@@ -201,5 +201,4 @@ class ReconnectManager:
         """Get device path for a stream name"""
         with self._lock:
             pipeline = self.active_pipelines.get(stream_name)
-            return pipeline.config.device_path if pipeline else None</content>
-<parameter name="filePath">/home/hassaanqazi/Documents/smart-locker-hardware/app/streaming_agent/reconnect_manager.py
+            return pipeline.config.device_path if pipeline else None
