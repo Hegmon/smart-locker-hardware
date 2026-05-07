@@ -70,8 +70,13 @@ class CameraDetector:
         )
 
     def _list_v4l2_devices(self) -> list[str]:
-        """Enumerate /dev/video nodes from v4l2-ctl, falling back to glob."""
+        """Enumerate /dev/video nodes from v4l2-ctl, falling back to glob.
+        
+        Returns sorted list of unique /dev/videoX paths.
+        """
         devices: list[str] = []
+        
+        # Try v4l2-ctl first
         try:
             result = subprocess.run(
                 ["v4l2-ctl", "--list-devices"],
@@ -87,10 +92,14 @@ class CameraDetector:
         except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
             pass
 
+        # Fallback to glob
         if not devices:
             devices = glob("/dev/video*")
 
-        return sorted(set(devices), key=self._device_sort_key)
+        # Remove duplicates and sort
+        devices = sorted(set(devices), key=self._device_sort_key)
+        
+        return devices
 
     @staticmethod
     def _device_sort_key(device_path: str) -> tuple[int, str]:
@@ -281,86 +290,133 @@ class CameraDetector:
 
     def _ffmpeg_can_open(self, device_path: str, formats: List[str]) -> tuple[bool, str]:
         """
-        Probe whether FFmpeg can open the node as a capture device.
+        Probe whether FFmpeg can open and read frames from the device.
         
-        A device is considered VALID if:
+        A device is VALID if:
         - /dev/videoX exists
-        - FFmpeg can start successfully (even with warnings)
-        - frames can be produced for at least a few seconds
+        - supports VIDEO_CAPTURE capability  
+        - FFmpeg can start successfully
+        - produces at least one frame
         
-        DO NOT reject based on:
-        - empty formats list from v4l2-ctl
-        - ffprobe parsing failures
-        - MJPEG warnings (unable to decode APP fields, deprecated pixel format)
+        Returns (is_valid, reason)
         """
+        # Check device exists
+        if not os.path.exists(device_path):
+            return False, "Device not found"
+        
         input_format = self._preferred_capture_format(formats)
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-f", "v4l2"]
+        
+        # Build probe command: capture 1 frame, fail fast on errors
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-f", "v4l2",
+            "-framerate", "5",  # Slow, safe framerate for probe
+            "-video_size", "640x480",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-max_delay", "5",
+            "-timeout", "2000000",  # 2 second timeout in microseconds
+        ]
+        
         if input_format:
             cmd.extend(["-input_format", input_format])
+        
         cmd.extend([
-            "-video_size",
-            "640x480",
-            "-i",
-            device_path,
-            "-frames:v",
-            "1",
-            "-f",
-            "null",
+            "-i", device_path,
+            "-frames:v", "1",  # Just one frame
+            "-f", "null",
             "-",
         ])
-
+        
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            output = result.stderr.strip()
+            
+            # Success: captured one frame
+            if result.returncode == 0:
+                return True, f"OK: captured frame (format: {input_format or 'auto'})"
+            
+            output_lower = output.lower()
+            
+            # Device busy - transient error, device itself is valid
+            if "device or resource busy" in output_lower or "resource busy" in output_lower:
+                return True, "Device busy (valid but in use)"
+            
+            # MJPEG warnings are non-fatal - camera is valid
+            mjpeg_warnings = ["unable to decode", "deprecated pixel format", "first field"]
+            if any(w in output_lower for w in mjpeg_warnings):
+                return True, f"MJPEG warning (valid): {output[:100]}"
+            
+            # Fatal errors - device cannot be used as capture source
+            fatal_errors = [
+                "inappropriate ioctl for device",
+                "not a video capture device",
+                "no such device",
+                "permission denied",
+                "invalid argument",
+                "no medium found",
+                "function not implemented",
+                "ioctl(VIDIOC_G_INPUT)",  # Metadata/control nodes
+                "ioctl(VIDIOC_QUERYCAP)",  # Device doesn't support capture
+            ]
+            
+            for err in fatal_errors:
+                if err in output_lower:
+                    return False, f"Invalid device: {err}"
+            
+            # Unknown error - be conservative, reject
+            return False, f"Probe failed: {output[:200] if output else 'no output'}"
+            
         except FileNotFoundError:
-            return True, "ffmpeg not installed; accepted after v4l2 format probe"
+            return True, "ffmpeg not installed, skipping probe"
         except subprocess.TimeoutExpired:
-            # Timeout could mean device is slow but functional - accept it
-            return True, "ffmpeg open probe timed out; device may be slow but accepted"
+            return False, "Probe timeout - device unresponsive"
         except Exception as exc:
-            return False, str(exc)
-
-        output = (result.stderr + result.stdout).strip()
-        lower = output.lower()
-        
-        # Success: FFmpeg produced a frame
-        if result.returncode == 0:
-            return True, f"ffmpeg opened and captured frame with {input_format or 'auto'}"
-        
-        # Device busy - this is a transient state, not a camera failure
-        if "device or resource busy" in lower or "resource busy" in lower:
-            return True, "device busy; streaming manager will free blocker"
-        
-        # MJPEG warnings are NON-FATAL - downgrade to info, don't reject camera
-        mjpeg_warnings = [
-            "unable to decode app fields",
-            "deprecated pixel format",
-            "first field",
-        ]
-        if any(w in lower for w in mjpeg_warnings):
-            # These are warnings, not errors - camera is still valid
-            return True, f"ffmpeg opened with MJPEG warnings (non-fatal): {output[:200]}"
-        
-        # Fatal errors - camera is truly not accessible
-        fatal_errors = [
-            "inappropriate ioctl",
-            "not a video capture device",
-            "no such device",
-            "permission denied",
-            "invalid argument",
-            "no medium found",
-        ]
-        if any(err in lower for err in fatal_errors):
-            return False, output or "fatal camera error: invalid v4l2 capture device"
-        
-        # Unknown errors - be permissive, let streaming manager handle it
-        # Return True so the camera isn't rejected, but log the issue
-        return True, f"ffmpeg probe had issues but camera accepted: {output[:500]}"
+            return False, str(exc)[:100]
 
     def _is_camera_device(self, device_path: str, name: str) -> bool:
-        """Check if device is likely a camera (not a codec/decoder)."""
+        """Check if device is likely a camera (not codec/ISP/misc).
+        
+        Also checks for platform-level non-capture devices.
+        """
         name_lower = name.lower()
-        if any(kw in name_lower for kw in self.NON_CAMERA_KEYWORDS):
+        
+        # Known non-camera device keywords from Raspberry Pi
+        non_camera_keywords = [
+            "codec",
+            "isp",
+            "hevc",
+            "h264",
+            "h265",
+            "encoder",
+            "decoder",
+            "component",
+            "render",
+            "display",
+            "metadata",
+            "streamer",
+            "raw",
+            "stat",
+            "control",
+        ]
+        
+        if any(kw in name_lower for kw in non_camera_keywords):
             return False
+            
+        # Check device path for known non-camera subsystems
+        known_bad_paths = [
+            "media",
+            "bcm2835-codec",
+            "bcm2835-isp",
+            "rpi-hevc-dec",
+        ]
+        
+        for bad in known_bad_paths:
+            if bad in device_path.lower():
+                return False
+                
         return True
 
     def _find_best_device_for_role(self, candidates: List[str],
@@ -664,6 +720,7 @@ class CameraDetector:
 
             resolutions = self._probe_resolutions(dev) if backend == "v4l2" else []
 
+            # Compute physical device ID (same for all /dev/videoX nodes of same physical device)
             phys_id = self._get_physical_device_id(dev) or dev  # fallback to dev path
 
             # Score this node based on device index and bus type
@@ -692,6 +749,7 @@ class CameraDetector:
                 candidate_resolutions[phys_id] = resolutions
                 candidate_reasons[phys_id] = ffmpeg_reason
                 candidate_ffmpeg_results[phys_id] = ffmpeg_reason
+                candidate_backends[phys_id] = backend
                 candidate_backends[phys_id] = backend
 
         if not candidates:
