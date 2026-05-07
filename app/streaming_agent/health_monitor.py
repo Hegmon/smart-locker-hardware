@@ -212,5 +212,4 @@ class HealthMonitor:
                 restarts = status["restart_count"]
                 report_lines.append(f"    {stream_name}: {health_status} {running_status} (device: {device}, restarts: {restarts})")
 
-        return "\n".join(report_lines)</content>
-<parameter name="filePath">/home/hassaanqazi/Documents/smart-locker-hardware/app/streaming_agent/health_monitor.py
+        return "\n".join(report_lines)
