@@ -87,29 +87,57 @@ class CameraRegistry:
         from .camera_detector import CameraDetector
         detector = CameraDetector()
 
-        # Get raw camera list
-        raw_cameras = detector.detect_cameras()
+        # Get raw camera list - guard against detector failures
+        try:
+            raw_cameras = detector.detect_cameras()
+        except Exception as e:
+            logger.exception("CameraDetector failed: %s", e)
+            raw_cameras = []
 
         # Convert to our device format
         current_devices = {}
         current_paths = set()
 
         for cam_info in raw_cameras:
-            device_path = cam_info.device_path
+            device_path = getattr(cam_info, "device_path", None)
 
-            # Get detailed capabilities
-            capabilities = self.capabilities_detector.detect_capabilities(device_path)
+            if not device_path:
+                logger.warning("Skipping camera entry with no device_path: %s", cam_info)
+                continue
+
+            # Get detailed capabilities (protect against unexpected exceptions)
+            try:
+                capabilities = self.capabilities_detector.detect_capabilities(device_path)
+            except Exception as e:
+                logger.exception("Error detecting capabilities for %s: %s", device_path, e)
+                # Skip this node safely
+                logger.warning("Skipping device due to capabilities error: %s", device_path)
+                continue
 
             # Classify device
-            classification = self.classifier.classify_device(
-                device_path=device_path,
-                device_name=cam_info.name,
-                bus_info=capabilities.bus_info,
-                capabilities=capabilities.capabilities
-            )
+            try:
+                classification = self.classifier.classify_device(
+                    device_path=device_path,
+                    device_name=getattr(cam_info, "name", "") or "",
+                    bus_info=getattr(capabilities, "bus_info", None),
+                    capabilities=getattr(capabilities, "capabilities", []),
+                )
+            except Exception as e:
+                logger.exception("Error classifying device %s: %s", device_path, e)
+                logger.warning("Skipping device due to classification error: %s", device_path)
+                continue
 
-            # Skip invalid or non-camera devices
-            if not capabilities.is_valid or classification.backend == "none":
+            # Skip invalid or non-camera devices and log reason
+            is_valid = bool(getattr(capabilities, "is_valid", False))
+            backend = getattr(classification, "backend", "none")
+            if not is_valid or backend == "none":
+                logger.info(
+                    "Rejected device %s: valid=%s, backend=%s, reason=%s",
+                    device_path,
+                    is_valid,
+                    backend,
+                    getattr(capabilities, "validation_error", None),
+                )
                 continue
 
             device = CameraDevice(
@@ -117,8 +145,10 @@ class CameraRegistry:
                 classification=classification,
                 capabilities=capabilities,
                 last_seen=time.time(),
-                is_active=True
+                is_active=True,
             )
+
+            logger.info("Detected camera: %s (%s), formats=%s", device_path, getattr(cam_info, "name", ""), getattr(capabilities, "supported_formats", []))
 
             current_devices[device_path] = device
             current_paths.add(device_path)
