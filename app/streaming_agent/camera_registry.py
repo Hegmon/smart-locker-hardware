@@ -217,5 +217,4 @@ class CameraRegistry:
             for device in self.devices.values():
                 if device.stream_id is not None and device.is_active:
                     result.append(device)
-            return result</content>
-<parameter name="filePath">/home/hassaanqazi/Documents/smart-locker-hardware/app/streaming_agent/camera_registry.py
+            return result
