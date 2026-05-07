@@ -156,8 +156,10 @@ class FormatScanner:
                     "-i", device_path,
                 ],
                 capture_output=True,
-                text=True,
-                timeout=10,
+                    "-fflags", "nobuffer",
+                    "-flags", "low_delay",
+                    "-analyzeduration", "0",
+                    "-probesize", "32",
             )
             
             # Parse output for format codes
@@ -535,86 +537,118 @@ class FFmpegStreamEngine:
             logger.debug("Command: %s", " ".join(cmd) if isinstance(cmd, list) else str(cmd))
 
             try:
-                if stream.backend == "libcamera" and "|" in cmd:
-                    # Handle piped libcamera commands
-                    pipe_idx = cmd.index("|")
-                    producer_cmd = cmd[:pipe_idx]
-                    consumer_cmd = cmd[pipe_idx + 1:]
+                # Attempt to start the pipeline, with a few quick retries if device is busy
+                start_attempts = 3
+                started = False
+                last_error = ""
 
-                    logger.info("Starting piped libcamera pipeline: %s | %s",
-                              " ".join(producer_cmd), " ".join(consumer_cmd))
+                for start_try in range(start_attempts):
+                    # Clean up any previous partial processes
+                    try:
+                        if stream.process:
+                            try:
+                                os.killpg(os.getpgid(stream.process.pid), signal.SIGTERM)
+                            except Exception:
+                                pass
+                            stream.process = None
+                        if stream.producer_process:
+                            try:
+                                os.killpg(os.getpgid(stream.producer_process.pid), signal.SIGTERM)
+                            except Exception:
+                                pass
+                            stream.producer_process = None
+                    except Exception:
+                        pass
 
-                    # Start producer (rpicam-vid)
-                    producer = subprocess.Popen(
-                        producer_cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        stdin=subprocess.DEVNULL,
-                        preexec_fn=os.setsid,
-                    )
+                    if stream.backend == "libcamera" and "|" in cmd:
+                        # Handle piped libcamera commands
+                        pipe_idx = cmd.index("|")
+                        producer_cmd = cmd[:pipe_idx]
+                        consumer_cmd = cmd[pipe_idx + 1:]
 
-                    # Start consumer (ffmpeg) with producer's stdout as input
-                    stream.process = subprocess.Popen(
-                        consumer_cmd,
-                        stdin=producer.stdout,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        preexec_fn=os.setsid,
-                    )
+                        logger.info("Starting piped libcamera pipeline: %s | %s",
+                                  " ".join(producer_cmd), " ".join(consumer_cmd))
 
-                    # Store both processes for cleanup
-                    stream.producer_process = producer
-
-                else:
-                    # Handle regular single-command pipelines (V4L2)
-                    stream.process = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        stdin=subprocess.DEVNULL,
-                        preexec_fn=os.setsid,
-                    )
-                
-                # Wait and check if process started successfully
-                time.sleep(2)
-                returncode = stream.process.poll()
-                
-                if returncode is not None:
-                    # Process exited immediately
-                    stderr = (
-                        stream.process.stderr.read().decode(errors="replace")
-                        if stream.process.stderr else ""
-                    )
-                    last_error = stderr.strip() or f"FFmpeg exited with code {returncode}"
-                    
-                    logger.warning(
-                        "FFmpeg failed to start for %s (format=%s): %s",
-                        stream.camera_type,
-                        format_label,
-                        last_error[:500],
-                    )
-                    
-                    # Try to recover from device busy errors
-                    if self._is_device_busy_error(last_error):
-                        logger.warning("Device busy, attempting to free...")
-                        self._free_device(stream.device_path)
-                        time.sleep(1)
-                    
-                    # Check if this is a fatal error
-                    if self._is_fatal_camera_error(last_error):
-                        logger.error(
-                            "Fatal camera error for %s, skipping this format",
-                            stream.camera_type,
+                        # Start producer (rpicam-vid)
+                        producer = subprocess.Popen(
+                            producer_cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL,
+                            preexec_fn=os.setsid,
                         )
-                        continue  # Try next format
-                    
-                    # Increment failure count
-                    stream.consecutive_failures += 1
-                    stream.restart_count += 1
-                    stream.last_error = last_error
-                    
-                    continue  # Try next format
-                
+
+                        # Start consumer (ffmpeg) with producer's stdout as input
+                        stream.process = subprocess.Popen(
+                            consumer_cmd,
+                            stdin=producer.stdout,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            preexec_fn=os.setsid,
+                        )
+
+                        # Store both processes for cleanup
+                        stream.producer_process = producer
+
+                    else:
+                        # Handle regular single-command pipelines (V4L2)
+                        stream.process = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL,
+                            preexec_fn=os.setsid,
+                        )
+
+                    # Give FFmpeg a short time to fail fast if there's an immediate error
+                    time.sleep(2)
+                    returncode = stream.process.poll()
+
+                    if returncode is not None:
+                        # Process exited immediately
+                        stderr = (
+                            stream.process.stderr.read().decode(errors="replace")
+                            if stream.process.stderr else ""
+                        )
+                        last_error = stderr.strip() or f"FFmpeg exited with code {returncode}"
+
+                        logger.warning(
+                            "FFmpeg failed to start for %s (format=%s): %s",
+                            stream.camera_type,
+                            format_label,
+                            last_error[:500],
+                        )
+
+                        # If device busy, try to free and retry a few times
+                        if self._is_device_busy_error(last_error) and start_try < (start_attempts - 1):
+                            logger.info("Device busy on %s, attempt %d/%d to free and retry", stream.camera_type, start_try+1, start_attempts)
+                            try:
+                                self._free_device(stream.device_path)
+                            except Exception:
+                                logger.debug("_free_device failed for %s", stream.camera_type)
+                            time.sleep(0.5 * (2 ** start_try))
+                            # continue to next start_try
+                            continue
+
+                        # Fatal camera errors should skip to next format immediately
+                        if self._is_fatal_camera_error(last_error):
+                            logger.error("Fatal camera error for %s, skipping this format: %s", stream.camera_type, last_error)
+                            break
+
+                        # Non-fatal - count as a failure and break to try next format
+                        stream.consecutive_failures += 1
+                        stream.restart_count += 1
+                        stream.last_error = last_error
+                        break
+
+                    # If we reach here, process started successfully
+                    started = True
+                    break
+
+                if not started:
+                    # All start attempts failed for this format
+                    continue
+
                 # Process started successfully!
                 stream.last_start_time = time.time()
                 stream.last_frame_time = time.time()
@@ -622,7 +656,7 @@ class FFmpegStreamEngine:
                 stream.state = STREAM_STATE_RUNNING
                 stream.consecutive_failures = 0
                 stream.last_command = cmd
-                
+
                 logger.info(
                     "✓ FFmpeg started for %s (PID: %d, format=%s, resolution=%s)",
                     stream.camera_type,
@@ -630,7 +664,7 @@ class FFmpegStreamEngine:
                     stream.selected_format,
                     stream.selected_resolution,
                 )
-                
+
                 # Notify status change
                 if self.on_stream_status_change:
                     self.on_stream_status_change(
@@ -638,7 +672,7 @@ class FFmpegStreamEngine:
                         stream.state,
                         f"format={stream.selected_format}, res={stream.selected_resolution}",
                     )
-                
+
                 return True
                 
             except FileNotFoundError:
@@ -759,6 +793,9 @@ class FFmpegStreamEngine:
                 cmd.extend(["-input_format", input_format])
 
             cmd.extend(["-i", device_path])
+
+            # Low-latency tuning: reduce probe/analyze overhead and enable low-delay options
+            # (already added above, ensure additional options before encoding)
 
             # Encoding options optimized for Raspberry Pi
             cmd.extend([
