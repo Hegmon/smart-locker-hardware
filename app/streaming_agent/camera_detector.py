@@ -288,7 +288,7 @@ class CameraDetector:
             return "h264"
         return None
 
-    def _ffmpeg_can_open(self, device_path: str, formats: List[str]) -> tuple[bool, str]:
+    def _ffmpeg_can_open(self, device_path: str, formats: List[str]) -> tuple[bool, str, int]:
         """
         Probe whether FFmpeg can open and read frames from the device.
         
@@ -317,7 +317,6 @@ class CameraDetector:
             "-fflags", "nobuffer",
             "-flags", "low_delay",
             "-max_delay", "5",
-            "-timeout", "2000000",  # 2 second timeout in microseconds
         ]
         
         if input_format:
@@ -332,23 +331,23 @@ class CameraDetector:
         
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            output = result.stderr.strip()
-            
+            output = (result.stderr or result.stdout or "").strip()
+
             # Success: captured one frame
             if result.returncode == 0:
-                return True, f"OK: captured frame (format: {input_format or 'auto'})"
-            
+                return True, f"OK: captured frame (format: {input_format or 'auto'})", 0
+
             output_lower = output.lower()
-            
-            # Device busy - transient error, device itself is valid
+
+            # Device busy - transient error, device itself is valid but lower priority
             if "device or resource busy" in output_lower or "resource busy" in output_lower:
-                return True, "Device busy (valid but in use)"
-            
-            # MJPEG warnings are non-fatal - camera is valid
+                return True, "Device busy (valid but in use)", 1
+
+            # MJPEG warnings are non-fatal - camera is valid but lower priority
             mjpeg_warnings = ["unable to decode", "deprecated pixel format", "first field"]
             if any(w in output_lower for w in mjpeg_warnings):
-                return True, f"MJPEG warning (valid): {output[:100]}"
-            
+                return True, f"MJPEG warning (valid): {output[:100]}", 1
+
             # Fatal errors - device cannot be used as capture source
             fatal_errors = [
                 "inappropriate ioctl for device",
@@ -358,23 +357,24 @@ class CameraDetector:
                 "invalid argument",
                 "no medium found",
                 "function not implemented",
-                "ioctl(VIDIOC_G_INPUT)",  # Metadata/control nodes
-                "ioctl(VIDIOC_QUERYCAP)",  # Device doesn't support capture
+                "ioctl(vidioc_g_input)",  # Metadata/control nodes (lowercased)
+                "ioctl(vidioc_querycap)",  # Device doesn't support capture
             ]
-            
+
             for err in fatal_errors:
                 if err in output_lower:
-                    return False, f"Invalid device: {err}"
-            
+                    return False, f"Invalid device: {err}", 2
+
             # Unknown error - be conservative, reject
-            return False, f"Probe failed: {output[:200] if output else 'no output'}"
-            
+            return False, f"Probe failed: {output[:200] if output else 'no output'}", 2
+
         except FileNotFoundError:
-            return True, "ffmpeg not installed, skipping probe"
+            # ffmpeg not installed: cannot probe — treat as medium confidence valid
+            return True, "ffmpeg not installed, skipping probe", 1
         except subprocess.TimeoutExpired:
-            return False, "Probe timeout - device unresponsive"
+            return False, "Probe timeout - device unresponsive", 2
         except Exception as exc:
-            return False, str(exc)[:100]
+            return False, str(exc)[:100], 2
 
     def _is_camera_device(self, device_path: str, name: str) -> bool:
         """Check if device is likely a camera (not codec/ISP/misc).
@@ -708,11 +708,11 @@ class CameraDetector:
                 # Always attempt ffmpeg probe regardless of format list results
                 # This handles cases where v4l2-ctl enumeration is incomplete but ffmpeg works
 
-                can_open, ffmpeg_reason = self._ffmpeg_can_open(dev, formats)
+                can_open, ffmpeg_reason, probe_rank = self._ffmpeg_can_open(dev, formats)
 
                 # Log ffmpeg test result for debugging
-                logger.info("Device %s (%s) ffmpeg probe: can_open=%s, reason=%s",
-                            dev, name, can_open, ffmpeg_reason)
+                logger.info("Device %s (%s) ffmpeg probe: can_open=%s, reason=%s, rank=%s",
+                            dev, name, can_open, ffmpeg_reason, probe_rank)
 
             if not can_open:
                 logger.info("Skipping invalid camera node: %s (%s), %s", dev, name, ffmpeg_reason)
@@ -742,13 +742,29 @@ class CameraDetector:
             current_score = node_score(dev)
             existing_score = node_score(candidates.get(phys_id, ""))
 
-            if phys_id not in candidates or current_score < existing_score:
+            # Prefer nodes with better probe rank (lower is better), then by node score
+            existing_rank = candidate_ffmpeg_results.get(phys_id + "::rank")
+            if existing_rank is None:
+                existing_rank = 9
+
+            should_replace = False
+            # If we have a probe rank, prefer lower (better) rank
+            if phys_id not in candidates:
+                should_replace = True
+            elif probe_rank is not None and probe_rank < existing_rank:
+                should_replace = True
+            elif probe_rank == existing_rank and current_score < existing_score:
+                should_replace = True
+
+            if should_replace:
                 candidates[phys_id] = dev
                 candidate_names[phys_id] = name
                 candidate_formats[phys_id] = formats
                 candidate_resolutions[phys_id] = resolutions
                 candidate_reasons[phys_id] = ffmpeg_reason
                 candidate_ffmpeg_results[phys_id] = ffmpeg_reason
+                # store rank alongside results for comparison
+                candidate_ffmpeg_results[phys_id + "::rank"] = probe_rank
                 candidate_backends[phys_id] = backend
                 candidate_backends[phys_id] = backend
 
