@@ -87,5 +87,4 @@ class LibcameraPipeline(BasePipeline):
             logger.error(f"Invalid resolution format: {self.config.resolution}")
             return False
 
-        return True</content>
-<parameter name="filePath">/home/hassaanqazi/Documents/smart-locker-hardware/app/streaming_agent/pipelines/libcamera_pipeline.py
+        return True
