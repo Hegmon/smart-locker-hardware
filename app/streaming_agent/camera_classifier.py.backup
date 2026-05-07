@@ -197,5 +197,4 @@ class CameraClassifier:
         # Auto-detection as last resort
         formats.append("")
 
-        return formats</content>
-<parameter name="filePath">/home/hassaanqazi/Documents/smart-locker-hardware/app/streaming_agent/camera_classifier.py
+        return formats
