@@ -35,6 +35,13 @@ logger = logging.getLogger("streaming_agent")
 
 # Import components
 from .camera_detector import CameraDetector
+from .camera_registry import CameraRegistry
+from .camera_classifier import CameraClassifier
+from .camera_capabilities import CameraCapabilitiesDetector
+from .pipeline_factory import PipelineFactory
+from .watchdog import PipelineWatchdog
+from .reconnect_manager import ReconnectManager
+from .health_monitor import HealthMonitor
 from .constants import CAMERA_EXTERNAL, CAMERA_INTERNAL, MEDIAMTX_HOST, MEDIAMTX_RTSP_PORT
 from .device_config import get_device_config
 from .ffmpeg_manager import FFmpegStreamEngine, ProductionCameraPipeline
@@ -64,7 +71,25 @@ class StreamingAgent:
         logger.info("  mediamtx_host: %s", self.mediamtx_host)
         logger.info("  mediamtx_rtsp_port: %s", self.mediamtx_rtsp_port)
         
-        # Components
+        # New modular components for robust camera management
+        self.camera_registry = CameraRegistry()
+        self.classifier = CameraClassifier()
+        self.capabilities_detector = CameraCapabilitiesDetector()
+        self.pipeline_factory = PipelineFactory()
+        self.watchdog = PipelineWatchdog()
+        self.reconnect_manager = ReconnectManager(
+            self.camera_registry,
+            self.watchdog,
+            self.mediamtx_host,
+            self.mediamtx_rtsp_port
+        )
+        self.health_monitor = HealthMonitor(
+            self.camera_registry,
+            self.watchdog,
+            self.reconnect_manager
+        )
+
+        # Legacy components (kept for backward compatibility)
         self.detector = CameraDetector()
         self.ffmpeg_manager: Optional[FFmpegStreamEngine] = None
         self.pipeline: Optional[ProductionCameraPipeline] = None
@@ -100,26 +125,45 @@ class StreamingAgent:
         """Initialize all components"""
         logger.info("=== Initializing Streaming Agent ===")
 
+        # Initialize new modular camera management system
+        logger.info("Starting camera registry monitoring...")
+        self.camera_registry.start_monitoring()
+
+        # Perform initial comprehensive camera scan
+        devices = self.camera_registry.scan_devices()
+        logger.info("Initial camera registry scan: %d devices found", len(devices))
+
+        for device_path, device in devices.items():
+            logger.info("  %s: backend=%s, type=%s, capabilities=%s",
+                       device_path,
+                       device.classification.backend,
+                       device.classification.device_type,
+                       device.capabilities.capabilities)
+
+        # Setup reconnect manager callbacks for dynamic camera handling
+        self.reconnect_manager.add_reconnect_callback(self._on_camera_reconnect)
+
+        # Start watchdog for pipeline health monitoring
+        self.watchdog.start()
+
+        # Legacy camera detection for backward compatibility with existing pipeline
         cameras = self._detect_cameras_with_retry()
-        logger.info("Detected cameras: %s", list(cameras.keys()))
+        logger.info("Legacy camera detection: %s", list(cameras.keys()))
         for cam_type, cam_info in cameras.items():
-            logger.info("  %s: %s", cam_type, cam_info.device_path)
-            logger.info("    Formats: %s", cam_info.formats)
-            logger.info("    Resolutions: %s", cam_info.resolutions)
-            logger.info("    Reason: %s", cam_info.reason)
-        
+            logger.info("  %s: %s (backend=%s)", cam_type, cam_info.device_path,
+                       getattr(cam_info, 'backend', 'unknown'))
+
         if not cameras:
-            logger.warning("No cameras detected! Streaming will not start.")
-        
-        # 2. Initialize Production Camera Pipeline
-        # This provides isolated, resilient streaming per camera
+            logger.warning("No cameras detected via legacy method!")
+
+        # Initialize legacy Production Camera Pipeline for backward compatibility
         self.pipeline = ProductionCameraPipeline(
             device_id=self.device_id,
             mediamtx_host=self.mediamtx_host,
             mediamtx_rtsp_port=self.mediamtx_rtsp_port,
         )
-        
-        # Setup cameras in pipeline
+
+        # Setup cameras in legacy pipeline with backend info
         internal_device = None
         external_device = None
         internal_backend = "v4l2"
@@ -132,14 +176,13 @@ class StreamingAgent:
             external_device = cameras["external"].device_path
             external_backend = getattr(cameras["external"], 'backend', 'v4l2')
 
-        # If no cameras detected via detector, try manual detection
+        # Fallback manual detection with backend classification
         if not internal_device and not external_device:
-            logger.info("No cameras from detector, attempting manual detection...")
+            logger.info("No cameras from legacy detector, attempting manual detection...")
             import glob
             video_devices = sorted(glob.glob("/dev/video*"))
             if len(video_devices) >= 1:
                 internal_device = video_devices[0]
-                # For manual detection, classify backend
                 internal_name = self.detector._get_device_name(internal_device)
                 internal_backend = self.detector._classify_camera_backend(internal_device, internal_name)
             if len(video_devices) >= 2:
@@ -356,7 +399,21 @@ class StreamingAgent:
                     return {"status": "ERROR", "message": f"Unknown stream: {stream_type}"}
         
         return {"status": "ERROR", "message": "No stream manager available"}
-    
+
+    def _on_camera_reconnect(self, action: str, device_path: str, stream_name: str) -> None:
+        """Handle camera reconnect events"""
+        logger.info("Camera %s event: %s -> %s", action, device_path, stream_name)
+
+        # Publish MQTT status update if MQTT is available
+        if self.mqtt_client and self.device_uuid:
+            self.mqtt_client.publish_status_event({
+                "type": "camera_event",
+                "action": action,
+                "device_path": device_path,
+                "stream_name": stream_name,
+                "timestamp": time.time()
+            })
+
     def _stream_urls(self, stream_type: str) -> dict:
         """Build stream URLs for responses and status events."""
         return {
@@ -387,12 +444,15 @@ class StreamingAgent:
         # Auto-start streams if configured
         if self.auto_start:
             logger.info("Auto-start enabled, starting streams...")
+            # Start new modular streaming system
+            self.reconnect_manager.start_all_cameras()
+            # Also start legacy pipeline for backward compatibility
             if self.pipeline:
                 self.pipeline.start()
             elif self.ffmpeg_manager:
                 cameras = self.ffmpeg_manager._streams
                 if cameras:
-                    logger.info("Auto-starting %d camera streams...", len(cameras))
+                    logger.info("Auto-starting %d legacy camera streams...", len(cameras))
                     self.ffmpeg_manager.start_all()
                 else:
                     logger.warning("No cameras to auto-start")
@@ -413,19 +473,25 @@ class StreamingAgent:
     def shutdown(self) -> None:
         """Clean shutdown"""
         logger.info("=== Shutting down Streaming Agent ===")
-        
+
+        # Stop new modular components
+        self.reconnect_manager.stop_all_streams()
+        self.watchdog.stop()
+        self.camera_registry.stop_monitoring()
+
+        # Stop legacy components
         if self.pipeline:
             self.pipeline.stop()
-        
+
         if self.ffmpeg_manager:
             self.ffmpeg_manager.stop_monitoring()
             self.ffmpeg_manager.stop_all()
-        
+
         if self.mqtt_client:
             self.mqtt_client.disconnect()
 
         self.health_server.stop()
-        
+
         logger.info("=== Shutdown complete ===")
 
     def _health_payload(self) -> dict:
@@ -436,6 +502,12 @@ class StreamingAgent:
             except Exception:
                 pipeline_status = {"status": "unknown"}
 
+        # Get comprehensive health from new health monitor
+        try:
+            comprehensive_health = self.health_monitor.get_system_health()
+        except Exception:
+            comprehensive_health = {"status": "error", "message": "Health monitor unavailable"}
+
         return {
             "status": "ok",
             "service": "streaming_agent",
@@ -443,6 +515,7 @@ class StreamingAgent:
             "mqtt_connected": self.mqtt_client.is_connected() if self.mqtt_client else False,
             "auto_start": self.auto_start,
             "pipeline": pipeline_status,
+            "comprehensive_health": comprehensive_health,
         }
 
 
