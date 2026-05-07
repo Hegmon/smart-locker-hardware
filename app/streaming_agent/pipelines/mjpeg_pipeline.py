@@ -30,6 +30,10 @@ class MJPEGPipeline(V4L2Pipeline):
             "-hide_banner",
             "-loglevel", "warning",
             "-f", "v4l2",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-analyzeduration", "0",
+            "-probesize", "32",
             "-input_format", "mjpeg",  # Force MJPEG input
             "-framerate", str(self.config.framerate),
             "-video_size", self.config.resolution,
