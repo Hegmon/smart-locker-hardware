@@ -167,7 +167,3 @@ class BasePipeline(ABC):
         if not self.stop():
             logger.warning(f"Failed to stop pipeline {self.config.stream_name} during restart")
         return self.start()
-
-
-import os</content>
-<parameter name="filePath">/home/hassaanqazi/Documents/smart-locker-hardware/app/streaming_agent/pipelines/base_pipeline.py
