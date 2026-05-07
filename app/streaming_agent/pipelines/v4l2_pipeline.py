@@ -29,6 +29,13 @@ class V4L2Pipeline(BasePipeline):
             "-hide_banner",
             "-loglevel", "warning",
             "-f", "v4l2",
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-f", "v4l2",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-analyzeduration", "0",
+            "-probesize", "32",
             "-framerate", str(self.config.framerate),
             "-video_size", self.config.resolution,
         ]
