@@ -122,12 +122,16 @@ class StreamingAgent:
         # Setup cameras in pipeline
         internal_device = None
         external_device = None
-        
+        internal_backend = "v4l2"
+        external_backend = "v4l2"
+
         if "internal" in cameras:
             internal_device = cameras["internal"].device_path
+            internal_backend = getattr(cameras["internal"], 'backend', 'v4l2')
         if "external" in cameras:
             external_device = cameras["external"].device_path
-        
+            external_backend = getattr(cameras["external"], 'backend', 'v4l2')
+
         # If no cameras detected via detector, try manual detection
         if not internal_device and not external_device:
             logger.info("No cameras from detector, attempting manual detection...")
@@ -135,15 +139,20 @@ class StreamingAgent:
             video_devices = sorted(glob.glob("/dev/video*"))
             if len(video_devices) >= 1:
                 internal_device = video_devices[0]
+                # For manual detection, classify backend
+                internal_name = self.detector._get_device_name(internal_device)
+                internal_backend = self.detector._classify_camera_backend(internal_device, internal_name)
             if len(video_devices) >= 2:
                 external_device = video_devices[1]
-        
+                external_name = self.detector._get_device_name(external_device)
+                external_backend = self.detector._classify_camera_backend(external_device, external_name)
+
         if internal_device:
-            logger.info("Setting up internal camera: %s", internal_device)
+            logger.info("Setting up internal camera: %s (backend=%s)", internal_device, internal_backend)
         if external_device:
-            logger.info("Setting up external camera: %s", external_device)
-        
-        self._setup_pipeline_with_retry(internal_device, external_device)
+            logger.info("Setting up external camera: %s (backend=%s)", external_device, external_backend)
+
+        self._setup_pipeline_with_retry(internal_device, external_device, internal_backend, external_backend)
         
         # 3. Initialize verifier
         self.verifier = StreamVerifier(
@@ -178,6 +187,8 @@ class StreamingAgent:
         self,
         internal_device: str | None,
         external_device: str | None,
+        internal_backend: str = "v4l2",
+        external_backend: str = "v4l2",
         attempts: int = 3,
     ) -> None:
         for attempt in range(1, attempts + 1):
@@ -185,6 +196,8 @@ class StreamingAgent:
                 self.pipeline.setup_cameras(
                     internal_device=internal_device,
                     external_device=external_device,
+                    internal_backend=internal_backend,
+                    external_backend=external_backend,
                 )
                 return
             except Exception as exc:
