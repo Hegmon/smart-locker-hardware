@@ -141,8 +141,7 @@ class PipelineFactory:
         elif backend == "v4l2":
             return V4L2Pipeline(config)
 
-        # Unknown backend
+         # Unknown backend
         else:
             logger.warning(f"Unsupported backend: {backend}")
-            return None</content>
-<parameter name="filePath">/home/hassaanqazi/Documents/smart-locker-hardware/app/streaming_agent/pipeline_factory.py
+            return None
