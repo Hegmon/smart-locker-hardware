@@ -1,0 +1,200 @@
+"""
+Camera Classification Module
+Classifies cameras into backend types and capabilities.
+"""
+
+from __future__ import annotations
+import logging
+import re
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Any
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CameraClassification:
+    """Classification result for a camera device"""
+    backend: str  # "libcamera", "v4l2", "mjpeg", "h264"
+    device_type: str  # "csi", "usb", "uvc", "hardware"
+    capabilities: List[str]  # ["capture", "streaming", "mjpeg", "h264", etc.]
+    priority: int  # Higher priority = better camera
+    confidence: float  # 0.0 to 1.0, how confident we are in classification
+
+
+class CameraClassifier:
+    """Classifies camera devices into appropriate backend types"""
+
+    # CSI/libcamera camera name patterns
+    CSI_PATTERNS = [
+        r'unicam',
+        r'imx\d+',  # imx219, imx477, etc.
+        r'ov\d+',   # ov5647, ov9281, etc.
+        r'csi',
+        r'raspberry.?pi.?camera',
+        r'vc4',
+        r'bcm2835',
+        r'libcamera',
+    ]
+
+    # Non-camera device patterns to ignore
+    NON_CAMERA_PATTERNS = [
+        r'codec',
+        r'isp',
+        r'hevc',
+        r'h264.*dec',  # decoder
+        r'h265.*dec',
+        r'encoder',
+        r'component',
+        r'render',
+        r'display',
+        r'metadata',
+        r'streamer',
+    ]
+
+    # USB camera vendor patterns
+    USB_CAMERA_PATTERNS = [
+        r'logitech',
+        r'a4tech',
+        r'microsoft',
+        r'creative',
+        r'genius',
+        r'uvc',
+        r'usb',
+    ]
+
+    def classify_device(self, device_path: str, device_name: str,
+                       bus_info: Optional[str] = None,
+                       capabilities: Optional[List[str]] = None) -> CameraClassification:
+        """
+        Classify a camera device based on its properties.
+
+        Args:
+            device_path: /dev/videoX path
+            device_name: Friendly name from sysfs
+            bus_info: Bus type (platform, usb, pci)
+            capabilities: List of device capabilities
+
+        Returns:
+            CameraClassification with backend and type info
+        """
+        name_lower = device_name.lower()
+        capabilities = capabilities or []
+
+        # Check if this is a non-camera device first
+        if self._is_non_camera_device(device_name):
+            return CameraClassification(
+                backend="none",
+                device_type="system",
+                capabilities=[],
+                priority=0,
+                confidence=1.0
+            )
+
+        # Classify CSI/libcamera cameras
+        if self._is_csi_camera(device_name, bus_info):
+            backend = self._select_csi_backend(capabilities)
+            return CameraClassification(
+                backend=backend,
+                device_type="csi",
+                capabilities=self._get_csi_capabilities(capabilities),
+                priority=100,  # Highest priority
+                confidence=0.95
+            )
+
+        # Classify USB cameras
+        if bus_info == "usb" or self._is_usb_camera(device_name):
+            backend, priority = self._classify_usb_camera(capabilities)
+            return CameraClassification(
+                backend=backend,
+                device_type="usb",
+                capabilities=capabilities,
+                priority=priority,
+                confidence=0.9
+            )
+
+        # Default classification
+        return CameraClassification(
+            backend="v4l2",
+            device_type="generic",
+            capabilities=capabilities,
+            priority=10,
+            confidence=0.5
+        )
+
+    def _is_non_camera_device(self, device_name: str) -> bool:
+        """Check if device name indicates a non-camera device"""
+        name_lower = device_name.lower()
+        for pattern in self.NON_CAMERA_PATTERNS:
+            if re.search(pattern, name_lower):
+                return True
+        return False
+
+    def _is_csi_camera(self, device_name: str, bus_info: Optional[str]) -> bool:
+        """Check if this is a CSI camera"""
+        name_lower = device_name.lower()
+
+        # Check name patterns
+        for pattern in self.CSI_PATTERNS:
+            if re.search(pattern, name_lower):
+                return True
+
+        # Check bus info
+        if bus_info == "platform":
+            return True
+
+        return False
+
+    def _is_usb_camera(self, device_name: str) -> bool:
+        """Check if this is a USB camera"""
+        name_lower = device_name.lower()
+        for pattern in self.USB_CAMERA_PATTERNS:
+            if re.search(pattern, name_lower):
+                return True
+        return False
+
+    def _select_csi_backend(self, capabilities: List[str]) -> str:
+        """Select the best backend for CSI cameras"""
+        # Prefer libcamera for modern CSI cameras
+        return "libcamera"
+
+    def _get_csi_capabilities(self, capabilities: List[str]) -> List[str]:
+        """Get CSI camera capabilities"""
+        base_caps = ["capture", "streaming"]
+        if "h264" in capabilities:
+            base_caps.append("hardware_h264")
+        return base_caps
+
+    def _classify_usb_camera(self, capabilities: List[str]) -> tuple[str, int]:
+        """Classify USB camera and return (backend, priority)"""
+        # Check for hardware encoding
+        if "h264" in capabilities:
+            return "h264_passthrough", 90
+
+        # Check for MJPEG
+        if "mjpeg" in capabilities:
+            return "mjpeg", 80
+
+        # Default to raw V4L2
+        return "v4l2", 50
+
+    def get_format_priority(self, capabilities: List[str]) -> List[str]:
+        """Get format priority order for a camera"""
+        formats = []
+
+        # Hardware H264 has highest priority
+        if "h264" in capabilities:
+            formats.append("h264")
+
+        # MJPEG is efficient for USB
+        if "mjpeg" in capabilities:
+            formats.append("mjpeg")
+
+        # Raw formats as fallback
+        if "yuyv" in capabilities:
+            formats.append("yuyv422")
+
+        # Auto-detection as last resort
+        formats.append("")
+
+        return formats
