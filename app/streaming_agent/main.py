@@ -156,46 +156,56 @@ class StreamingAgent:
         if not cameras:
             logger.warning("No cameras detected via legacy method!")
 
-        # Initialize legacy Production Camera Pipeline for backward compatibility
+        # Initialize Production Camera Pipeline (multi-camera aware)
         self.pipeline = ProductionCameraPipeline(
             device_id=self.device_id,
             mediamtx_host=self.mediamtx_host,
             mediamtx_rtsp_port=self.mediamtx_rtsp_port,
         )
 
-        # Setup cameras in legacy pipeline with backend info
-        internal_device = None
-        external_device = None
-        internal_backend = "v4l2"
-        external_backend = "v4l2"
+        # Use camera registry to configure pipelines for all valid devices
+        try:
+            registry_devices = self.camera_registry.get_active_devices()
+            if registry_devices:
+                logger.info("Configuring pipeline from registry for %d device(s)", len(registry_devices))
+                # Use new multi-device setup method which preserves internal/external naming
+                self.pipeline.setup_from_registry(list(registry_devices))
+            else:
+                # Fallback to legacy behavior using detector results
+                internal_device = None
+                external_device = None
+                internal_backend = "v4l2"
+                external_backend = "v4l2"
 
-        if "internal" in cameras:
-            internal_device = cameras["internal"].device_path
-            internal_backend = getattr(cameras["internal"], 'backend', 'v4l2')
-        if "external" in cameras:
-            external_device = cameras["external"].device_path
-            external_backend = getattr(cameras["external"], 'backend', 'v4l2')
+                if "internal" in cameras:
+                    internal_device = cameras["internal"].device_path
+                    internal_backend = getattr(cameras["internal"], 'backend', 'v4l2')
+                if "external" in cameras:
+                    external_device = cameras["external"].device_path
+                    external_backend = getattr(cameras["external"], 'backend', 'v4l2')
 
-        # Fallback manual detection with backend classification
-        if not internal_device and not external_device:
-            logger.info("No cameras from legacy detector, attempting manual detection...")
-            import glob
-            video_devices = sorted(glob.glob("/dev/video*"))
-            if len(video_devices) >= 1:
-                internal_device = video_devices[0]
-                internal_name = self.detector._get_device_name(internal_device)
-                internal_backend = self.detector._classify_camera_backend(internal_device, internal_name)
-            if len(video_devices) >= 2:
-                external_device = video_devices[1]
-                external_name = self.detector._get_device_name(external_device)
-                external_backend = self.detector._classify_camera_backend(external_device, external_name)
+                # Fallback manual detection with backend classification
+                if not internal_device and not external_device:
+                    logger.info("No cameras from legacy detector, attempting manual detection...")
+                    import glob
+                    video_devices = sorted(glob.glob("/dev/video*"))
+                    if len(video_devices) >= 1:
+                        internal_device = video_devices[0]
+                        internal_name = self.detector._get_device_name(internal_device)
+                        internal_backend = self.detector._classify_camera_backend(internal_device, internal_name)
+                    if len(video_devices) >= 2:
+                        external_device = video_devices[1]
+                        external_name = self.detector._get_device_name(external_device)
+                        external_backend = self.detector._classify_camera_backend(external_device, external_name)
 
-        if internal_device:
-            logger.info("Setting up internal camera: %s (backend=%s)", internal_device, internal_backend)
-        if external_device:
-            logger.info("Setting up external camera: %s (backend=%s)", external_device, external_backend)
+                if internal_device:
+                    logger.info("Setting up internal camera: %s (backend=%s)", internal_device, internal_backend)
+                if external_device:
+                    logger.info("Setting up external camera: %s (backend=%s)", external_device, external_backend)
 
-        self._setup_pipeline_with_retry(internal_device, external_device, internal_backend, external_backend)
+                self._setup_pipeline_with_retry(internal_device, external_device, internal_backend, external_backend)
+        except Exception as e:
+            logger.exception("Failed to configure production pipeline from registry: %s", e)
         
         # 3. Initialize verifier
         self.verifier = StreamVerifier(
