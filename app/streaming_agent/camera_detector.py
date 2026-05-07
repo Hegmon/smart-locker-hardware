@@ -36,6 +36,7 @@ class CameraInfo(NamedTuple):
     name: str  # friendly name from sysfs
     resolutions: List[str] = []
     reason: str = ""
+    backend: str = "v4l2"  # "libcamera" or "v4l2"
 
 
 class CameraDetector:
@@ -150,6 +151,43 @@ class CameraDetector:
             return str(abs_target)
         except Exception:
             return None
+
+    def _classify_camera_backend(self, device_path: str, name: str) -> str:
+        """
+        Classify camera backend type based on device name and sysfs info.
+
+        Returns:
+            "libcamera" for CSI/unicam cameras
+            "v4l2" for USB and standard V4L2 cameras
+        """
+        name_lower = name.lower()
+
+        # Check for libcamera/CSI indicators
+        libcamera_indicators = [
+            "unicam", "csi", "imx", "ov", "raspberry pi camera",
+            "libcamera", "vc4", "bcm2835"
+        ]
+
+        if any(indicator in name_lower for indicator in libcamera_indicators):
+            logger.info("Detected libcamera backend for %s (%s)", device_path, name)
+            return "libcamera"
+
+        # Check sysfs for platform devices (typically CSI)
+        try:
+            video_dir = Path(f"/sys/class/video4linux/{Path(device_path).name}")
+            if video_dir.exists():
+                device_link = video_dir / "device"
+                if device_link.exists() and device_link.is_symlink():
+                    target = os.readlink(device_link)
+                    if "/platform" in target:
+                        logger.info("Detected libcamera backend (platform device) for %s", device_path)
+                        return "libcamera"
+        except Exception:
+            pass
+
+        # Default to V4L2 for USB and other devices
+        logger.info("Detected v4l2 backend for %s (%s)", device_path, name)
+        return "v4l2"
 
     def _probe_formats(self, device_path: str) -> List[str]:
         """Use v4l2-ctl or ffmpeg to get supported pixel formats."""
@@ -584,6 +622,7 @@ class CameraDetector:
         candidate_resolutions: dict[str, List[str]] = {}   # phys_id -> resolutions
         candidate_reasons: dict[str, str] = {}   # phys_id -> validation reason
         candidate_ffmpeg_results: dict[str, str] = {}   # phys_id -> ffmpeg probe result
+        candidate_backends: dict[str, str] = {}   # phys_id -> backend type
 
         for dev in all_devices:
             name = self._get_device_name(dev)
@@ -593,24 +632,37 @@ class CameraDetector:
                 logger.info("Skipping non-camera device: %s (%s)", dev, name)
                 continue
 
-            formats = self._probe_formats(dev)
-            logger.info("Device %s (%s) formats from enumeration: %s", dev, name, formats)
-            
-            # CRITICAL FIX: Do NOT reject cameras based solely on format enumeration
-            # Always attempt ffmpeg probe regardless of format list results
-            # This handles cases where v4l2-ctl enumeration is incomplete but ffmpeg works
-            
-            can_open, ffmpeg_reason = self._ffmpeg_can_open(dev, formats)
-            
-            # Log ffmpeg test result for debugging
-            logger.info("Device %s (%s) ffmpeg probe: can_open=%s, reason=%s", 
-                       dev, name, can_open, ffmpeg_reason)
-            
+            # Classify backend type BEFORE probing
+            backend = self._classify_camera_backend(dev, name)
+
+            # Handle backend-specific probing
+            if backend == "libcamera":
+                # For libcamera devices, skip V4L2 probing entirely
+                # These devices don't respond to V4L2 ioctl calls
+                formats = []
+                can_open = True
+                ffmpeg_reason = f"libcamera backend detected, skipping V4L2 probe"
+                logger.info("Device %s (%s) backend=libcamera, skipping V4L2 probing", dev, name)
+            else:
+                # For V4L2 devices, use existing probing logic
+                formats = self._probe_formats(dev)
+                logger.info("Device %s (%s) formats from enumeration: %s", dev, name, formats)
+
+                # CRITICAL FIX: Do NOT reject cameras based solely on format enumeration
+                # Always attempt ffmpeg probe regardless of format list results
+                # This handles cases where v4l2-ctl enumeration is incomplete but ffmpeg works
+
+                can_open, ffmpeg_reason = self._ffmpeg_can_open(dev, formats)
+
+                # Log ffmpeg test result for debugging
+                logger.info("Device %s (%s) ffmpeg probe: can_open=%s, reason=%s",
+                            dev, name, can_open, ffmpeg_reason)
+
             if not can_open:
                 logger.info("Skipping invalid camera node: %s (%s), %s", dev, name, ffmpeg_reason)
                 continue
 
-            resolutions = self._probe_resolutions(dev)
+            resolutions = self._probe_resolutions(dev) if backend == "v4l2" else []
 
             phys_id = self._get_physical_device_id(dev) or dev  # fallback to dev path
 
@@ -640,6 +692,7 @@ class CameraDetector:
                 candidate_resolutions[phys_id] = resolutions
                 candidate_reasons[phys_id] = ffmpeg_reason
                 candidate_ffmpeg_results[phys_id] = ffmpeg_reason
+                candidate_backends[phys_id] = backend
 
         if not candidates:
             logger.warning("No valid camera devices found")
@@ -649,9 +702,10 @@ class CameraDetector:
         logger.info("Found %d physical camera(s)", len(candidates))
         for phys_id, dev in candidates.items():
             logger.info(
-                "Camera candidate: %s (%s), formats=%s, resolutions=%s, ffmpeg=%s",
+                "Camera candidate: %s (%s), backend=%s, formats=%s, resolutions=%s, ffmpeg=%s",
                 dev,
                 candidate_names[phys_id],
+                candidate_backends.get(phys_id, "unknown"),
                 candidate_formats[phys_id],
                 candidate_resolutions.get(phys_id, []),
                 candidate_ffmpeg_results.get(phys_id, ""),
@@ -672,6 +726,7 @@ class CameraDetector:
                 name=candidate_names[phys_id],
                 resolutions=candidate_resolutions.get(phys_id, []),
                 reason=candidate_reasons.get(phys_id, ""),
+                backend=candidate_backends.get(phys_id, "v4l2"),
             ))
         if roles.get("external"):
             phys_id = roles["external"]
@@ -683,6 +738,7 @@ class CameraDetector:
                 name=candidate_names[phys_id],
                 resolutions=candidate_resolutions.get(phys_id, []),
                 reason=candidate_reasons.get(phys_id, ""),
+                backend=candidate_backends.get(phys_id, "v4l2"),
             ))
 
         logger.info("=== Camera Detection Complete: %d role(s) assigned ===", len(result))
