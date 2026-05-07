@@ -22,7 +22,7 @@ class CameraDevice:
     device_path: str
     classification: CameraClassification
     capabilities: CameraCapabilities
-    last_seen: float = field(default_factory=time.time)
+    last_seen: float = 0.0
     is_active: bool = True
     stream_id: Optional[str] = None  # Associated stream ID if streaming
 
@@ -208,11 +208,14 @@ class CameraRegistry:
         """Get devices by backend type"""
         with self._lock:
             return [d for d in self.devices.values()
-                   if d.classification.backend == backend and d.is_active]
+                    if d.classification.backend == backend and d.is_active]
 
-    def get_streaming_devices(self) -> List[CameraDevice]:
+    def get_streaming_devices(self):
         """Get devices that are currently streaming"""
         with self._lock:
-            return [d for d in self.devices.values()
-                   if d.stream_id is not None and d.is_active]</content>
+            result = []
+            for device in self.devices.values():
+                if device.stream_id is not None and device.is_active:
+                    result.append(device)
+            return result</content>
 <parameter name="filePath">/home/hassaanqazi/Documents/smart-locker-hardware/app/streaming_agent/camera_registry.py
