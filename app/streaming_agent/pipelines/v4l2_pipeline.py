@@ -84,5 +84,4 @@ class V4L2Pipeline(BasePipeline):
             logger.error(f"Invalid resolution format: {self.config.resolution}")
             return False
 
-        return True</content>
-<parameter name="filePath">/home/hassaanqazi/Documents/smart-locker-hardware/app/streaming_agent/pipelines/v4l2_pipeline.py
+        return True
