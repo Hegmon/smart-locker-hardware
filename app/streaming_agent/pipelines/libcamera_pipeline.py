@@ -68,6 +68,17 @@ class LibcameraPipeline(BasePipeline):
             "-rtsp_transport", "tcp",
         ]
 
+        # Add low-latency flags for consumer ffmpeg
+        cmd[0:0] = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-analyzeduration", "0",
+            "-probesize", "32",
+        ]
+
         # Output RTSP URL
         rtsp_url = f"rtsp://{self.config.rtsp_host}:{self.config.rtsp_port}/{stream_name}"
         cmd.append(rtsp_url)
