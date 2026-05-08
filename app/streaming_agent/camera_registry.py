@@ -85,11 +85,12 @@ class CameraRegistry:
         Returns current device snapshot.
         """
         from .camera_detector import CameraDetector
+        from .device_lock import manager as device_lock_manager
         detector = CameraDetector()
 
-        # Get raw camera list - guard against detector failures
+        # Get raw camera list from by-id/by-path enumerator
         try:
-            raw_cameras = detector.detect_cameras()
+            raw_cameras = detector.detect_all_valid_cameras()
         except Exception as e:
             logger.exception("CameraDetector failed: %s", e)
             raw_cameras = []
@@ -103,6 +104,11 @@ class CameraRegistry:
 
             if not device_path:
                 logger.warning("Skipping camera entry with no device_path: %s", cam_info)
+                continue
+
+            # If device is locked by another pipeline, skip it
+            if device_lock_manager.is_locked(device_path):
+                logger.info("Skipping locked device: %s", device_path)
                 continue
 
             # Get detailed capabilities (protect against unexpected exceptions)
