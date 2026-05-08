@@ -56,6 +56,8 @@ class StreamWorker:
         self._lock = threading.RLock()
         self._running = False
         self._monitor_thread: Optional[threading.Thread] = None
+        self._progress_thread: Optional[threading.Thread] = None
+        self._progress_stop = threading.Event()
         
         # Health tracking
         self.health = StreamHealth(
@@ -178,6 +180,14 @@ class StreamWorker:
                 self.health.restart_count = 0
                 self._frame_count = 0
                 self._last_frame_time = time.time()
+                # Start progress reader to parse FFmpeg -progress output
+                self._progress_stop.clear()
+                self._progress_thread = threading.Thread(
+                    target=self._progress_reader,
+                    daemon=True,
+                    name=f"ffmpeg-progress-{self.config.camera_type}",
+                )
+                self._progress_thread.start()
                 
                 logger.info(
                     "FFmpeg started for %s (PID: %d, format: %s, resolution: %s)",
@@ -229,6 +239,10 @@ class StreamWorker:
             base_cmd.extend(["-input_format", self.config.format])
 
         base_cmd.extend(["-i", self.config.device])
+
+        # Include FFmpeg progress to stdout so we can monitor frame progress
+        # This will be parsed by _progress_reader thread
+        base_cmd += ["-nostats", "-progress", "pipe:1"]
 
         # If the camera provides H.264 natively, avoid re-encoding to reduce CPU and latency
         if self.config.format == "h264":
@@ -291,6 +305,102 @@ class StreamWorker:
             finally:
                 self.process = None
                 self._start_time = None
+                # Stop progress reader
+                try:
+                    self._progress_stop.set()
+                    if self._progress_thread and self._progress_thread.is_alive():
+                        self._progress_thread.join(timeout=1)
+                except Exception:
+                    pass
+                    self._progress_thread = None
+
+        def _progress_reader(self) -> None:
+            """
+            Read FFmpeg "-progress pipe:1" output from stdout and update frame/fps
+            metrics for health monitoring.
+            """
+            if not self.process or not self.process.stdout:
+                return
+
+            try:
+                # Read lines until process ends or stop requested
+                while not self._progress_stop.is_set():
+                    line = self.process.stdout.readline()
+                    if not line:
+                        # EOF or process exit
+                        break
+                    try:
+                        if isinstance(line, bytes):
+                            s = line.decode(errors="replace").strip()
+                        else:
+                            s = str(line).strip()
+                    except Exception:
+                        s = ""
+
+                    if not s:
+                        continue
+
+                    # Progress format: key=value lines, e.g. frame=123, fps=25.0
+                    if s.startswith("frame="):
+                        try:
+                            frame_num = int(s.split("=", 1)[1].strip())
+                            self._frame_count = frame_num
+                            self.health.frame_count = frame_num
+                            self._last_frame_time = time.time()
+                        except Exception:
+                            pass
+                    elif s.startswith("fps="):
+                        try:
+                            fps_val = float(s.split("=", 1)[1].strip())
+                            self.health.fps = round(fps_val, 1)
+                            self._last_frame_time = time.time()
+                        except Exception:
+                            pass
+                    # continue reading
+            except Exception:
+                # Reader may fail if process ends; ignore
+                pass
+            if not self.process or not self.process.stdout:
+                return
+
+            try:
+                # Read lines until process ends or stop requested
+                while not self._progress_stop.is_set():
+                    line = self.process.stdout.readline()
+                    if not line:
+                        # EOF or process exit
+                        break
+                    try:
+                        if isinstance(line, bytes):
+                            s = line.decode(errors="replace").strip()
+                        else:
+                            s = str(line).strip()
+                    except Exception:
+                        s = ""
+
+                    if not s:
+                        continue
+
+                    # Progress format: key=value lines, e.g. frame=123, fps=25.0
+                    if s.startswith("frame="):
+                        try:
+                            frame_num = int(s.split("=", 1)[1].strip())
+                            self._frame_count = frame_num
+                            self.health.frame_count = frame_num
+                            self._last_frame_time = time.time()
+                        except Exception:
+                            pass
+                    elif s.startswith("fps="):
+                        try:
+                            fps_val = float(s.split("=", 1)[1].strip())
+                            self.health.fps = round(fps_val, 1)
+                            self._last_frame_time = time.time()
+                        except Exception:
+                            pass
+                    # continue reading
+            except Exception:
+                # Reader may fail if process ends; ignore
+                pass
     
     def _monitor_loop(self) -> None:
         """
@@ -396,22 +506,23 @@ class StreamWorker:
             return ""
     
     def _update_fps(self) -> None:
-        """
-        Update FPS estimate.
-        """
+        """Update FPS estimate using last_frame_time populated by progress reader."""
         now = time.time()
-        
-        # Simple frame counter - increment periodically
-        # In production, you'd parse FFmpeg output for actual frame count
-        if self.health.state == "running":
-            self._frame_count += 1
-            
-            if self._last_frame_time:
-                elapsed = now - self._last_frame_time
-                if elapsed > 0:
-                    self.health.fps = round(1.0 / elapsed, 1)
-            
-            self._last_frame_time = now
+
+        if self.health.state != "running":
+            return
+
+        if self._last_frame_time:
+            elapsed = now - self._last_frame_time
+            # If we haven't received a frame for a while, consider fps 0
+            if elapsed > (self.HEALTH_CHECK_INTERVAL * 3):
+                if self.health.fps != 0.0:
+                    logger.warning("No frames detected for %s in %.1fs", self.config.device, elapsed)
+                self.health.fps = 0.0
+            # else, keep fps as last reported by progress reader
+        else:
+            # No frame seen yet
+            self.health.fps = 0.0
     
     def _notify_health_change(self) -> None:
         """Notify health change callback."""
