@@ -321,6 +321,9 @@ class StreamProcess:
     consecutive_failures: int = 0
     last_frame_time: float = 0
     last_start_time: float = 0
+    last_health_check: float = 0
+    last_frame_count: int = 0
+    frame_stall_start: Optional[float] = None
     last_error: Optional[str] = None
 
     # Command tracking
@@ -360,7 +363,9 @@ class FFmpegStreamEngine:
     FPS_CHECK_INTERVAL = 10  # seconds
     MAX_CONSECUTIVE_FAILURES = 3
     FRAME_COUNT_TIMEOUT = 15  # seconds
-    
+    FRAME_STALL_THRESHOLD = 30  # seconds without frames
+    RECONNECT_GRACE_PERIOD = 5  # seconds after reconnect before checking
+
     # Restart configuration
     MAX_RESTARTS_PER_FORMAT = 3
     RESTART_BACKOFF_BASE = 1.0  # seconds
@@ -1101,13 +1106,52 @@ class FFmpegStreamEngine:
                     self._restart_stream(stream)
                     return
             
-            # Check frame rate (simplified - check if process is producing output)
-            # In production, you'd parse FFmpeg stats or use fpsdetect
-            time_since_start = time.time() - stream.last_start_time
-            if time_since_start > self.FPS_CHECK_INTERVAL:
-                # For now, just check if process is still alive
-                # A real implementation would check actual frame output
-                pass
+            # Check for frame stalls (no frames for extended period)
+            now = time.time()
+            time_since_last_frame = now - stream.last_frame_time
+
+            # Update frame stall tracking
+            if stream.last_frame_count > 0 and time_since_last_frame > self.FRAME_STALL_THRESHOLD:
+                if stream.frame_stall_start is None:
+                    # Start of stall period
+                    stream.frame_stall_start = now
+                    logger.warning(
+                        "Stream %s frame stall detected (no frames for %.1fs)",
+                        stream.camera_type,
+                        time_since_last_frame,
+                    )
+                elif now - stream.frame_stall_start > self.FRAME_STALL_THRESHOLD:
+                    # Stall confirmed, restart stream
+                    logger.error(
+                        "Stream %s confirmed stalled (no frames for %.1fs), restarting",
+                        stream.camera_type,
+                        time_since_last_frame,
+                    )
+                    stream.state = STREAM_STATE_RECOVERING
+                    stream.last_error = f"Frame stall: {time_since_last_frame:.1f}s"
+                    self._restart_stream(stream)
+                    return
+            else:
+                # Clear stall state if frames are flowing again
+                if stream.frame_stall_start is not None:
+                    logger.info(
+                        "Stream %s recovered from frame stall",
+                        stream.camera_type,
+                    )
+                    stream.frame_stall_start = None
+
+            # Periodic frame rate check
+            if now - stream.last_health_check > self.FPS_CHECK_INTERVAL:
+                stream.last_health_check = now
+
+                # Check if we're getting any frame updates
+                if stream.last_frame_count == 0 and now - stream.last_start_time > self.RECONNECT_GRACE_PERIOD:
+                    logger.warning(
+                        "Stream %s has produced no frames since start (%.1fs ago)",
+                        stream.camera_type,
+                        now - stream.last_start_time,
+                    )
+                    stream.state = STREAM_STATE_DEGRADED
     
     def _restart_stream(self, stream: StreamProcess) -> bool:
         """
