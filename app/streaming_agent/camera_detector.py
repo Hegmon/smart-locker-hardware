@@ -1070,6 +1070,13 @@ class CameraDetector:
                 else:
                     resolved = path
 
+                # CRITICAL: Skip devices that are currently locked/streaming
+                # This prevents conflicts with active FFmpeg processes
+                from .device_lock import manager as device_lock_manager
+                if device_lock_manager.is_locked(resolved):
+                    logger.debug("Skipping locked device (actively streaming): %s", resolved)
+                    continue
+
                 name = self._get_device_name(resolved)
 
                 # Confirm USB bus connection (multiple validation methods)
