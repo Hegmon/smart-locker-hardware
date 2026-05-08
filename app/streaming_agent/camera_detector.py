@@ -119,90 +119,96 @@ class CameraDetector:
         return ""
 
     def _get_device_bus(self, device_path: str) -> Optional[str]:
-        """Check sysfs to determine the bus type of a video device.
-        
+        """
+        Determine the bus type of a video device using multiple methods.
+
         Returns 'usb', 'platform', 'pci', or None if cannot determine.
         """
         try:
+            # Method 1: udev properties (most reliable)
+            props = self._get_udev_properties(device_path)
+            if props:
+                bus = props.get('ID_BUS', '').lower()
+                if bus in ('usb', 'platform', 'pci'):
+                    return bus
+
+            # Method 2: sysfs traversal from device link
             video_dir = Path(f"/sys/class/video4linux/{Path(device_path).name}")
-            if not video_dir.exists():
-                # Try alternate path with video4linux link
-                return self._detect_bus_from_sysfs_tree(device_path)
-            
-            device_link = video_dir / "device"
-            if not device_link.exists():
-                # Try checking parent devices
-                return self._detect_bus_from_sysfs_tree(device_path)
-            
-            if not device_link.is_symlink():
-                return None
-                
-            # Resolve the symlink chain and check all parents
-            target_path = os.readlink(device_link)
-            target_abs = (video_dir.parent / target_path).resolve()
-            
-            # Check the path string and all parents for bus indicators
-            path_str = str(target_abs)
-            parent_path = target_abs
-            
-            # Walk up the device tree looking for bus indicators
-            for _ in range(10):  # Max 10 levels up
-                path_str = str(parent_path)
-                if "/usb" in path_str:
-                    return "usb"
-                elif "/platform" in path_str:
-                    return "platform"
-                elif "/pci" in path_str:
-                    return "pci"
-                
-                parent_path = parent_path.parent
-                if str(parent_path) == "/":
-                    break
-            
-            # Fallback: check for USB in the original target path
-            if "/usb" in target_path or "usb" in target_path.lower():
-                return "usb"
-            elif "/platform" in target_path:
-                return "platform"
-            elif "/pci" in target_path:
-                return "pci"
-                
-            return None
-        except (OSError, ValueError):
+            if video_dir.exists():
+                device_link = video_dir / "device"
+                if device_link.exists() and device_link.is_symlink():
+                    target = device_link.resolve()
+
+                    # Walk up the device tree
+                    current = target
+                    for _ in range(15):  # Max depth
+                        path_str = str(current)
+
+                        # Check for bus indicators in path
+                        if "/usb" in path_str or current.name.startswith("usb"):
+                            return "usb"
+                        elif "/platform" in path_str or current.name.startswith("platform"):
+                            return "platform"
+                        elif "/pci" in path_str or current.name.startswith("pci"):
+                            return "pci"
+
+                        # Move up
+                        parent = current.parent
+                        if parent == current:
+                            break
+                        current = parent
+
+            # Method 3: Fallback sysfs tree walk
+            return self._detect_bus_from_sysfs_tree(device_path)
+
+        except Exception as e:
+            logger.debug("Error determining bus for %s: %s", device_path, e)
             return None
 
     def _detect_bus_from_sysfs_tree(self, device_path: str) -> Optional[str]:
-        """Alternative bus detection by walking sysfs tree."""
+        """
+        Alternative bus detection by walking sysfs tree from multiple entry points.
+        """
         try:
-            # Extract device name (e.g., "video0")
             dev_name = Path(device_path).name
-            
-            # Try multiple sysfs paths
+
+            # Try multiple sysfs entry points
             possible_paths = [
                 f"/sys/class/video4linux/{dev_name}",
                 f"/sys/devices/virtual/video4linux/{dev_name}",
             ]
-            
+
             for sysfs_path in possible_paths:
                 path_obj = Path(sysfs_path)
-                if path_obj.exists():
-                    # Walk up looking for bus info
-                    current = path_obj
-                    for _ in range(15):
-                        path_str = str(current)
-                        if "/usb" in path_str:
-                            return "usb"
-                        elif "/platform" in path_str:
-                            return "platform"  
-                        elif "/pci" in path_str:
-                            return "pci"
-                        
-                        if str(current.parent) == str(current):
-                            break
-                        current = current.parent
-            
+                if not path_obj.exists():
+                    continue
+
+                # Walk up from this entry point
+                current = path_obj
+                for _ in range(20):  # Allow deeper traversal
+                    path_str = str(current)
+
+                    # Check for bus indicators
+                    if "/usb" in path_str or "usb" in current.name.lower():
+                        return "usb"
+                    elif "/platform" in path_str or "platform" in current.name.lower():
+                        return "platform"
+                    elif "/pci" in path_str or "pci" in current.name.lower():
+                        return "pci"
+
+                    # Also check for specific bus directory names
+                    if current.name in ("usb1", "usb2", "usb3", "usb4"):
+                        return "usb"
+
+                    # Move up
+                    parent = current.parent
+                    if parent == current or str(parent) == "/":
+                        break
+                    current = parent
+
             return None
-        except Exception:
+        except Exception as e:
+            logger.debug("Sysfs tree walk failed for %s: %s", device_path, e)
             return None
 
     def _get_physical_device_id(self, device_path: str) -> Optional[str]:
@@ -914,81 +920,243 @@ class CameraDetector:
 
     def detect_all_valid_cameras(self) -> List[CameraInfo]:
         """
-        Detect all valid USB V4L2 camera devices using stable by-id paths.
-        Returns a list of CameraInfo entries (one per physical device node).
+        Detect all valid USB V4L2 camera devices using robust enumeration.
+
+        Strategy:
+        1. Enumerate /dev/v4l/by-id/* USB camera symlinks
+        2. Filter to capture nodes only (not metadata nodes)
+        3. Validate USB bus connection
+        4. Probe V4L2 capabilities and formats
+        5. Test device accessibility with ffmpeg
+        6. Return stable CameraInfo entries
+
+        Returns:
+            List of CameraInfo for valid USB cameras
         """
         devices = []
-        # Prefer /dev/v4l/by-id symlinks for stable device identity
-        by_id_dir = Path('/dev/v4l/by-id')
         cand_paths: List[str] = []
 
-        if by_id_dir.exists():
-            for p in sorted(by_id_dir.iterdir()):
-                # Only consider USB entries (symlinks to /dev/video*)
-                try:
-                    target = p.resolve()
-                    if target.exists() and str(target).startswith('/dev/video'):
-                        cand_paths.append(str(p))
-                except Exception:
-                    continue
-
-        # Fallback to by-path if by-id empty
-        if not cand_paths:
-            by_path_dir = Path('/dev/v4l/by-path')
-            if by_path_dir.exists():
-                for p in sorted(by_path_dir.iterdir()):
+        # Method 1: /dev/v4l/by-id (preferred - stable USB serials)
+        try:
+            by_id_dir = Path('/dev/v4l/by-id')
+            if by_id_dir.exists():
+                logger.debug("Enumerating USB cameras from /dev/v4l/by-id")
+                for p in sorted(by_id_dir.iterdir()):
                     try:
+                        if not p.is_symlink():
+                            continue
+
+                        name = p.name
+                        # Only consider USB video devices
+                        if not (name.startswith('usb-') and 'video-index' in name):
+                            continue
+
+                        # Resolve symlink
                         target = p.resolve()
                         if target.exists() and str(target).startswith('/dev/video'):
-                            cand_paths.append(str(p))
-                    except Exception:
+                            # Filter out metadata nodes
+                            if not self._is_metadata_node(str(target)):
+                                cand_paths.append(str(p))
+                                logger.debug("Found USB camera symlink: %s -> %s", name, target)
+                    except Exception as e:
+                        logger.debug("Error processing by-id entry %s: %s", p.name, e)
                         continue
+        except Exception as e:
+            logger.debug("Failed to enumerate /dev/v4l/by-id: %s", e)
 
-        # Final fallback: glob /dev/video* (least preferred)
+        # Method 2: Fallback to by-path
         if not cand_paths:
-            cand_paths = sorted(self._list_v4l2_devices())
+            try:
+                by_path_dir = Path('/dev/v4l/by-path')
+                if by_path_dir.exists():
+                    logger.debug("Falling back to /dev/v4l/by-path")
+                    for p in sorted(by_path_dir.iterdir()):
+                        try:
+                            if not p.is_symlink():
+                                continue
 
-        logger.info("Probing %d candidate by-id/by-path devices", len(cand_paths))
+                            name = p.name
+                            if not ('usb-' in name and 'video-index' in name):
+                                continue
+
+                            target = p.resolve()
+                            if target.exists() and str(target).startswith('/dev/video'):
+                                if not self._is_metadata_node(str(target)):
+                                    cand_paths.append(str(p))
+                                    logger.debug("Found USB camera via by-path: %s -> %s", name, target)
+                        except Exception as e:
+                            logger.debug("Error processing by-path entry %s: %s", p.name, e)
+                            continue
+            except Exception as e:
+                logger.debug("Failed to enumerate /dev/v4l/by-path: %s", e)
+
+        # Method 3: Final fallback to direct enumeration
+        if not cand_paths:
+            logger.debug("Final fallback to direct /dev/video* enumeration")
+            try:
+                for device_path in sorted(glob('/dev/video*')):
+                    try:
+                        # Filter out metadata nodes
+                        if self._is_metadata_node(device_path):
+                            continue
+
+                        # Validate USB bus
+                        bus = self._get_device_bus(device_path)
+                        if bus == 'usb':
+                            cand_paths.append(device_path)
+                            logger.debug("Found USB device via direct scan: %s", device_path)
+                    except Exception as e:
+                        logger.debug("Error checking device %s: %s", device_path, e)
+                        continue
+            except Exception as e:
+                logger.debug("Failed direct video enumeration: %s", e)
+
+        logger.info("Probing %d candidate USB camera devices", len(cand_paths))
 
         for idx, path in enumerate(cand_paths):
-            # Resolve symlink to actual /dev/videoX
             try:
-                resolved = str(Path(path).resolve())
-            except Exception:
-                resolved = path
+                # Resolve symlink to actual device if it's a symlink
+                if Path(path).is_symlink():
+                    resolved = str(Path(path).resolve())
+                else:
+                    resolved = path
 
-            name = self._get_device_name(resolved)
+                name = self._get_device_name(resolved)
 
-            # Confirm USB bus via sysfs
-            bus = self._get_device_bus(resolved)
-            if bus != 'usb':
-                logger.info('Skipping non-USB device: %s (%s) bus=%s', path, name, bus)
+                # Confirm USB bus connection (multiple validation methods)
+                is_usb = self._confirm_usb_device(resolved)
+                if not is_usb:
+                    logger.info('Skipping non-USB device: %s (%s)', path, name)
+                    continue
+
+                # Probe V4L2 formats and capabilities
+                formats = self._probe_formats(resolved)
+
+                # Test device accessibility with ffmpeg (critical validation)
+                can_open, ffmpeg_reason, _rank = self._ffmpeg_can_open(resolved, formats)
+                logger.info('Device %s (%s) probe: can_open=%s reason=%s', path, name, can_open, ffmpeg_reason)
+
+                if not can_open:
+                    logger.info('Skipping invalid device: %s (%s): %s', path, name, ffmpeg_reason)
+                    continue
+
+                # Get supported resolutions
+                resolutions = self._probe_resolutions(resolved)
+
+                # Create CameraInfo with stable path (use symlink path for by-id/by-path)
+                ci = CameraInfo(
+                    device_path=path,  # Use symlink path for stability
+                    camera_type='usb',
+                    index=idx,
+                    formats=formats,
+                    name=name,
+                    resolutions=resolutions,
+                    reason=ffmpeg_reason,
+                    backend='v4l2',
+                )
+                devices.append(ci)
+                logger.info('Added valid USB camera: %s (%s) formats=%s', path, name, formats)
+
+            except Exception as e:
+                logger.exception('Error processing candidate device %s: %s', path, e)
                 continue
 
-            # Probe formats and ffmpeg open
-            formats = self._probe_formats(resolved)
-            can_open, ffmpeg_reason, _rank = self._ffmpeg_can_open(resolved, formats)
-            logger.info('Device %s (%s) probe: can_open=%s reason=%s', path, name, can_open, ffmpeg_reason)
-            if not can_open:
-                logger.info('Skipping invalid device: %s (%s): %s', path, name, ffmpeg_reason)
-                continue
-
-            resolutions = self._probe_resolutions(resolved)
-
-            ci = CameraInfo(
-                device_path=path,
-                camera_type='usb',
-                index=idx,
-                formats=formats,
-                name=name,
-                resolutions=resolutions,
-                reason=ffmpeg_reason,
-                backend='v4l2',
-            )
-            devices.append(ci)
-
-        logger.info('detect_all_valid_cameras found %d devices', len(devices))
+        logger.info('detect_all_valid_cameras found %d valid USB camera devices', len(devices))
         return devices
+
+    def _confirm_usb_device(self, device_path: str) -> bool:
+        """
+        Confirm device is USB-connected using multiple validation methods.
+
+        Args:
+            device_path: Device path to check (may be symlink)
+
+        Returns:
+            True if confirmed USB device
+        """
+        try:
+            # If this is a symlink, resolve it for property checking
+            actual_device = device_path
+            if os.path.islink(device_path):
+                try:
+                    actual_device = os.path.realpath(device_path)
+                except:
+                    pass
+
+            # Method 1: udev properties on actual device
+            props = self._get_udev_properties(actual_device)
+            if props and props.get('ID_BUS', '').lower() == 'usb':
+                return True
+
+            # Method 2: sysfs USB parent traversal on actual device
+            bus = self._get_device_bus(actual_device)
+            if bus == 'usb':
+                return True
+
+            # Method 3: Check symlink name for USB indicators
+            if 'usb-' in os.path.basename(device_path):
+                # Additional validation via udev on symlink
+                symlink_props = self._get_udev_properties(device_path)
+                if symlink_props and symlink_props.get('ID_BUS', '').lower() == 'usb':
+                    return True
+                # Fallback: assume USB if symlink name indicates it
+                return True
+
+        except Exception as e:
+            logger.debug('Error confirming USB status for %s: %s', device_path, e)
+
+        return False
+
+    def _get_v4l2_capabilities(self, device_path: str) -> str:
+        """Get V4L2 device capabilities string."""
+        try:
+            result = subprocess.run(
+                ['v4l2-ctl', '--device', device_path, '--info'],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                return result.stdout.lower()
+        except Exception:
+            pass
+        return ""
+
+    def _is_metadata_node(self, device_path: str) -> bool:
+        """
+        Check if device path represents a metadata-only node.
+
+        USB cameras expose multiple nodes:
+        - video-index0: Capture node
+        - video-index1: Metadata node (skip)
+        """
+        try:
+            # Check udev capabilities
+            props = self._get_udev_properties(device_path)
+            if props:
+                caps = props.get('ID_V4L_CAPABILITIES', '')
+                if ':metadata:' in caps and ':capture:' not in caps:
+                    return True
+
+            # Check device name pattern for metadata indicators
+            device_name = Path(device_path).name
+            if 'metadata' in device_name.lower():
+                return True
+
+            # Heuristic: odd-numbered video devices are often metadata
+            match = re.search(r'video(\d+)$', device_name)
+            if match:
+                index = int(match.group(1))
+                if index > 0 and index % 2 == 1:
+                    # Verify paired even device exists
+                    even_device = f'/dev/video{index - 1}'
+                    if os.path.exists(even_device):
+                        return True
+
+        except Exception as e:
+            logger.debug('Error checking metadata status for %s: %s', device_path, e)
+
+        return False
 
     def get_internal_camera(self) -> Optional[CameraInfo]:
         for cam in self.detect_cameras():
