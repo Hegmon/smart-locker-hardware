@@ -210,23 +210,39 @@ class StreamWorker:
         Returns:
             List of command arguments
         """
-        cmd = [
+        # Common input options with low-latency flags
+        base_cmd = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel", "warning",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-probesize", "32",
+            "-analyzeduration", "0",
             "-f", "v4l2",
             "-framerate", "25",
             "-video_size", self.config.resolution,
         ]
-        
-        # Add input format if not auto
-        if self.config.format != "auto":
-            cmd.extend(["-input_format", self.config.format])
-        
-        cmd.extend(["-i", self.config.device])
-        
-        # Encoding options
-        cmd.extend([
+
+        # Add input format if specified
+        if self.config.format and self.config.format != "auto":
+            base_cmd.extend(["-input_format", self.config.format])
+
+        base_cmd.extend(["-i", self.config.device])
+
+        # If the camera provides H.264 natively, avoid re-encoding to reduce CPU and latency
+        if self.config.format == "h264":
+            cmd = base_cmd + [
+                # passthrough H.264 stream
+                "-c:v", "copy",
+                "-f", "rtsp",
+                "-rtsp_transport", "tcp",
+                f"rtsp://{self.mediamtx_host}:{self.mediamtx_port}/{self.device_id}/{self.config.camera_type}",
+            ]
+            return cmd
+
+        # Otherwise, re-encode with low-latency settings
+        cmd = base_cmd + [
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-tune", "zerolatency",
@@ -236,15 +252,10 @@ class StreamWorker:
             "-b:v", "1000k",
             "-maxrate", "1500k",
             "-bufsize", "2000k",
-        ])
-        
-        # RTSP output
-        stream_name = f"{self.device_id}/{self.config.camera_type}"
-        cmd.extend([
             "-f", "rtsp",
             "-rtsp_transport", "tcp",
-            f"rtsp://{self.mediamtx_host}:{self.mediamtx_port}/{stream_name}",
-        ])
+            f"rtsp://{self.mediamtx_host}:{self.mediamtx_port}/{self.device_id}/{self.config.camera_type}",
+        ]
         
         return cmd
     
