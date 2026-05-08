@@ -976,13 +976,24 @@ class CameraDetector:
                         if not (name.startswith('usb-') and 'video-index' in name):
                             continue
 
-                        # Resolve symlink
-                        target = p.resolve()
-                        if target.exists() and str(target).startswith('/dev/video'):
-                            # Filter out metadata nodes
-                            if not self._is_metadata_node(str(target)):
-                                cand_paths.append(str(p))
-                                logger.debug("Found USB camera symlink: %s -> %s", name, target)
+                        # Resolve symlink and validate target exists
+                        try:
+                            target = p.resolve()
+                            if target.exists() and str(target).startswith('/dev/video'):
+                                # Double-check the target device actually exists and is accessible
+                                if os.path.exists(str(target)):
+                                    # Filter out metadata nodes
+                                    if not self._is_metadata_node(str(target)):
+                                        cand_paths.append(str(p))
+                                        logger.debug("Found valid USB camera symlink: %s -> %s", name, target)
+                                    else:
+                                        logger.debug("Skipping metadata node symlink: %s -> %s", name, target)
+                                else:
+                                    logger.debug("Skipping symlink with non-existent target: %s -> %s", name, target)
+                            else:
+                                logger.debug("Skipping symlink with invalid target: %s -> %s", name, target)
+                        except (OSError, RuntimeError) as e:
+                            logger.debug("Error resolving symlink %s: %s", p.name, e)
                     except Exception as e:
                         logger.debug("Error processing by-id entry %s: %s", p.name, e)
                         continue
@@ -1006,11 +1017,22 @@ class CameraDetector:
                             if not is_usb_path:
                                 continue
 
-                            target = p.resolve()
-                            if target.exists() and str(target).startswith('/dev/video'):
-                                if not self._is_metadata_node(str(target)):
-                                    cand_paths.append(str(p))
-                                    logger.debug("Found USB camera via by-path: %s -> %s", name, target)
+                            try:
+                                target = p.resolve()
+                                if target.exists() and str(target).startswith('/dev/video'):
+                                    # Double-check the target device actually exists and is accessible
+                                    if os.path.exists(str(target)):
+                                        if not self._is_metadata_node(str(target)):
+                                            cand_paths.append(str(p))
+                                            logger.debug("Found valid USB camera via by-path: %s -> %s", name, target)
+                                        else:
+                                            logger.debug("Skipping metadata node via by-path: %s -> %s", name, target)
+                                    else:
+                                        logger.debug("Skipping by-path symlink with non-existent target: %s -> %s", name, target)
+                                else:
+                                    logger.debug("Skipping by-path symlink with invalid target: %s -> %s", name, target)
+                            except (OSError, RuntimeError) as e:
+                                logger.debug("Error resolving by-path symlink %s: %s", p.name, e)
                         except Exception as e:
                             logger.debug("Error processing by-path entry %s: %s", p.name, e)
                             continue
