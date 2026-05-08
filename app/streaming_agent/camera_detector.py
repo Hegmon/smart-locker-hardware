@@ -118,6 +118,37 @@ class CameraDetector:
             pass
         return ""
 
+    def _get_udev_properties(self, device: str) -> Dict[str, str]:
+        """
+        Query udevadm for properties for a device.
+
+        Returns a dict of KEY->VALUE. If udevadm is not present or fails,
+        returns empty dict.
+        """
+        try:
+            res = subprocess.run(
+                ["udevadm", "info", "--query=property", "--name", device],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if res.returncode != 0:
+                return {}
+
+            props: Dict[str, str] = {}
+            for line in (res.stdout or "").splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    props[k.strip()] = v.strip()
+            return props
+        except FileNotFoundError:
+            # udevadm not installed
+            return {}
+        except subprocess.TimeoutExpired:
+            return {}
+        except Exception:
+            return {}
+
     def _get_device_bus(self, device_path: str) -> Optional[str]:
         """
         Determine the bus type of a video device using multiple methods.
@@ -976,7 +1007,9 @@ class CameraDetector:
                                 continue
 
                             name = p.name
-                            if not ('usb-' in name and 'video-index' in name):
+                            # Look for USB-related paths (usb- prefix or pci-usb paths)
+                            is_usb_path = ('usb-' in name and 'video-index' in name) or ('pci-' in name and 'usb' in name and 'video-index' in name)
+                            if not is_usb_path:
                                 continue
 
                             target = p.resolve()
@@ -1094,7 +1127,8 @@ class CameraDetector:
                 return True
 
             # Method 3: Check symlink name for USB indicators
-            if 'usb-' in os.path.basename(device_path):
+            basename = os.path.basename(device_path)
+            if 'usb-' in basename or ('pci-' in basename and 'usb' in basename):
                 # Additional validation via udev on symlink
                 symlink_props = self._get_udev_properties(device_path)
                 if symlink_props and symlink_props.get('ID_BUS', '').lower() == 'usb':
