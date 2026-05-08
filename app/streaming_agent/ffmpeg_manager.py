@@ -961,12 +961,7 @@ class FFmpegStreamEngine:
                     "restart_count": stream.restart_count,
                     "consecutive_failures": stream.consecutive_failures,
                     "last_error": stream.last_error,
-                    "pid": (
-                        stream.reader_process.pid if stream.reader_process else
-                        stream.encoder_process.pid if stream.encoder_process else None
-                    ),
-                    "reader_pid": stream.reader_process.pid if stream.reader_process else None,
-                    "encoder_pid": stream.encoder_process.pid if stream.encoder_process else None,
+                    "pid": stream.process.pid if stream.process else None,
                     "is_running": (
                         stream.process is not None and stream.process.poll() is None
                     ),
