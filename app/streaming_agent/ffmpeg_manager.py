@@ -156,10 +156,8 @@ class FormatScanner:
                     "-i", device_path,
                 ],
                 capture_output=True,
-                    "-fflags", "nobuffer",
-                    "-flags", "low_delay",
-                    "-analyzeduration", "0",
-                    "-probesize", "32",
+                text=True,
+                timeout=10,
             )
             
             # Parse output for format codes
@@ -461,8 +459,26 @@ class FFmpegStreamEngine:
                 # Reset failure count on manual start
                 stream.consecutive_failures = 0
                 stream.restart_count = 0
-            
-            return self._start_ffmpeg_process(stream)
+            # Acquire device lock before starting
+            from .device_lock import manager as device_lock_manager
+            owner = f"stream:{camera_type}"
+            # Try non-blocking acquire first to avoid blocking other streams
+            locked = device_lock_manager.acquire(stream.device_path, owner, blocking=False)
+            if not locked:
+                logger.warning("Device %s is locked, marking %s as BUSY", stream.device_path, camera_type)
+                stream.state = "BUSY"
+                stream.last_error = "Device locked"
+                return False
+
+            try:
+                ok = self._start_ffmpeg_process(stream)
+                if not ok:
+                    # release lock on failure to start
+                    device_lock_manager.release(stream.device_path, owner)
+                return ok
+            except Exception:
+                device_lock_manager.release(stream.device_path, owner)
+                raise
     
     def start_all_streams(self) -> None:
         """Start all registered streams independently."""
@@ -794,6 +810,16 @@ class FFmpegStreamEngine:
 
             cmd.extend(["-i", device_path])
 
+            # Prefer explicit input_format for UVC devices when known
+            if input_format:
+                # Insert input_format immediately before -i
+                # find index of '-i'
+                try:
+                    i_idx = cmd.index("-i")
+                    cmd[i_idx:i_idx] = ["-input_format", input_format]
+                except ValueError:
+                    cmd.extend(["-input_format", input_format])
+
             # Low-latency tuning: reduce probe/analyze overhead and enable low-delay options
             # (already added above, ensure additional options before encoding)
 
@@ -928,7 +954,14 @@ class FFmpegStreamEngine:
             
             if self.on_stream_status_change:
                 self.on_stream_status_change(camera_type, "stopped", "")
-            
+            # Release device lock if held
+            try:
+                from .device_lock import manager as device_lock_manager
+                owner = f"stream:{camera_type}"
+                device_lock_manager.release(stream.device_path, owner)
+            except Exception:
+                logger.debug("Failed to release lock for %s", camera_type)
+
             return True
     
     def stop_all_streams(self) -> None:
@@ -1044,6 +1077,12 @@ class FFmpegStreamEngine:
 
                 stream.state = STREAM_STATE_RECOVERING
                 stream.last_error = f"Process died: {stderr[:200]}"
+
+                # Clean up any leftover processes and release locks before restart
+                try:
+                    self._stop_stream_internal(stream.camera_type)
+                except Exception:
+                    logger.debug("_stop_stream_internal failed during restart for %s", stream.camera_type)
 
                 self._restart_stream(stream)
                 return
@@ -1426,24 +1465,27 @@ class ProductionCameraPipeline:
         logger.info("=== Setting up cameras from registry (%d devices) ===", len(camera_devices))
 
         # Determine primary internal candidate: prefer libcamera/platform devices
-        primary_internal = None
-        others: List[object] = []
-        for dev in camera_devices:
-            try:
-                backend = getattr(dev.classification, 'backend', None)
-                bus = getattr(dev.capabilities, 'bus_info', None)
-                if not primary_internal and (backend == 'libcamera' or bus == 'platform' or getattr(dev.classification, 'device_type', '') == 'csi'):
-                    primary_internal = dev
-                else:
-                    others.append(dev)
-            except Exception:
-                # Safety: treat as other
-                others.append(dev)
 
-        # If no primary_internal found, pick first device as internal for compatibility
-        if not primary_internal and camera_devices:
-            primary_internal = camera_devices[0]
-            others = [d for d in camera_devices if d is not primary_internal]
+        # Deterministic assignment based on physical sysfs device path.
+        # For each by-id path, resolve to /dev/videoX and then read the
+        # sysfs device link to obtain a stable physical id (bus/port).
+        def _phys_id(dev_obj):
+            try:
+                dp = Path(getattr(dev_obj, 'device_path'))
+                resolved = dp.resolve()
+                video_name = resolved.name if resolved.exists() else dp.name
+                video_sys = Path('/sys/class/video4linux') / video_name / 'device'
+                if video_sys.exists():
+                    target = (Path('/sys/class/video4linux') / video_name / 'device').resolve()
+                    return str(target)
+            except Exception:
+                pass
+            # Fallback to by-id path string
+            return str(getattr(dev_obj, 'device_path', ''))
+
+        sorted_devs = sorted(camera_devices, key=_phys_id)
+        primary_internal = sorted_devs[0] if sorted_devs else None
+        others: List[object] = sorted_devs[1:] if len(sorted_devs) > 1 else []
 
         # Assign streams
         assigned = []  # tuples of (role_name, device_obj, backend)
