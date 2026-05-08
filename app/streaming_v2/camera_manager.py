@@ -144,33 +144,124 @@ class CameraManager:
     
     def _list_video_devices(self) -> List[str]:
         """
-        List available /dev/video* devices.
-        
+        List available USB V4L2 video devices with robust enumeration.
+
+        Strategy:
+        1. Enumerate /dev/v4l/by-id/* symlinks (preferred - stable USB IDs)
+        2. Filter to USB devices only
+        3. Resolve symlinks to /dev/videoX
+        4. Filter out metadata nodes (index1, index3, etc.)
+        5. Fallback to /dev/video* scanning if by-id fails
+        6. Validate USB parent for fallback devices
+
         Returns:
-            Sorted list of device paths
+            Sorted list of validated USB video device paths
         """
         devices: List[str] = []
 
-        # Prefer stable by-id links when available (they encode USB serials)
+        # Method 1: Use stable by-id symlinks (preferred for USB cameras)
         try:
             by_id_dir = Path("/dev/v4l/by-id")
             if by_id_dir.exists():
+                logger.debug("Enumerating devices from /dev/v4l/by-id")
                 for entry in sorted(by_id_dir.iterdir()):
-                    # Resolve symlink -> /dev/videoX
                     try:
-                        if entry.is_symlink():
-                            resolved = str(entry.resolve())
-                            if resolved and resolved not in devices:
-                                devices.append(resolved)
-                    except Exception:
-                        continue
-        except Exception:
-            pass
+                        if not entry.is_symlink():
+                            continue
 
-        # Add any remaining /dev/video* nodes not represented in by-id
-        for d in glob("/dev/video*"):
-            if d not in devices:
-                devices.append(d)
+                        # Check if this looks like a USB device symlink
+                        name = entry.name
+                        if not (name.startswith("usb-") and "video-index" in name):
+                            continue
+
+                        # Resolve symlink
+                        resolved = entry.resolve()
+                        device_path = str(resolved)
+
+                        # Validate it's a video device
+                        if not device_path.startswith("/dev/video"):
+                            continue
+
+                        # Filter out metadata nodes (index1, index3, etc.)
+                        if self._is_metadata_node(device_path):
+                            logger.debug("Skipping metadata node: %s", device_path)
+                            continue
+
+                        # Quick USB validation
+                        if self._is_usb_device(device_path):
+                            if device_path not in devices:
+                                devices.append(device_path)
+                                logger.debug("Added USB device from by-id: %s -> %s", entry.name, device_path)
+                        else:
+                            logger.debug("Skipping non-USB device from by-id: %s", device_path)
+
+                    except Exception as e:
+                        logger.debug("Error processing by-id entry %s: %s", entry.name, e)
+                        continue
+        except Exception as e:
+            logger.debug("Failed to enumerate /dev/v4l/by-id: %s", e)
+
+        # Method 2: Fallback to by-path symlinks
+        if not devices:
+            try:
+                by_path_dir = Path("/dev/v4l/by-path")
+                if by_path_dir.exists():
+                    logger.debug("Falling back to /dev/v4l/by-path")
+                    for entry in sorted(by_path_dir.iterdir()):
+                        try:
+                            if not entry.is_symlink():
+                                continue
+
+                            name = entry.name
+                            if not ("usb-" in name and "video-index" in name):
+                                continue
+
+                            resolved = entry.resolve()
+                            device_path = str(resolved)
+
+                            if not device_path.startswith("/dev/video"):
+                                continue
+
+                            if self._is_metadata_node(device_path):
+                                continue
+
+                            if self._is_usb_device(device_path):
+                                if device_path not in devices:
+                                    devices.append(device_path)
+                                    logger.debug("Added USB device from by-path: %s -> %s", name, device_path)
+
+                        except Exception as e:
+                            logger.debug("Error processing by-path entry %s: %s", entry.name, e)
+                            continue
+            except Exception as e:
+                logger.debug("Failed to enumerate /dev/v4l/by-path: %s", e)
+
+        # Method 3: Final fallback to direct /dev/video* enumeration
+        if not devices:
+            logger.debug("Falling back to direct /dev/video* enumeration")
+            try:
+                for device_path in glob("/dev/video*"):
+                    try:
+                        # Skip if already found via by-id/by-path
+                        if device_path in devices:
+                            continue
+
+                        # Filter out metadata nodes
+                        if self._is_metadata_node(device_path):
+                            continue
+
+                        # Validate USB connection
+                        if self._is_usb_device(device_path):
+                            devices.append(device_path)
+                            logger.debug("Added USB device from direct scan: %s", device_path)
+                        else:
+                            logger.debug("Skipping non-USB device: %s", device_path)
+
+                    except Exception as e:
+                        logger.debug("Error checking device %s: %s", device_path, e)
+                        continue
+            except Exception as e:
+                logger.debug("Failed direct video device enumeration: %s", e)
 
         # Sort by device number (video0, video1, ...)
         def _num_key(dev: str) -> int:
@@ -181,7 +272,56 @@ class CameraManager:
                 return 999
 
         devices.sort(key=_num_key)
+        logger.debug("Found %d USB video devices: %s", len(devices), devices)
         return devices
+
+    def _is_metadata_node(self, device_path: str) -> bool:
+        """
+        Check if device is a metadata-only node (not a capture node).
+
+        USB cameras often expose multiple /dev/videoX nodes:
+        - video-index0: Primary capture node
+        - video-index1: Metadata/control node (UVC extension units)
+        - video-index2+: Additional capture nodes (rare)
+
+        Args:
+            device_path: Device path
+
+        Returns:
+            True if this is a metadata node that should be skipped
+        """
+        try:
+            # Check device name pattern
+            device_name = Path(device_path).name
+
+            # If device path contains metadata indicators
+            if "metadata" in device_name.lower():
+                return True
+
+            # Check udev properties for metadata indicators
+            props = self._get_udev_properties(device_path)
+            if props:
+                capabilities = props.get("ID_V4L_CAPABILITIES", "")
+                if ":metadata:" in capabilities and ":capture:" not in capabilities:
+                    return True
+
+            # Heuristic: for USB cameras, odd-numbered nodes are often metadata
+            # video0 = capture, video1 = metadata, video2 = capture, video3 = metadata, etc.
+            match = re.search(r"video(\d+)$", device_name)
+            if match:
+                index = int(match.group(1))
+                # Check if this is an odd index (1, 3, 5, ...)
+                if index > 0 and index % 2 == 1:
+                    # Additional validation: check if paired even node exists
+                    even_device = f"/dev/video{index - 1}"
+                    if os.path.exists(even_device):
+                        logger.debug("Likely metadata node: %s (paired with %s)", device_path, even_device)
+                        return True
+
+        except Exception as e:
+            logger.debug("Error checking metadata status for %s: %s", device_path, e)
+
+        return False
     
     def _probe_device(self, device: str) -> Optional[CameraConfig]:
         """
@@ -207,28 +347,10 @@ class CameraManager:
             udev = {}
 
         # Enforce USB-only detection: skip devices that are not on USB bus
-        if udev:
-            id_bus = udev.get("ID_BUS")
-            if id_bus and id_bus.lower() != "usb":
-                logger.info("Skipping non-USB device (udev ID_BUS=%s): %s (%s)", id_bus, device, name)
-                return None
-        else:
-            # Fallback: if no udev info, skip devices that don't appear to be USB via sysfs
-            try:
-                # If device is not under a USB sysfs path, skip (conservative)
-                video_dir = Path(f"/sys/class/video4linux/{Path(device).name}")
-                device_link = video_dir / "device"
-                is_usb = False
-                if device_link.exists() and device_link.is_symlink():
-                    target = (video_dir.parent / os.readlink(device_link)).resolve()
-                    if "/usb" in str(target):
-                        is_usb = True
-                if not is_usb:
-                    logger.info("Skipping non-USB device (sysfs check): %s (%s)", device, name)
-                    return None
-            except Exception:
-                # If sysfs check fails, continue with probing as a fallback
-                pass
+        is_usb_device = self._is_usb_device(device, udev)
+        if not is_usb_device:
+            logger.info("Skipping non-USB device: %s (%s)", device, name)
+            return None
 
         # Skip non-camera devices
         if not self._is_camera_device(name):
@@ -237,7 +359,13 @@ class CameraManager:
         
         # Probe formats (ephemeral - never locks device)
         formats = self._probe_formats(device)
-        
+
+        # Validate device with frame capture test
+        is_valid, validation_reason = self._validate_device_capture(device)
+        if not is_valid:
+            logger.warning("Device validation failed for %s (%s): %s", device, name, validation_reason)
+            return None
+
         if not formats:
             logger.warning("No supported formats detected for %s (%s)", device, name)
             # Still create config with auto-detection fallback
@@ -300,13 +428,228 @@ class CameraManager:
         
         return name, driver_info
     
+    def _is_usb_device(self, device: str, udev_props: Optional[Dict[str, str]] = None) -> bool:
+        """
+        Check if a device is connected via USB bus.
+
+        Uses multiple detection methods:
+        1. udev properties (ID_BUS=usb)
+        2. sysfs USB parent traversal
+        3. V4L2 device capabilities
+
+        Args:
+            device: Device path (e.g., /dev/video0)
+            udev_props: Pre-fetched udev properties (optional)
+
+        Returns:
+            True if device is USB-connected
+        """
+        logger.debug("Checking USB status for device: %s", device)
+
+        # Method 1: Check udev properties
+        if udev_props:
+            id_bus = udev_props.get("ID_BUS", "").lower()
+            if id_bus == "usb":
+                logger.debug("USB device confirmed via udev ID_BUS: %s", device)
+                return True
+            elif id_bus and id_bus != "usb":
+                logger.debug("Non-USB device via udev ID_BUS=%s: %s", id_bus, device)
+                return False
+
+        # Method 2: Get udev properties if not provided
+        if not udev_props:
+            try:
+                udev_props = self._get_udev_properties(device)
+                if udev_props:
+                    id_bus = udev_props.get("ID_BUS", "").lower()
+                    if id_bus == "usb":
+                        logger.debug("USB device confirmed via udev ID_BUS: %s", device)
+                        return True
+                    elif id_bus and id_bus != "usb":
+                        logger.debug("Non-USB device via udev ID_BUS=%s: %s", id_bus, device)
+                        return False
+            except Exception as e:
+                logger.debug("Failed to get udev properties for %s: %s", device, e)
+
+        # Method 3: sysfs USB parent traversal
+        try:
+            usb_parent = self._find_usb_parent(device)
+            if usb_parent:
+                logger.debug("USB device confirmed via sysfs parent: %s -> %s", device, usb_parent)
+                return True
+        except Exception as e:
+            logger.debug("Failed sysfs USB check for %s: %s", device, e)
+
+        # Method 4: Check V4L2 capabilities for USB indicators
+        try:
+            caps = self._get_v4l2_capabilities(device)
+            if ":capture:" in caps and self._has_usb_capabilities(device):
+                logger.debug("USB device confirmed via V4L2 capabilities: %s", device)
+                return True
+        except Exception as e:
+            logger.debug("Failed V4L2 capability check for %s: %s", device, e)
+
+        logger.debug("Unable to confirm USB status for device: %s", device)
+        return False
+
+    def _find_usb_parent(self, device: str) -> Optional[str]:
+        """
+        Traverse sysfs to find USB parent device.
+
+        Args:
+            device: Device path
+
+        Returns:
+            USB parent path if found, None otherwise
+        """
+        try:
+            video_dir = Path(f"/sys/class/video4linux/{Path(device).name}")
+            device_link = video_dir / "device"
+
+            if not device_link.exists() or not device_link.is_symlink():
+                return None
+
+            # Resolve the device symlink
+            target = device_link.resolve()
+
+            # Walk up the device tree looking for USB parent
+            current = target
+            for _ in range(15):  # Max depth to prevent infinite loops
+                if str(current).startswith("/sys/devices/") and "/usb" in str(current):
+                    return str(current)
+
+                # Check if current directory has usb in name
+                if "usb" in current.name.lower():
+                    return str(current)
+
+                # Move up one level
+                parent = current.parent
+                if parent == current:  # Reached root
+                    break
+                current = parent
+
+        except Exception:
+            pass
+
+        return None
+
+    def _get_v4l2_capabilities(self, device: str) -> str:
+        """
+        Get V4L2 device capabilities.
+
+        Args:
+            device: Device path
+
+        Returns:
+            Capabilities string
+        """
+        try:
+            result = subprocess.run(
+                ["v4l2-ctl", "--device", device, "--info"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+
+            if result.returncode == 0:
+                return result.stdout.lower()
+        except Exception:
+            pass
+
+        return ""
+
+    def _has_usb_capabilities(self, device: str) -> bool:
+        """
+        Check if device has USB-specific capabilities.
+
+        Args:
+            device: Device path
+
+        Returns:
+            True if USB capabilities detected
+        """
+        try:
+            # Check if device name suggests USB (from by-id/by-path)
+            device_path = Path(device)
+            if "by-id" in str(device_path) or "by-path" in str(device_path):
+                return True
+
+            # Check udev properties for USB indicators
+            props = self._get_udev_properties(device)
+            if props:
+                usb_indicators = ["ID_USB", "ID_SERIAL", "ID_VENDOR_ID", "ID_MODEL_ID"]
+                if any(key in props for key in usb_indicators):
+                    return True
+
+        except Exception:
+            pass
+
+        return False
+
+    def _validate_device_capture(self, device: str) -> tuple[bool, str]:
+        """
+        Validate device can capture frames using a short test capture.
+
+        Args:
+            device: Device path
+
+        Returns:
+            Tuple of (is_valid, reason)
+        """
+        try:
+            # Use ffmpeg to attempt a very short capture test
+            result = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel", "error",
+                    "-f", "v4l2",
+                    "-framerate", "5",
+                    "-video_size", "320x240",  # Small size for quick test
+                    "-i", device,
+                    "-frames:v", "1",  # Just one frame
+                    "-f", "null",
+                    "-",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,  # Short timeout
+            )
+
+            if result.returncode == 0:
+                return True, "Frame capture successful"
+
+            # Analyze error output
+            error_output = (result.stderr + result.stdout).lower()
+
+            # Common failure reasons
+            if "device or resource busy" in error_output:
+                return False, "Device busy"
+            elif "no such device" in error_output or "no such file" in error_output:
+                return False, "Device not found"
+            elif "permission denied" in error_output:
+                return False, "Permission denied"
+            elif "inappropriate ioctl" in error_output:
+                return False, "Not a capture device"
+            elif "timeout" in error_output:
+                return False, "Device timeout"
+            else:
+                return False, f"Capture failed: {error_output[:100]}"
+
+        except subprocess.TimeoutExpired:
+            return False, "Capture timeout"
+        except FileNotFoundError:
+            return False, "ffmpeg not available"
+        except Exception as e:
+            return False, f"Validation error: {str(e)}"
+
     def _is_camera_device(self, name: str) -> bool:
         """
         Check if device is likely a camera (not a codec/decoder).
-        
+
         Args:
             name: Device name
-        
+
         Returns:
             True if likely a camera
         """
@@ -315,7 +658,7 @@ class CameraManager:
             "codec", "isp", "hevc", "h264", "h265", "encoder",
             "decoder", "component", "render", "display", "mipi"
         ]
-        
+
         return not any(kw in name_lower for kw in non_camera_keywords)
     
     def _probe_formats(self, device: str) -> List[str]:
