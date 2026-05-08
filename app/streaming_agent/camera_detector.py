@@ -119,23 +119,90 @@ class CameraDetector:
         return ""
 
     def _get_device_bus(self, device_path: str) -> Optional[str]:
-        """Check sysfs to determine the bus type of a video device."""
+        """Check sysfs to determine the bus type of a video device.
+        
+        Returns 'usb', 'platform', 'pci', or None if cannot determine.
+        """
         try:
             video_dir = Path(f"/sys/class/video4linux/{Path(device_path).name}")
             if not video_dir.exists():
-                return None
+                # Try alternate path with video4linux link
+                return self._detect_bus_from_sysfs_tree(device_path)
+            
             device_link = video_dir / "device"
-            if not device_link.exists() or not device_link.is_symlink():
+            if not device_link.exists():
+                # Try checking parent devices
+                return self._detect_bus_from_sysfs_tree(device_path)
+            
+            if not device_link.is_symlink():
                 return None
-            target = os.readlink(device_link)
-            if "/usb" in target or "/usb" in str(Path(target).parents):
+                
+            # Resolve the symlink chain and check all parents
+            target_path = os.readlink(device_link)
+            target_abs = (video_dir.parent / target_path).resolve()
+            
+            # Check the path string and all parents for bus indicators
+            path_str = str(target_abs)
+            parent_path = target_abs
+            
+            # Walk up the device tree looking for bus indicators
+            for _ in range(10):  # Max 10 levels up
+                path_str = str(parent_path)
+                if "/usb" in path_str:
+                    return "usb"
+                elif "/platform" in path_str:
+                    return "platform"
+                elif "/pci" in path_str:
+                    return "pci"
+                
+                parent_path = parent_path.parent
+                if str(parent_path) == "/":
+                    break
+            
+            # Fallback: check for USB in the original target path
+            if "/usb" in target_path or "usb" in target_path.lower():
                 return "usb"
-            elif "/platform" in target:
+            elif "/platform" in target_path:
                 return "platform"
-            elif "/pci" in target:
+            elif "/pci" in target_path:
                 return "pci"
+                
             return None
         except (OSError, ValueError):
+            return None
+
+    def _detect_bus_from_sysfs_tree(self, device_path: str) -> Optional[str]:
+        """Alternative bus detection by walking sysfs tree."""
+        try:
+            # Extract device name (e.g., "video0")
+            dev_name = Path(device_path).name
+            
+            # Try multiple sysfs paths
+            possible_paths = [
+                f"/sys/class/video4linux/{dev_name}",
+                f"/sys/devices/virtual/video4linux/{dev_name}",
+            ]
+            
+            for sysfs_path in possible_paths:
+                path_obj = Path(sysfs_path)
+                if path_obj.exists():
+                    # Walk up looking for bus info
+                    current = path_obj
+                    for _ in range(15):
+                        path_str = str(current)
+                        if "/usb" in path_str:
+                            return "usb"
+                        elif "/platform" in path_str:
+                            return "platform"  
+                        elif "/pci" in path_str:
+                            return "pci"
+                        
+                        if str(current.parent) == str(current):
+                            break
+                        current = current.parent
+            
+            return None
+        except Exception:
             return None
 
     def _get_physical_device_id(self, device_path: str) -> Optional[str]:
@@ -379,7 +446,15 @@ class CameraDetector:
     def _is_camera_device(self, device_path: str, name: str) -> bool:
         """Check if device is likely a camera (not codec/ISP/misc).
         
-        Also checks for platform-level non-capture devices.
+        Filters out:
+        - Codec/ISP/encoder/decoder devices
+        - Metadata/control nodes (secondary video nodes)
+        - Known non-capture devices
+        
+        Strategy:
+        1. Check name for known non-camera keywords
+        2. Check device path for known non-camera subsystems  
+        3. Prefer primary capture nodes (even indices for multi-node cameras)
         """
         name_lower = name.lower()
         
@@ -395,11 +470,11 @@ class CameraDetector:
             "component",
             "render",
             "display",
-            "metadata",
+            "metadata", 
+            "control",
             "streamer",
             "raw",
             "stat",
-            "control",
         ]
         
         if any(kw in name_lower for kw in non_camera_keywords):
@@ -416,6 +491,23 @@ class CameraDetector:
         for bad in known_bad_paths:
             if bad in device_path.lower():
                 return False
+        
+        # USB cameras come in pairs: /dev/videoX (capture) and /dev/videoX+1 (metadata)
+        # Heuristic: Filter out odd-numbered nodes from USB cameras since they're metadata
+        try:
+            dev_num = int(device_path.replace("/dev/video", ""))
+            # Check if this is likely a metadata node (odd number after first capture node)
+            # For most USB cameras: /dev/video0 is capture, /dev/video1 is metadata
+            #                       /dev/video2 is capture, /dev/video3 is metadata, etc.
+            if dev_num > 0 and dev_num % 2 == 1:
+                # This is an odd-numbered node, likely metadata for the previous device
+                # But only filter if it's for a USB camera (check bus type)
+                bus = self._get_device_bus(device_path)
+                if bus == "usb":
+                    logger.debug("Filtering out likely metadata node: %s (%s)", device_path, name)
+                    return False
+        except (ValueError, AttributeError):
+            pass
                 
         return True
 
@@ -774,6 +866,52 @@ class CameraDetector:
             logger.warning("No valid camera devices found")
             return []
 
+        # Log summary
+        logger.info("Found %d physical camera(s)", len(candidates))
+        for phys_id, dev in candidates.items():
+            logger.info(
+                "Camera candidate: %s (%s), backend=%s, formats=%s, resolutions=%s, ffmpeg=%s",
+                dev,
+                candidate_names[phys_id],
+                candidate_backends.get(phys_id, "unknown"),
+                candidate_formats[phys_id],
+                candidate_resolutions.get(phys_id, []),
+                candidate_ffmpeg_results.get(phys_id, ""),
+            )
+
+        # Step 2: Resolve roles using bus + name heuristics
+        roles = self._resolve_roles(candidates, candidate_names, candidate_formats)
+
+        # Step 3: Build CameraInfo for each role
+        result = []
+        if roles.get("internal"):
+            phys_id = roles["internal"]
+            result.append(CameraInfo(
+                device_path=candidates[phys_id],
+                camera_type="internal",
+                index=0,
+                formats=candidate_formats[phys_id],
+                name=candidate_names[phys_id],
+                resolutions=candidate_resolutions.get(phys_id, []),
+                reason=candidate_reasons.get(phys_id, ""),
+                backend=candidate_backends.get(phys_id, "v4l2"),
+            ))
+        if roles.get("external"):
+            phys_id = roles["external"]
+            result.append(CameraInfo(
+                device_path=candidates[phys_id],
+                camera_type="external",
+                index=1,
+                formats=candidate_formats[phys_id],
+                name=candidate_names[phys_id],
+                resolutions=candidate_resolutions.get(phys_id, []),
+                reason=candidate_reasons.get(phys_id, ""),
+                backend=candidate_backends.get(phys_id, "v4l2"),
+            ))
+
+        logger.info("=== Camera Detection Complete: %d role(s) assigned ===", len(result))
+        return result
+
     def detect_all_valid_cameras(self) -> List[CameraInfo]:
         """
         Detect all valid USB V4L2 camera devices using stable by-id paths.
@@ -851,52 +989,6 @@ class CameraDetector:
 
         logger.info('detect_all_valid_cameras found %d devices', len(devices))
         return devices
-
-        # Log summary
-        logger.info("Found %d physical camera(s)", len(candidates))
-        for phys_id, dev in candidates.items():
-            logger.info(
-                "Camera candidate: %s (%s), backend=%s, formats=%s, resolutions=%s, ffmpeg=%s",
-                dev,
-                candidate_names[phys_id],
-                candidate_backends.get(phys_id, "unknown"),
-                candidate_formats[phys_id],
-                candidate_resolutions.get(phys_id, []),
-                candidate_ffmpeg_results.get(phys_id, ""),
-            )
-
-        # Step 2: Resolve roles using bus + name heuristics
-        roles = self._resolve_roles(candidates, candidate_names, candidate_formats)
-
-        # Step 3: Build CameraInfo for each role
-        result = []
-        if roles.get("internal"):
-            phys_id = roles["internal"]
-            result.append(CameraInfo(
-                device_path=candidates[phys_id],
-                camera_type="internal",
-                index=0,
-                formats=candidate_formats[phys_id],
-                name=candidate_names[phys_id],
-                resolutions=candidate_resolutions.get(phys_id, []),
-                reason=candidate_reasons.get(phys_id, ""),
-                backend=candidate_backends.get(phys_id, "v4l2"),
-            ))
-        if roles.get("external"):
-            phys_id = roles["external"]
-            result.append(CameraInfo(
-                device_path=candidates[phys_id],
-                camera_type="external",
-                index=1,
-                formats=candidate_formats[phys_id],
-                name=candidate_names[phys_id],
-                resolutions=candidate_resolutions.get(phys_id, []),
-                reason=candidate_reasons.get(phys_id, ""),
-                backend=candidate_backends.get(phys_id, "v4l2"),
-            ))
-
-        logger.info("=== Camera Detection Complete: %d role(s) assigned ===", len(result))
-        return result
 
     def get_internal_camera(self) -> Optional[CameraInfo]:
         for cam in self.detect_cameras():
