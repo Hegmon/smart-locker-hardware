@@ -94,37 +94,37 @@ class FormatScanner:
         "external": ["1280x720", "1920x1080", "640x480"],
     }
     
-    # Ultra-low-latency USB camera profiles optimized for Pi4
+    # Raspberry Pi 4 optimized profiles for stable dual USB camera streaming
     CAMERA_PROFILES = {
-        # Default profiles for simultaneous dual USB camera streaming
-        "usb_camera_primary": {  # First USB camera (lower bandwidth usage)
+        # Safe defaults for simultaneous dual USB camera streaming on Pi4
+        "usb_camera_primary": {  # First camera (moderate settings)
             "preferred_format": "mjpeg",
             "fallback_formats": ["h264", "yuyv422"],
-            "resolution": "1280x720",  # 720p for stability
-            "framerate": 15,  # Lower FPS for USB bandwidth
-            "bitrate": "1000k",
+            "resolution": "640x480",  # Safe resolution for Pi4 stability
+            "framerate": 10,  # Conservative framerate for USB bandwidth
+            "bitrate": "400k",  # Conservative bitrate
         },
-        "usb_camera_secondary": {  # Second USB camera (minimal bandwidth)
+        "usb_camera_secondary": {  # Second camera (minimal bandwidth)
             "preferred_format": "mjpeg",
             "fallback_formats": ["h264", "yuyv422"],
-            "resolution": "640x480",  # 480p to prevent saturation
-            "framerate": 10,  # Minimal FPS for stability
-            "bitrate": "500k",
+            "resolution": "640x480",  # Same safe resolution
+            "framerate": 8,  # Even more conservative for second camera
+            "bitrate": "300k",  # Lower bitrate to prevent USB saturation
         },
         # Specific camera profiles
         "a4tech_camera": {
             "preferred_format": "mjpeg",
             "fallback_formats": ["yuyv422"],
-            "resolution": "1280x720",
-            "framerate": 15,
-            "bitrate": "1000k",
+            "resolution": "640x480",  # Conservative for stability
+            "framerate": 10,
+            "bitrate": "400k",
         },
         "integrated_webcam": {
             "preferred_format": "mjpeg",
             "fallback_formats": ["yuyv422"],
             "resolution": "640x480",
-            "framerate": 15,
-            "bitrate": "500k",
+            "framerate": 10,
+            "bitrate": "400k",
         },
     }
     
@@ -391,59 +391,24 @@ class FormatScanner:
 
 
 # ============================================================================
-# STREAM PROCESS - Enhanced with health tracking
+# STREAM PROCESS - Simplified single FFmpeg process per camera
 # ============================================================================
-
-@dataclass
-class LatestFrameBuffer:
-    """Latest-frame-only buffer with size=1 for zero-latency streaming"""
-    frame_data: Optional[bytes] = None
-    frame_timestamp: float = 0.0
-    frame_count: int = 0
-    lock: threading.RLock = field(default_factory=threading.RLock)
-
-    def put_frame(self, data: bytes) -> None:
-        """Store latest frame, overwriting any previous frame"""
-        with self.lock:
-            self.frame_data = data
-            self.frame_timestamp = time.time()
-            self.frame_count += 1
-
-    def get_latest_frame(self) -> Optional[tuple[bytes, float, int]]:
-        """Get latest frame data, timestamp, and count"""
-        with self.lock:
-            if self.frame_data is None:
-                return None
-            return (self.frame_data, self.frame_timestamp, self.frame_count)
-
-    def clear(self) -> None:
-        """Clear the buffer"""
-        with self.lock:
-            self.frame_data = None
-            self.frame_timestamp = 0.0
-            self.frame_count = 0
-
 
 @dataclass
 class StreamProcess:
     """
     Ultra-low-latency USB camera streaming process.
 
-    Architecture:
-    FFmpeg Reader → Latest Frame Buffer → Encoder → MQTT Publisher
+    Architecture: USB Camera → ONE FFmpeg Process → Direct RTSP Output
+
+    No intermediate processes, no pipes, no buffering - just direct streaming.
     """
     camera_type: str
     device_path: str
     profile: CameraFormatProfile
 
-    # FFmpeg reader process (captures from camera)
-    reader_process: Optional[subprocess.Popen] = None
-
-    # Encoder process (compresses frames for streaming)
-    encoder_process: Optional[subprocess.Popen] = None
-
-    # Latest frame buffer (size=1, no queue buildup)
-    frame_buffer: LatestFrameBuffer = field(default_factory=LatestFrameBuffer)
+    # Single FFmpeg process per camera (direct RTSP output)
+    process: Optional[subprocess.Popen] = None
 
     # State tracking
     state: str = STREAM_STATE_STARTING
@@ -451,28 +416,18 @@ class StreamProcess:
     selected_resolution: str = "640x480"
     backend: str = "v4l2"
 
-    # Health metrics
+    # Health metrics (lightweight - no log parsing)
     restart_count: int = 0
     consecutive_failures: int = 0
-    last_frame_time: float = 0
     last_start_time: float = 0
-    last_health_check: float = 0
-    total_frames_produced: int = 0
-    fps_current: float = 0.0
+    last_restart_time: float = 0
     last_error: Optional[str] = None
 
     # Command tracking
-    reader_command: list[str] = field(default_factory=list)
-    encoder_command: list[str] = field(default_factory=list)
+    command: list[str] = field(default_factory=list)
 
     # Thread safety
     lock: threading.RLock = field(default_factory=threading.RLock)
-
-    # Reader and encoder threads
-    reader_thread: Optional[threading.Thread] = None
-    encoder_thread: Optional[threading.Thread] = None
-    reader_stop: threading.Event = field(default_factory=threading.Event)
-    encoder_stop: threading.Event = field(default_factory=threading.Event)
 
     def get_format_chain(self) -> List[str]:
         """Get format fallback chain for this stream."""
@@ -497,18 +452,16 @@ class FFmpegStreamEngine:
     - Frame rate monitoring
     """
     
-    # Health check configuration
-    WATCHDOG_INTERVAL = 5  # seconds
-    FPS_CHECK_INTERVAL = 10  # seconds
+    # Health check configuration for ultra-low-latency streaming
+    WATCHDOG_INTERVAL = 5  # seconds between health checks
     MAX_CONSECUTIVE_FAILURES = 3
-    FRAME_COUNT_TIMEOUT = 15  # seconds
-    FRAME_STALL_THRESHOLD = 30  # seconds without frames
-    RECONNECT_GRACE_PERIOD = 5  # seconds after reconnect before checking
+    MIN_RESTART_INTERVAL = 15  # seconds between restarts (prevent storms)
+    PROCESS_TIMEOUT = 60  # seconds - restart if process hangs
+    HEALTH_CHECK_TIMEOUT = 30  # seconds without health check = unhealthy
 
-    # Restart configuration
-    MAX_RESTARTS_PER_FORMAT = 3
-    RESTART_BACKOFF_BASE = 1.0  # seconds
-    RESTART_BACKOFF_MAX = 30.0  # seconds
+    # Restart configuration with exponential backoff
+    RESTART_BACKOFF_BASE = 5.0  # seconds
+    RESTART_BACKOFF_MAX = 60.0  # seconds
     
     def __init__(
         self,
@@ -615,7 +568,7 @@ class FFmpegStreamEngine:
                 return False
 
             try:
-                ok = self._start_stream_pipeline(stream)
+                ok = self._start_stream_process(stream)
                 if not ok:
                     # release lock on failure to start
                     device_lock_manager.release(stream.device_path, owner)
@@ -632,14 +585,14 @@ class FFmpegStreamEngine:
         for camera_type in camera_types:
             self.start_stream(camera_type)
     
-    def _start_stream_pipeline(self, stream: StreamProcess) -> bool:
+    def _start_stream_process(self, stream: StreamProcess) -> bool:
         """
-        Start ultra-low-latency FFmpeg reader + encoder pipeline.
+        Start ultra-low-latency single FFmpeg process for direct RTSP streaming.
 
-        Uses dedicated reader process piping to encoder process for zero buffering.
+        ONE process per camera: Camera → FFmpeg → RTSP (no pipes, no buffering)
         """
         logger.info(
-            "=== Starting ultra-low-latency pipeline: %s (device=%s) ===",
+            "=== Starting ultra-low-latency FFmpeg: %s (device=%s) ===",
             stream.camera_type,
             stream.device_path,
         )
@@ -648,120 +601,83 @@ class FFmpegStreamEngine:
         profile = self._get_camera_profile(stream)
         stream.selected_resolution = profile.get("resolution", "640x480")
 
-        # Determine best input format
+        # Determine best input format (force MJPEG priority for USB bandwidth)
         input_format = self._select_optimal_format(stream)
         stream.selected_format = input_format
 
         logger.info(
-            "Camera profile: format=%s, resolution=%s, framerate=%s",
-            input_format, stream.selected_resolution, profile.get("framerate", 15)
+            "Camera profile: format=%s, resolution=%s, framerate=%s, bitrate=%s",
+            input_format, stream.selected_resolution,
+            profile.get("framerate", 10), profile.get("bitrate", "500k")
         )
 
         try:
-            # Start FFmpeg reader process (captures from camera)
-            reader_cmd = self._build_ffmpeg_reader_command(stream, input_format)
-            logger.debug("Reader command: %s", " ".join(reader_cmd))
+            # Build single FFmpeg command for direct RTSP streaming
+            cmd = self._build_ffmpeg_command(stream, input_format)
+            stream.command = cmd
+            logger.debug("FFmpeg command: %s", " ".join(cmd))
 
-            stream.reader_process = subprocess.Popen(
-                reader_cmd,
-                stdout=subprocess.PIPE,  # Pipe to encoder
-                stderr=subprocess.PIPE,
+            # Start single FFmpeg process
+            stream.process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,  # No stdout needed
+                stderr=subprocess.DEVNULL,  # Suppress stderr to avoid blocking
                 stdin=subprocess.DEVNULL,
                 preexec_fn=os.setsid,
-                bufsize=0,  # Unbuffered for low latency
             )
 
-            # Give reader a moment to start
-            time.sleep(0.5)
+            # Give FFmpeg a moment to start and connect to RTSP
+            time.sleep(1.0)
 
-            # Check if reader started successfully
-            if stream.reader_process.poll() is not None:
-                stderr = stream.reader_process.stderr.read().decode(errors="replace")
-                logger.error("Reader failed to start for %s: %s", stream.camera_type, stderr[:200])
-                stream.reader_process = None
+            # Check if process started successfully
+            if stream.process.poll() is not None:
+                # Process exited immediately - check exit code
+                exit_code = stream.process.returncode
+                logger.error("FFmpeg failed to start for %s (exit code: %d)", stream.camera_type, exit_code)
+                stream.process = None
                 return False
 
-            # Start FFmpeg encoder process (reads from reader pipe)
-            encoder_cmd = self._build_ffmpeg_encoder_command(stream)
-            logger.debug("Encoder command: %s", " ".join(encoder_cmd))
-
-            stream.encoder_process = subprocess.Popen(
-                encoder_cmd,
-                stdin=stream.reader_process.stdout,  # Read from reader pipe
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                preexec_fn=os.setsid,
-                bufsize=0,  # Unbuffered
-            )
-
-            # Give encoder a moment to start
-            time.sleep(0.5)
-
-            # Check if encoder started successfully
-            if stream.encoder_process.poll() is not None:
-                stderr = stream.encoder_process.stderr.read().decode(errors="replace")
-                logger.error("Encoder failed to start for %s: %s", stream.camera_type, stderr[:200])
-                self._cleanup_stream_processes(stream)
-                return False
-
-            # Start reader thread to monitor reader process
-            stream.reader_stop.clear()
-            stream.reader_thread = threading.Thread(
-                target=self._reader_monitor_thread,
-                args=(stream,),
-                daemon=True,
-                name=f"reader-{stream.camera_type}",
-            )
-            stream.reader_thread.start()
-
-            # Start encoder thread to monitor encoder process
-            stream.encoder_stop.clear()
-            stream.encoder_thread = threading.Thread(
-                target=self._encoder_monitor_thread,
-                args=(stream,),
-                daemon=True,
-                name=f"encoder-{stream.camera_type}",
-            )
-            stream.encoder_thread.start()
-
-            # Success!
+            # Success! Process is running
             stream.last_start_time = time.time()
-            stream.last_frame_time = time.time()
             stream.state = STREAM_STATE_RUNNING
             stream.consecutive_failures = 0
 
             logger.info(
-                "✓ Ultra-low-latency pipeline started for %s "
-                "(reader PID: %d, encoder PID: %d, format: %s)",
+                "✓ Ultra-low-latency FFmpeg started for %s (PID: %d, format: %s, resolution: %s)",
                 stream.camera_type,
-                stream.reader_process.pid if stream.reader_process else 0,
-                stream.encoder_process.pid if stream.encoder_process else 0,
-                input_format
+                stream.process.pid,
+                input_format,
+                stream.selected_resolution
             )
 
             return True
 
         except Exception as e:
-            logger.exception("Failed to start pipeline for %s: %s", stream.camera_type, e)
-            self._cleanup_stream_processes(stream)
+            logger.exception("Failed to start FFmpeg for %s: %s", stream.camera_type, e)
+            if stream.process:
+                try:
+                    stream.process.terminate()
+                    stream.process.wait(timeout=2)
+                except:
+                    pass
+                stream.process = None
             return False
 
     def _select_optimal_format(self, stream: StreamProcess) -> str:
-        """Select optimal format prioritizing MJPEG > H264 > YUYV"""
+        """Select optimal format prioritizing MJPEG > H264 > YUYV for USB bandwidth"""
         supported = stream.profile.supported_formats
 
-        # Priority: MJPEG (lowest bandwidth) > H264 > YUYV (fallback)
+        # Priority for Raspberry Pi 4 USB bandwidth: MJPEG > H264 > YUYV
         if "mjpeg" in supported:
             return "mjpeg"
         elif "h264" in supported:
             return "h264"
         elif "yuyv422" in supported:
+            # Only use YUYV as last resort - it saturates USB bus
             return "yuyv422"
         else:
-            # Fallback to MJPEG (most cameras support it)
+            # Fallback to MJPEG (most USB cameras support it)
             return "mjpeg"
-        
-        # All format attempts failed
         stream.state = STREAM_STATE_FAILED
         stream.last_error = last_error or "All format attempts failed"
         
@@ -780,111 +696,56 @@ class FFmpegStreamEngine:
         
         return False
     
-    def _build_ffmpeg_reader_command(self, stream: StreamProcess, input_format: str) -> List[str]:
+    def _build_ffmpeg_command(self, stream: StreamProcess, input_format: str) -> List[str]:
         """
-        Build ultra-low-latency FFmpeg reader command for USB camera.
+        Build ultra-low-latency single FFmpeg command for direct RTSP streaming.
 
-        This reader captures MJPEG/H264 directly from camera with minimal processing.
-        Output is piped to encoder process.
+        ONE process per camera: Camera → FFmpeg → RTSP (no pipes, no buffering)
         """
         device_path = stream.device_path
 
-        # Get camera profile for optimized settings
+        # Get optimized camera profile for Pi4 dual camera streaming
         profile = self._get_camera_profile(stream)
-        framerate = profile.get("framerate", 15)
+        framerate = profile.get("framerate", 10)
+        resolution = stream.selected_resolution
 
+        # Ultra-low-latency FFmpeg command for Raspberry Pi 4
         cmd = [
             "ffmpeg",
             "-hide_banner",
-            "-loglevel", "error",  # Minimize logging for performance
+            "-loglevel", "error",  # Suppress logs to avoid blocking
             "-f", "v4l2",
-            # Ultra-low-latency flags
-            "-fflags", "nobuffer+discardcorrupt",
+            # Critical low-latency flags
+            "-fflags", "nobuffer",
             "-flags", "low_delay",
             "-analyzeduration", "0",
             "-probesize", "32",
             "-fpsprobesize", "0",
-            "-thread_queue_size", "64",
+            "-avioflags", "direct",
             "-flush_packets", "1",
             "-use_wallclock_as_timestamps", "1",
-            "-avioflags", "direct",
+            "-thread_queue_size", "4",  # Minimal queue for Pi4
             "-max_delay", "0",
-            "-rtbufsize", "1M",
-            # Camera settings
+            # Camera input settings
+            "-input_format", input_format,
+            "-video_size", resolution,
             "-framerate", str(framerate),
-            "-video_size", stream.selected_resolution,
             "-threads", "1",  # Single thread for USB stability
-        ]
-
-        # Add input format (MJPEG or H264 preferred)
-        if input_format and input_format != "auto":
-            cmd.extend(["-input_format", input_format])
-
-        cmd.extend(["-i", device_path])
-
-        # Output raw MJPEG/H264 to stdout for encoder
-        if input_format == "mjpeg":
-            cmd.extend([
-                "-c:v", "copy",  # Passthrough MJPEG
-                "-f", "mjpeg",
-                "-q:v", "2",  # Quality setting for MJPEG
-                "-"
-            ])
-        elif input_format == "h264":
-            cmd.extend([
-                "-c:v", "copy",  # Passthrough H264
-                "-f", "h264",
-                "-"
-            ])
-        else:
-            # Fallback for YUYV - encode to MJPEG
-            cmd.extend([
-                "-c:v", "mjpeg",
-                "-q:v", "3",  # Balance quality/speed
-                "-f", "mjpeg",
-                "-"
-            ])
-
-        return cmd
-
-    def _build_ffmpeg_encoder_command(self, stream: StreamProcess) -> List[str]:
-        """
-        Build FFmpeg encoder command for low-latency RTSP streaming.
-
-        Reads from stdin (piped from reader), encodes for RTSP output.
-        """
-        profile = self._get_camera_profile(stream)
-        bitrate = profile.get("bitrate", "1000k")
-
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-f", "mjpeg",  # Input from reader pipe
-            "-i", "-",
-            # Ultra-low-latency encoding
-            "-fflags", "nobuffer+discardcorrupt",
-            "-flags", "low_delay",
-            "-analyzeduration", "0",
-            "-probesize", "32",
-            "-fpsprobesize", "0",
-            "-thread_queue_size", "64",
-            "-flush_packets", "1",
-            "-avioflags", "direct",
-            "-max_delay", "0",
-            # H.264 encoding optimized for low latency
+            "-i", device_path,
+            # H.264 encoding optimized for ultra-low latency
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-tune", "zerolatency",
             "-pix_fmt", "yuv420p",
-            "-g", "10",  # GOP size 10 for low latency
+            "-bf", "0",  # No B-frames for lowest latency
+            "-g", "10",  # GOP size for low latency
             "-keyint_min", "10",
             "-sc_threshold", "0",  # Disable scene change detection
-            "-b:v", bitrate,
-            "-maxrate", bitrate,
-            "-bufsize", "500k",  # Small buffer
+            "-b:v", profile.get("bitrate", "500k"),
+            "-maxrate", profile.get("bitrate", "500k"),
+            "-bufsize", "100k",  # Minimal buffer
             "-threads", "1",
-            # RTSP output
+            # Direct RTSP output
             "-f", "rtsp",
             "-rtsp_transport", "tcp",
         ]
@@ -899,14 +760,14 @@ class FFmpegStreamEngine:
         return cmd
 
     def _get_camera_profile(self, stream: StreamProcess) -> Dict[str, Any]:
-        """Get optimized camera profile based on device and role"""
+        """Get Pi4-optimized camera profile for dual USB streaming"""
         device_path = stream.device_path
 
         # Check for explicit device profile
         if device_path in FormatScanner.CAMERA_PROFILES:
             return FormatScanner.CAMERA_PROFILES[device_path]
 
-        # Check device name patterns
+        # Get device name for pattern matching
         device_name = ""
         try:
             name_file = Path(f"/sys/class/video4linux/{Path(device_path).name}/name")
@@ -915,148 +776,33 @@ class FFmpegStreamEngine:
         except:
             pass
 
-        # Match patterns
+        # Optimized profiles for Raspberry Pi 4 dual USB streaming
         if "a4tech" in device_name:
             return FormatScanner.CAMERA_PROFILES["a4tech_camera"]
-        elif "integrated" in device_name or "webcam" in device_name:
-            return FormatScanner.CAMERA_PROFILES["integrated_webcam"]
         elif stream.camera_type == "internal":
             return FormatScanner.CAMERA_PROFILES["usb_camera_primary"]
-        else:
+        else:  # external
             return FormatScanner.CAMERA_PROFILES["usb_camera_secondary"]
 
-    def _reader_monitor_thread(self, stream: StreamProcess) -> None:
-        """
-        Monitor FFmpeg reader process and handle output/errors.
-
-        The reader process captures MJPEG/H264 from camera and pipes to encoder.
-        """
-        if not stream.reader_process or not stream.reader_process.stderr:
-            return
-
-        try:
-            while not stream.reader_stop.is_set():
-                # Check if reader process is still alive
-                if stream.reader_process.poll() is not None:
-                    break
-
-                # Read stderr for error monitoring (non-blocking)
-                try:
-                    line = stream.reader_process.stderr.readline()
-                    if line:
-                        line_str = line.decode(errors="replace").strip()
-                        if line_str and not line_str.startswith("frame="):
-                            logger.debug("Reader %s: %s", stream.camera_type, line_str)
-                    else:
-                        # No more data, small sleep to prevent busy loop
-                        time.sleep(0.01)
-                except:
-                    break
-
-        except Exception as e:
-            logger.debug("Reader monitor error for %s: %s", stream.camera_type, e)
-
-        # Reader process ended
-        logger.warning("Reader process ended for %s", stream.camera_type)
-
-    def _encoder_monitor_thread(self, stream: StreamProcess) -> None:
-        """
-        Monitor FFmpeg encoder process and track frame output.
-
-        The encoder reads from reader pipe and outputs RTSP stream.
-        """
-        if not stream.encoder_process or not stream.encoder_process.stderr:
-            return
-
-        frame_count = 0
-        last_frame_time = time.time()
-
-        try:
-            while not stream.encoder_stop.is_set():
-                # Check if encoder process is still alive
-                if stream.encoder_process.poll() is not None:
-                    break
-
-                # Read stderr for frame monitoring (non-blocking)
-                try:
-                    line = stream.encoder_process.stderr.readline()
-                    if line:
-                        line_str = line.decode(errors="replace").strip()
-
-                        # Track frame encoding
-                        if "frame=" in line_str and "fps=" in line_str:
-                            try:
-                                # Parse frame and fps from encoder output
-                                parts = line_str.split()
-                                frame_part = next((p for p in parts if p.startswith("frame=")), "")
-                                fps_part = next((p for p in parts if p.startswith("fps=")), "")
-
-                                if frame_part:
-                                    frame_num = int(frame_part.split("=")[1])
-                                    stream.total_frames_produced = frame_num
-                                    stream.last_frame_time = time.time()
-
-                                    # Calculate FPS
-                                    now = time.time()
-                                    if now - last_frame_time >= 1.0:
-                                        frame_diff = frame_num - frame_count
-                                        stream.fps_current = frame_diff / (now - last_frame_time)
-                                        frame_count = frame_num
-                                        last_frame_time = now
-
-                            except Exception as e:
-                                logger.debug("Failed to parse encoder output '%s': %s", line_str, e)
-
-                        elif line_str and "error" in line_str.lower():
-                            logger.warning("Encoder %s error: %s", stream.camera_type, line_str)
-                    else:
-                        # No more data, small sleep to prevent busy loop
-                        time.sleep(0.01)
-                except:
-                    break
-
-        except Exception as e:
-            logger.debug("Encoder monitor error for %s: %s", stream.camera_type, e)
-
-        # Encoder process ended
-        logger.warning("Encoder process ended for %s", stream.camera_type)
-
-    def _cleanup_stream_processes(self, stream: StreamProcess) -> None:
-        """Clean up reader and encoder processes for a stream"""
+    def _cleanup_stream_process(self, stream: StreamProcess) -> None:
+        """Clean up single FFmpeg process for a stream"""
         with stream.lock:
-            # Stop monitor threads
-            if stream.reader_thread and stream.reader_thread.is_alive():
-                stream.reader_stop.set()
-                stream.reader_thread.join(timeout=2)
-
-            if stream.encoder_thread and stream.encoder_thread.is_alive():
-                stream.encoder_stop.set()
-                stream.encoder_thread.join(timeout=2)
-
-            # Terminate processes
-            for proc_attr in ['reader_process', 'encoder_process']:
-                proc = getattr(stream, proc_attr)
-                if proc and proc.poll() is None:
+            if stream.process and stream.process.poll() is None:
+                try:
+                    # Try graceful termination first
+                    stream.process.terminate()
                     try:
-                        # Try graceful termination first
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=3)
-                        except subprocess.TimeoutExpired:
-                            # Force kill if it doesn't terminate
-                            proc.kill()
-                            proc.wait()
-                    except Exception as e:
-                        logger.debug("Error terminating %s process: %s", proc_attr, e)
+                        stream.process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        # Force kill if it doesn't terminate gracefully
+                        logger.warning("Force killing FFmpeg process for %s", stream.camera_type)
+                        stream.process.kill()
+                        stream.process.wait(timeout=2)
+                except Exception as e:
+                    logger.debug("Error terminating FFmpeg process for %s: %s", stream.camera_type, e)
 
-                # Clear process reference
-                setattr(stream, proc_attr, None)
-
-            # Reset threads
-            stream.reader_thread = None
-            stream.encoder_thread = None
-            stream.reader_stop.clear()
-            stream.encoder_stop.clear()
+            # Clear process reference
+            stream.process = None
 
     def _check_stream_health(self, stream: StreamProcess) -> None:
         """
@@ -1163,10 +909,10 @@ class FFmpegStreamEngine:
         stream = self._streams[camera_type]
         
         with stream.lock:
-            logger.info("Stopping ultra-low-latency pipeline for %s", camera_type)
+            logger.info("Stopping FFmpeg process for %s", camera_type)
 
-            # Clean up all processes and threads
-            self._cleanup_stream_processes(stream)
+            # Clean up single process
+            self._cleanup_stream_process(stream)
 
             # Update state
             stream.state = "stopped"
@@ -1215,12 +961,22 @@ class FFmpegStreamEngine:
                     "restart_count": stream.restart_count,
                     "consecutive_failures": stream.consecutive_failures,
                     "last_error": stream.last_error,
-                    "pid": stream.process.pid if stream.process else None,
-                    "producer_pid": stream.producer_process.pid if stream.producer_process else None,
-                    "is_running": (
-                        (stream.reader_process is not None and stream.reader_process.poll() is None) or
-                        (stream.encoder_process is not None and stream.encoder_process.poll() is None)
+                    "pid": (
+                        stream.reader_process.pid if stream.reader_process else
+                        stream.encoder_process.pid if stream.encoder_process else None
                     ),
+                    "reader_pid": stream.reader_process.pid if stream.reader_process else None,
+                    "encoder_pid": stream.encoder_process.pid if stream.encoder_process else None,
+                    "is_running": (
+                        stream.process is not None and stream.process.poll() is None
+                    ),
+                    "start_time": stream.last_start_time,
+                    "pid": stream.process.pid if stream.process else None,
+                    "uptime": (
+                        time.time() - stream.last_start_time
+                        if stream.last_start_time else 0
+                    ),
+                    "restart_count": stream.restart_count,
                     "profile": stream.profile.to_dict(),
                 }
     
@@ -1273,9 +1029,81 @@ class FFmpegStreamEngine:
     
     def _check_stream_health(self, stream: StreamProcess) -> None:
         """
-        Check health of a single ultra-low-latency stream.
+        Check health of a single FFmpeg stream using lightweight process polling.
+
+        No blocking I/O, no log parsing - just check if process is alive.
         """
-        self._check_stream_health_ultra(stream)
+        with stream.lock:
+            # Skip if not running
+            if stream.state not in (STREAM_STATE_RUNNING, STREAM_STATE_DEGRADED):
+                return
+
+            # Check if FFmpeg process is still alive
+            if not stream.process or stream.process.poll() is not None:
+                # Process died or never started
+                exit_code = stream.process.returncode if stream.process else "unknown"
+                logger.warning("FFmpeg process died for %s (exit code: %s)", stream.camera_type, exit_code)
+                stream.state = STREAM_STATE_RECOVERING
+                stream.last_error = f"Process died (exit code: {exit_code})"
+                self._restart_stream(stream)
+                return
+
+            # Process is healthy - update metrics
+            stream.last_health_check = time.time()
+
+            # Light weight uptime check
+            if stream.last_start_time:
+                uptime = time.time() - stream.last_start_time
+                # Log occasional health status (not too frequently)
+                if int(uptime) % 300 == 0:  # Every 5 minutes
+                    logger.info("Stream %s healthy (uptime: %.0fs)", stream.camera_type, uptime)
+
+    def _restart_stream(self, stream: StreamProcess) -> None:
+        """
+        Restart a failed stream with cooldown and backoff to prevent storms.
+        """
+        with stream.lock:
+            now = time.time()
+
+            # Check minimum restart interval to prevent storms
+            if stream.last_restart_time and (now - stream.last_restart_time) < self.MIN_RESTART_INTERVAL:
+                logger.warning("Restart cooldown active for %s, skipping restart", stream.camera_type)
+                return
+
+            # Check consecutive failure limit
+            if stream.consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
+                logger.error("Max restart attempts (%d) exceeded for %s", self.MAX_CONSECUTIVE_FAILURES, stream.camera_type)
+                stream.state = STREAM_STATE_FAILED
+                return
+
+            # Calculate exponential backoff delay
+            backoff_delay = min(
+                self.RESTART_BACKOFF_BASE * (2 ** stream.consecutive_failures),
+                self.RESTART_BACKOFF_MAX
+            )
+
+            logger.info(
+                "Restarting stream %s in %.1fs (failure %d/%d)",
+                stream.camera_type, backoff_delay, stream.consecutive_failures + 1, self.MAX_CONSECUTIVE_FAILURES
+            )
+
+            # Wait for backoff delay
+            time.sleep(backoff_delay)
+
+            # Clean up old process
+            self._cleanup_stream_process(stream)
+
+            # Increment failure count
+            stream.consecutive_failures += 1
+            stream.last_restart_time = now
+
+            # Attempt restart
+            if self._start_stream_process(stream):
+                logger.info("Stream %s restarted successfully", stream.camera_type)
+                # Reset failure count on success
+                stream.consecutive_failures = 0
+            else:
+                logger.error("Stream %s restart failed", stream.camera_type)
     
     def start(self) -> None:
         """Start all camera pipelines."""
@@ -1386,6 +1214,63 @@ class FFmpegStreamEngine:
 # PRODUCTION CAMERA PIPELINE - Ultra-Low-Latency Dual Camera Manager
 # ============================================================================
 
+class VirtualCameraPipeline:
+    """
+    Virtual pipeline that wraps a stream within the ProductionCameraPipeline.
+    Compatible with BasePipeline interface for watchdog monitoring.
+    """
+
+    def __init__(self, production_pipeline, camera_type: str):
+        self.production_pipeline = production_pipeline
+        self.camera_type = camera_type
+        self.config = None  # Not used in new architecture
+
+    def start(self):
+        """Start is handled by the production pipeline"""
+        return True
+
+    def stop(self):
+        """Stop is handled by the production pipeline"""
+        pass
+
+    def get_status(self):
+        """Get status from the appropriate engine in BasePipeline format"""
+        if self.camera_type == "internal":
+            statuses = self.production_pipeline.internal_engine.get_all_status()
+        else:
+            statuses = self.production_pipeline.external_engine.get_all_status()
+
+        # Find the status for this camera type
+        for stream_name, status in statuses.items():
+            if stream_name == self.camera_type:
+                # Convert to BasePipeline format
+                from .pipelines.base_pipeline import PipelineStatus
+                return PipelineStatus(
+                    is_running=status.get("is_running", False),
+                    pid=status.get("pid"),
+                    start_time=status.get("start_time"),
+                    last_frame_time=status.get("last_frame_time"),
+                    error_message=status.get("last_error"),
+                    stats=status
+                )
+
+        # Default status for missing stream
+        from .pipelines.base_pipeline import PipelineStatus
+        return PipelineStatus(
+            is_running=False,
+            pid=None,
+            start_time=None,
+            last_frame_time=None,
+            error_message="Stream not found",
+            stats={}
+        )
+
+    def is_healthy(self):
+        """Check if this camera stream is healthy"""
+        status = self.get_status()
+        return status.is_running and status.error_message is None
+
+
 class ProductionCameraPipeline:
     """
     Production-grade dual USB camera streaming pipeline.
@@ -1393,12 +1278,16 @@ class ProductionCameraPipeline:
     Manages two independent FFmpeg stream engines for ultra-low-latency
     simultaneous streaming of internal and external USB cameras.
 
+    Compatible with existing watchdog and reconnect systems by providing
+    virtual pipeline objects for individual camera monitoring.
+
     Features:
     - Independent camera pipelines (one freeze ≠ both freeze)
     - Latest-frame-only buffers for zero latency
     - Automatic recovery and health monitoring
     - USB bandwidth optimization for dual cameras
     - 24/7 stable operation
+    - Watchdog-compatible virtual pipelines
     """
 
     def __init__(
@@ -1427,6 +1316,9 @@ class ProductionCameraPipeline:
         # Format scanners
         self.internal_scanner = FormatScanner()
         self.external_scanner = FormatScanner()
+
+        # Virtual pipelines for watchdog compatibility
+        self._virtual_pipelines = {}
 
         # State
         self._running = False
@@ -1500,6 +1392,12 @@ class ProductionCameraPipeline:
 
         logger.info("=== Registry setup complete (%d cameras) ===", len(assigned))
 
+        # Create virtual pipelines for watchdog compatibility
+        if len(assigned) >= 1:
+            self._virtual_pipelines["internal"] = VirtualCameraPipeline(self, "internal")
+        if len(assigned) >= 2:
+            self._virtual_pipelines["external"] = VirtualCameraPipeline(self, "external")
+
     def setup_cameras(
         self,
         internal_device: str = None,
@@ -1518,6 +1416,7 @@ class ProductionCameraPipeline:
                 profile = self.internal_scanner.probe_device(internal_device)
                 profile.safe_resolutions = ["1280x720", "640x480"]  # Primary camera
                 self.internal_engine.add_stream("internal", profile)
+                self._virtual_pipelines["internal"] = VirtualCameraPipeline(self, "internal")
                 logger.info("✓ Internal camera: %s", internal_device)
             except Exception as e:
                 logger.exception("Failed to setup internal camera: %s", e)
@@ -1528,11 +1427,16 @@ class ProductionCameraPipeline:
                 profile = self.external_scanner.probe_device(external_device)
                 profile.safe_resolutions = ["640x480", "320x240"]  # Secondary camera
                 self.external_engine.add_stream("external", profile)
+                self._virtual_pipelines["external"] = VirtualCameraPipeline(self, "external")
                 logger.info("✓ External camera: %s", external_device)
             except Exception as e:
                 logger.exception("Failed to setup external camera: %s", e)
 
         logger.info("=== Manual setup complete ===")
+
+    def get_virtual_pipeline(self, camera_type: str):
+        """Get virtual pipeline for watchdog monitoring"""
+        return self._virtual_pipelines.get(camera_type)
 
     def start(self) -> None:
         """Start both camera pipelines."""
@@ -1543,12 +1447,12 @@ class ProductionCameraPipeline:
         # Start internal camera (critical)
         logger.info("Starting internal camera pipeline...")
         self.internal_engine.start_all_streams()
-        self.internal_engine.start_watchdog()
+        # Don't start individual engine watchdogs - main app handles monitoring
 
         # Start external camera (can fail independently)
         logger.info("Starting external camera pipeline...")
         self.external_engine.start_all_streams()
-        self.external_engine.start_watchdog()
+        # Don't start individual engine watchdogs - main app handles monitoring
 
         logger.info("=== Dual camera pipeline started ===")
 
