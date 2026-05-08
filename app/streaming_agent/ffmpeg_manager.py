@@ -102,14 +102,14 @@ class FormatScanner:
         # Generic USB camera profiles - match by device name patterns
         "usb_camera": {
             "preferred_format": "mjpeg",
-            "fallback_formats": ["yuyv422", "auto"],
+            "fallback_formats": ["yuyv422"],  # No "auto" - force explicit formats
             "resolution": "1280x720",
             "framerate": 25,
         },
         "a4tech_camera": {
             "preferred_format": "mjpeg",
-            "fallback_formats": ["yuyv422", "auto"],
-            "resolution": "1920x1080",
+            "fallback_formats": ["yuyv422"],
+            "resolution": "1280x720",  # Lower resolution for compatibility
             "framerate": 25,
         },
     }
@@ -134,7 +134,15 @@ class FormatScanner:
         
         # Determine supported formats from priority list
         supported = cls._filter_supported_formats(formats)
-        
+
+        # If no formats detected, check if this is a USB camera and provide defaults
+        if not supported:
+            if cls._is_usb_camera(device_path):
+                logger.info("No formats detected for USB camera %s, using defaults", device_path)
+                supported = ["mjpeg", "yuyv422"]
+            else:
+                supported = ["yuyv422"]  # Fallback for non-USB cameras
+
         # Select preferred format (highest priority available)
         preferred = cls._select_preferred_format(supported)
         
@@ -268,7 +276,36 @@ class FormatScanner:
         except Exception:
             pass
         return "unknown"
-    
+
+    @classmethod
+    def _is_usb_camera(cls, device_path: str) -> bool:
+        """Check if device path indicates a USB camera."""
+        try:
+            # Check device path for USB indicators
+            if "usb-" in device_path or "by-id" in device_path:
+                return True
+
+            # Check device name from sysfs
+            device_name = cls._get_device_name(device_path).lower()
+            if "usb" in device_name or "camera" in device_name:
+                return True
+
+            # Check udev properties
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["udevadm", "info", "--query=property", "--name", device_path],
+                    capture_output=True, text=True, timeout=2
+                )
+                if result.returncode == 0 and "ID_BUS=usb" in result.stdout:
+                    return True
+            except:
+                pass
+
+            return False
+        except Exception:
+            return False
+
     @classmethod
     def _filter_supported_formats(cls, formats: List[str]) -> List[str]:
         """Filter to only priority formats we can handle."""
@@ -589,6 +626,12 @@ class FFmpegStreamEngine:
                 )
                 stream.restart_count = 0
                 continue
+
+            format_name = "auto" if input_format == "" else input_format
+            logger.info(
+                "Trying format %d/%d: %s for %s",
+                format_idx + 1, len(format_chain), format_name, stream.camera_type
+            )
             
             # Build and start FFmpeg
             cmd = self._build_ffmpeg_command(stream, input_format)
@@ -722,7 +765,6 @@ class FFmpegStreamEngine:
                 stream.last_frame_time = time.time()
                 stream.last_progress_time = time.time()
                 stream.selected_format = input_format if input_format else "auto"
-                stream.state = STREAM_STATE_RUNNING
                 stream.consecutive_failures = 0
                 stream.last_command = cmd
 
@@ -734,6 +776,16 @@ class FFmpegStreamEngine:
                     daemon=True,
                     name=f"ffmpeg-progress-{stream.camera_type}",
                 )
+                stream._progress_thread.start()
+
+                logger.info(
+                    "✓ FFmpeg started for %s (PID: %d, format=%s, resolution=%s)",
+                    stream.camera_type,
+                    stream.process.pid,
+                    stream.selected_format,
+                    stream.selected_resolution,
+                )
+                logger.debug("FFmpeg command: %s", " ".join(cmd))
                 stream._progress_thread.start()
 
                 logger.info(
@@ -818,13 +870,17 @@ class FFmpegStreamEngine:
                 except:
                     pass
 
-                # Match patterns
+                # Match patterns for USB cameras
                 if "a4tech" in device_name:
                     profile = FormatScanner.CAMERA_PROFILES.get("a4tech_camera", {})
-                elif "usb" in device_name and "camera" in device_name:
+                    logger.debug("Matched A4tech camera profile for %s", device_path)
+                elif "usb" in device_name.lower() or "camera" in device_name.lower():
                     profile = FormatScanner.CAMERA_PROFILES.get("usb_camera", {})
-                elif device_name:  # Any named USB device
+                    logger.debug("Matched USB camera profile for %s", device_path)
+                else:
+                    # Default USB camera profile for any USB device
                     profile = FormatScanner.CAMERA_PROFILES.get("usb_camera", {})
+                    logger.debug("Using default USB camera profile for %s", device_path)
 
             except Exception as e:
                 logger.debug("Error matching camera profile: %s", e)
@@ -890,14 +946,13 @@ class FFmpegStreamEngine:
                 "-thread_type", "slice",  # Slice threading for lower latency
             ]
 
-            # Add -input_format only when explicitly specified
+            # Add input_format only when explicitly specified
             # Empty string means use FFmpeg auto-detection
-            if input_format:
+            if input_format and input_format != "auto":
                 cmd.extend(["-input_format", input_format])
-
-            # Add input_format if specified
-            if input_format:
-                cmd.extend(["-input_format", input_format])
+                logger.debug("Using explicit input format: %s", input_format)
+            else:
+                logger.debug("Using FFmpeg auto-detection for input format")
 
             cmd.extend(["-i", device_path])
 
@@ -965,17 +1020,20 @@ class FFmpegStreamEngine:
                         frame_num = int(s.split("=", 1)[1].strip())
                         stream.last_frame_time = time.time()
                         stream._last_progress_time = time.time()
-                        logger.debug("Stream %s frame: %d", stream.camera_type, frame_num)
-                    except Exception:
-                        pass
+                        logger.debug("Stream %s progress: frame=%d", stream.camera_type, frame_num)
+                    except Exception as e:
+                        logger.debug("Failed to parse frame line '%s': %s", s, e)
                 elif s.startswith("fps="):
                     try:
                         fps_val = float(s.split("=", 1)[1].strip())
                         stream.last_frame_time = time.time()
                         stream._last_progress_time = time.time()
-                        logger.debug("Stream %s fps: %.1f", stream.camera_type, fps_val)
-                    except Exception:
-                        pass
+                        logger.debug("Stream %s progress: fps=%.1f", stream.camera_type, fps_val)
+                    except Exception as e:
+                        logger.debug("Failed to parse fps line '%s': %s", s, e)
+                elif s.strip():
+                    # Log other progress lines for debugging
+                    logger.debug("Stream %s progress: %s", stream.camera_type, s.strip())
                 # continue reading
         except Exception:
             # Reader may fail if process ends; ignore
