@@ -531,6 +531,42 @@ class StreamingAgent:
 
 def main() -> int:
     """Entry point for streaming agent"""
+    import os
+
+    # If the new streaming_v2 coordinator is requested, delegate to it.
+    use_v2 = os.getenv("USE_STREAMING_V2", "false").strip().lower() in ("1", "true", "yes", "on")
+    if use_v2:
+        try:
+            from app.streaming_v2.coordinator import CCTVStreamingCoordinator
+
+            device_cfg = get_device_config()
+            device_id = device_cfg.get("device_id", "unknown")
+            device_uuid = device_cfg.get("device_uuid", "") or None
+            mediamtx_host = device_cfg.get("mediamtx_host") or MEDIAMTX_HOST
+            mediamtx_port = int(device_cfg.get("mediamtx_rtsp_port") or MEDIAMTX_RTSP_PORT)
+
+            mqtt_host = get_str_setting("MQTT_HOST", None)
+            mqtt_port = get_int_setting("MQTT_PORT", 1883)
+            mqtt_username = get_str_setting("MQTT_USERNAME", None)
+            mqtt_password = get_str_setting("MQTT_PASSWORD", None)
+
+            coordinator = CCTVStreamingCoordinator(
+                device_id=device_id,
+                mediamtx_host=mediamtx_host,
+                mediamtx_port=mediamtx_port,
+                mqtt_host=mqtt_host,
+                mqtt_port=mqtt_port,
+                mqtt_username=mqtt_username,
+                mqtt_password=mqtt_password,
+                device_uuid=device_uuid,
+            )
+
+            coordinator.run()
+            return 0
+        except Exception:
+            logger.exception("Failed to start streaming_v2 coordinator")
+            return 1
+
     agent = StreamingAgent()
     
     # Set up signal handlers
