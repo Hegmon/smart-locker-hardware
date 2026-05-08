@@ -106,10 +106,10 @@ class CameraRegistry:
                 logger.warning("Skipping camera entry with no device_path: %s", cam_info)
                 continue
 
-            # If device is locked by another pipeline, skip it
+            # If device is locked by another pipeline, log but still try to use it
+            # (streaming processes should be able to share devices)
             if device_lock_manager.is_locked(device_path):
-                logger.info("Skipping locked device: %s", device_path)
-                continue
+                logger.debug("Device locked but proceeding: %s", device_path)
 
             # Get detailed capabilities (protect against unexpected exceptions)
             try:
