@@ -204,6 +204,18 @@ class StreamingAgent:
                     logger.info("Setting up external camera: %s (backend=%s)", external_device, external_backend)
 
                 self._setup_pipeline_with_retry(internal_device, external_device, internal_backend, external_backend)
+
+            # Add virtual pipelines to watchdog for monitoring
+            internal_pipeline = self.pipeline.get_virtual_pipeline("internal")
+            if internal_pipeline:
+                self.watchdog.add_pipeline("internal", internal_pipeline)
+                logger.info("Added internal camera to watchdog monitoring")
+
+            external_pipeline = self.pipeline.get_virtual_pipeline("external")
+            if external_pipeline:
+                self.watchdog.add_pipeline("external", external_pipeline)
+                logger.info("Added external camera to watchdog monitoring")
+
         except Exception as e:
             logger.exception("Failed to configure production pipeline from registry: %s", e)
         
