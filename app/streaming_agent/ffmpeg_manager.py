@@ -1382,6 +1382,207 @@ class FFmpegStreamEngine:
 # CONSTANTS
 # ============================================================================
 
+# ============================================================================
+# PRODUCTION CAMERA PIPELINE - Ultra-Low-Latency Dual Camera Manager
+# ============================================================================
+
+class ProductionCameraPipeline:
+    """
+    Production-grade dual USB camera streaming pipeline.
+
+    Manages two independent FFmpeg stream engines for ultra-low-latency
+    simultaneous streaming of internal and external USB cameras.
+
+    Features:
+    - Independent camera pipelines (one freeze ≠ both freeze)
+    - Latest-frame-only buffers for zero latency
+    - Automatic recovery and health monitoring
+    - USB bandwidth optimization for dual cameras
+    - 24/7 stable operation
+    """
+
+    def __init__(
+        self,
+        device_id: str,
+        mediamtx_host: str = "127.0.0.1",
+        mediamtx_rtsp_port: int = 8554,
+    ):
+        self.device_id = device_id
+        self.mediamtx_host = mediamtx_host
+        self.mediamtx_rtsp_port = mediamtx_rtsp_port
+
+        # Two independent stream engines for dual camera isolation
+        self.internal_engine = FFmpegStreamEngine(
+            device_id=device_id,
+            mediamtx_host=mediamtx_host,
+            mediamtx_rtsp_port=mediamtx_rtsp_port,
+        )
+
+        self.external_engine = FFmpegStreamEngine(
+            device_id=device_id,
+            mediamtx_host=mediamtx_host,
+            mediamtx_rtsp_port=mediamtx_rtsp_port,
+        )
+
+        # Format scanners
+        self.internal_scanner = FormatScanner()
+        self.external_scanner = FormatScanner()
+
+        # State
+        self._running = False
+
+        logger.info("ProductionCameraPipeline initialized for device %s", device_id)
+
+    def setup_from_registry(self, camera_devices: List[object]) -> None:
+        """
+        Setup cameras from registry devices (ultra-low-latency mode).
+
+        Assigns cameras to internal/external roles with optimized profiles
+        for simultaneous dual USB camera streaming.
+        """
+        logger.info("=== Setting up cameras from registry (%d devices) ===", len(camera_devices))
+
+        # Sort devices by physical path for deterministic assignment
+        def _phys_id(dev_obj):
+            try:
+                dp = getattr(dev_obj, 'device_path', '')
+                resolved = dp
+                if dp.startswith('/dev/v4l/by-id'):
+                    try:
+                        resolved = str(Path(dp).resolve())
+                    except:
+                        pass
+                return resolved
+            except Exception:
+                return str(getattr(dev_obj, 'device_path', ''))
+
+        sorted_devs = sorted(camera_devices, key=_phys_id)
+
+        # Assign first device as internal (primary), others as external variants
+        assigned = []
+
+        if len(sorted_devs) >= 1:
+            dev = sorted_devs[0]
+            device_path = getattr(dev, 'device_path', '')
+            if device_path:
+                assigned.append(('internal', device_path))
+
+        if len(sorted_devs) >= 2:
+            dev = sorted_devs[1]
+            device_path = getattr(dev, 'device_path', '')
+            if device_path:
+                assigned.append(('external', device_path))
+
+        # Setup assigned cameras
+        for role_name, device_path in assigned:
+            try:
+                # Use optimized profiles for dual camera streaming
+                profile = self.internal_scanner.probe_device(device_path)
+
+                # Apply USB optimization based on role
+                if role_name == 'internal':
+                    # Primary camera - higher quality but still USB-optimized
+                    profile.safe_resolutions = ["1280x720", "640x480"]
+                else:
+                    # Secondary camera - lower bandwidth to prevent saturation
+                    profile.safe_resolutions = ["640x480", "320x240"]
+
+                # Add to appropriate engine
+                if role_name == 'internal':
+                    self.internal_engine.add_stream(role_name, profile)
+                else:
+                    self.external_engine.add_stream(role_name, profile)
+
+                logger.info("✓ Added %s camera: %s", role_name, device_path)
+
+            except Exception as e:
+                logger.exception("Failed to setup %s camera %s: %s", role_name, device_path, e)
+
+        logger.info("=== Registry setup complete (%d cameras) ===", len(assigned))
+
+    def setup_cameras(
+        self,
+        internal_device: str = None,
+        external_device: str = None,
+        internal_backend: str = "v4l2",
+        external_backend: str = "v4l2",
+    ) -> None:
+        """
+        Setup cameras manually with optimized profiles for dual streaming.
+        """
+        logger.info("=== Setting up cameras manually ===")
+
+        # Setup internal camera
+        if internal_device:
+            try:
+                profile = self.internal_scanner.probe_device(internal_device)
+                profile.safe_resolutions = ["1280x720", "640x480"]  # Primary camera
+                self.internal_engine.add_stream("internal", profile)
+                logger.info("✓ Internal camera: %s", internal_device)
+            except Exception as e:
+                logger.exception("Failed to setup internal camera: %s", e)
+
+        # Setup external camera
+        if external_device:
+            try:
+                profile = self.external_scanner.probe_device(external_device)
+                profile.safe_resolutions = ["640x480", "320x240"]  # Secondary camera
+                self.external_engine.add_stream("external", profile)
+                logger.info("✓ External camera: %s", external_device)
+            except Exception as e:
+                logger.exception("Failed to setup external camera: %s", e)
+
+        logger.info("=== Manual setup complete ===")
+
+    def start(self) -> None:
+        """Start both camera pipelines."""
+        logger.info("=== Starting ultra-low-latency dual camera pipeline ===")
+
+        self._running = True
+
+        # Start internal camera (critical)
+        logger.info("Starting internal camera pipeline...")
+        self.internal_engine.start_all_streams()
+        self.internal_engine.start_watchdog()
+
+        # Start external camera (can fail independently)
+        logger.info("Starting external camera pipeline...")
+        self.external_engine.start_all_streams()
+        self.external_engine.start_watchdog()
+
+        logger.info("=== Dual camera pipeline started ===")
+
+    def stop(self) -> None:
+        """Stop both camera pipelines."""
+        logger.info("=== Stopping dual camera pipeline ===")
+
+        self._running = False
+
+        # Stop both engines
+        self.external_engine.stop_watchdog()
+        self.external_engine.stop()
+        self.internal_engine.stop_watchdog()
+        self.internal_engine.stop()
+
+        logger.info("=== Dual camera pipeline stopped ===")
+
+    def get_pipeline_status(self) -> Dict[str, Any]:
+        """Get status of both camera pipelines."""
+        return {
+            "device_id": self.device_id,
+            "running": self._running,
+            "internal_camera": self.internal_engine.get_all_status(),
+            "external_camera": self.external_engine.get_all_status(),
+            "rtsp_base_url": f"rtsp://{self.mediamtx_host}:{self.mediamtx_rtsp_port}",
+            "latency_target": "<500ms",
+            "architecture": "ultra-low-latency dual USB",
+        }
+
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
 # Stream states (for backward compatibility)
 STREAM_STATE_STARTING = STREAM_STATE_STARTING
 STREAM_STATE_RUNNING = STREAM_STATE_RUNNING
