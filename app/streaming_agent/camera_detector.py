@@ -664,6 +664,8 @@ class CameraDetector:
         Detect all valid camera devices, de-duplicate physical devices,
         classify as internal/external, and select best node per camera.
         """
+        # Legacy behavior kept for role-aware detection, but we now prefer
+        # enumerating stable by-id links for multi-camera usage.
         all_devices = self._list_v4l2_devices()
         
         # Ensure /dev/video0 is tested first if present
@@ -771,6 +773,84 @@ class CameraDetector:
         if not candidates:
             logger.warning("No valid camera devices found")
             return []
+
+    def detect_all_valid_cameras(self) -> List[CameraInfo]:
+        """
+        Detect all valid USB V4L2 camera devices using stable by-id paths.
+        Returns a list of CameraInfo entries (one per physical device node).
+        """
+        devices = []
+        # Prefer /dev/v4l/by-id symlinks for stable device identity
+        by_id_dir = Path('/dev/v4l/by-id')
+        cand_paths: List[str] = []
+
+        if by_id_dir.exists():
+            for p in sorted(by_id_dir.iterdir()):
+                # Only consider USB entries (symlinks to /dev/video*)
+                try:
+                    target = p.resolve()
+                    if target.exists() and str(target).startswith('/dev/video'):
+                        cand_paths.append(str(p))
+                except Exception:
+                    continue
+
+        # Fallback to by-path if by-id empty
+        if not cand_paths:
+            by_path_dir = Path('/dev/v4l/by-path')
+            if by_path_dir.exists():
+                for p in sorted(by_path_dir.iterdir()):
+                    try:
+                        target = p.resolve()
+                        if target.exists() and str(target).startswith('/dev/video'):
+                            cand_paths.append(str(p))
+                    except Exception:
+                        continue
+
+        # Final fallback: glob /dev/video* (least preferred)
+        if not cand_paths:
+            cand_paths = sorted(self._list_v4l2_devices())
+
+        logger.info("Probing %d candidate by-id/by-path devices", len(cand_paths))
+
+        for idx, path in enumerate(cand_paths):
+            # Resolve symlink to actual /dev/videoX
+            try:
+                resolved = str(Path(path).resolve())
+            except Exception:
+                resolved = path
+
+            name = self._get_device_name(resolved)
+
+            # Confirm USB bus via sysfs
+            bus = self._get_device_bus(resolved)
+            if bus != 'usb':
+                logger.info('Skipping non-USB device: %s (%s) bus=%s', path, name, bus)
+                continue
+
+            # Probe formats and ffmpeg open
+            formats = self._probe_formats(resolved)
+            can_open, ffmpeg_reason, _rank = self._ffmpeg_can_open(resolved, formats)
+            logger.info('Device %s (%s) probe: can_open=%s reason=%s', path, name, can_open, ffmpeg_reason)
+            if not can_open:
+                logger.info('Skipping invalid device: %s (%s): %s', path, name, ffmpeg_reason)
+                continue
+
+            resolutions = self._probe_resolutions(resolved)
+
+            ci = CameraInfo(
+                device_path=path,
+                camera_type='usb',
+                index=idx,
+                formats=formats,
+                name=name,
+                resolutions=resolutions,
+                reason=ffmpeg_reason,
+                backend='v4l2',
+            )
+            devices.append(ci)
+
+        logger.info('detect_all_valid_cameras found %d devices', len(devices))
+        return devices
 
         # Log summary
         logger.info("Found %d physical camera(s)", len(candidates))
