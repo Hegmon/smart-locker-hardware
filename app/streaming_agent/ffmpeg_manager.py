@@ -1228,6 +1228,35 @@ class VirtualCameraPipeline:
         """Stop is handled by the production pipeline"""
         pass
 
+    def restart(self):
+        """Restart the underlying stream in the production pipeline"""
+        try:
+            # Get the appropriate engine
+            if self.camera_type == "internal":
+                engine = self.production_pipeline.internal_engine
+            else:
+                engine = self.production_pipeline.external_engine
+
+            # Stop the current stream
+            engine.stop_stream(self.camera_type)
+
+            # Small delay before restart
+            import time
+            time.sleep(1.0)  # Longer delay for proper cleanup
+
+            # Start the stream again
+            success = engine.start_stream(self.camera_type)
+
+            if success:
+                logger.info(f"Successfully restarted {self.camera_type} stream")
+            else:
+                logger.error(f"Failed to restart {self.camera_type} stream")
+
+            return success
+        except Exception as e:
+            logger.error(f"Error restarting virtual pipeline {self.camera_type}: {e}")
+            return False
+
     def get_status(self):
         """Get status from the appropriate engine in BasePipeline format"""
         if self.camera_type == "internal":
