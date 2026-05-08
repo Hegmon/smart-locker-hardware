@@ -149,9 +149,38 @@ class CameraManager:
         Returns:
             Sorted list of device paths
         """
-        devices = glob("/dev/video*")
+        devices: List[str] = []
+
+        # Prefer stable by-id links when available (they encode USB serials)
+        try:
+            by_id_dir = Path("/dev/v4l/by-id")
+            if by_id_dir.exists():
+                for entry in sorted(by_id_dir.iterdir()):
+                    # Resolve symlink -> /dev/videoX
+                    try:
+                        if entry.is_symlink():
+                            resolved = str(entry.resolve())
+                            if resolved and resolved not in devices:
+                                devices.append(resolved)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        # Add any remaining /dev/video* nodes not represented in by-id
+        for d in glob("/dev/video*"):
+            if d not in devices:
+                devices.append(d)
+
         # Sort by device number (video0, video1, ...)
-        devices.sort(key=lambda d: int(re.search(r'\d+', d).group()) if re.search(r'\d+', d) else 999)
+        def _num_key(dev: str) -> int:
+            m = re.search(r"(\d+)$", dev)
+            try:
+                return int(m.group(1)) if m else 999
+            except Exception:
+                return 999
+
+        devices.sort(key=_num_key)
         return devices
     
     def _probe_device(self, device: str) -> Optional[CameraConfig]:
@@ -167,10 +196,40 @@ class CameraManager:
             CameraConfig or None if probing fails
         """
         logger.info("Probing device: %s", device)
-        
+
         # Get device name and driver info
         name, driver_info = self._get_device_info(device)
-        
+
+        # If udevadm is available, prefer udev properties for USB detection
+        try:
+            udev = self._get_udev_properties(device)
+        except Exception:
+            udev = {}
+
+        # Enforce USB-only detection: skip devices that are not on USB bus
+        if udev:
+            id_bus = udev.get("ID_BUS")
+            if id_bus and id_bus.lower() != "usb":
+                logger.info("Skipping non-USB device (udev ID_BUS=%s): %s (%s)", id_bus, device, name)
+                return None
+        else:
+            # Fallback: if no udev info, skip devices that don't appear to be USB via sysfs
+            try:
+                # If device is not under a USB sysfs path, skip (conservative)
+                video_dir = Path(f"/sys/class/video4linux/{Path(device).name}")
+                device_link = video_dir / "device"
+                is_usb = False
+                if device_link.exists() and device_link.is_symlink():
+                    target = (video_dir.parent / os.readlink(device_link)).resolve()
+                    if "/usb" in str(target):
+                        is_usb = True
+                if not is_usb:
+                    logger.info("Skipping non-USB device (sysfs check): %s (%s)", device, name)
+                    return None
+            except Exception:
+                # If sysfs check fails, continue with probing as a fallback
+                pass
+
         # Skip non-camera devices
         if not self._is_camera_device(name):
             logger.info("Skipping non-camera device: %s (%s)", device, name)
@@ -470,18 +529,59 @@ class CameraManager:
         Returns:
             Physical ID string
         """
+        # Prefer udev properties for stable identifiers
+        try:
+            props = self._get_udev_properties(device)
+            if props:
+                for key in ("ID_PATH", "ID_SERIAL_SHORT", "ID_SERIAL", "ID_USB_SERIAL", "ID_MODEL_ID"):
+                    if key in props and props[key]:
+                        return props[key]
+        except Exception:
+            pass
+
         try:
             video_dir = Path(f"/sys/class/video4linux/{Path(device).name}")
             device_link = video_dir / "device"
-            
+
             if device_link.exists() and device_link.is_symlink():
                 target = os.readlink(device_link)
                 abs_target = (video_dir.parent / target).resolve()
                 return str(abs_target)
         except Exception:
             pass
-        
+
         return device
+
+    def _get_udev_properties(self, device: str) -> Dict[str, str]:
+        """
+        Query udevadm for properties for a device.
+
+        Returns a dict of KEY->VALUE. If udevadm is not present or fails,
+        returns empty dict.
+        """
+        try:
+            res = subprocess.run(
+                ["udevadm", "info", "--query=property", "--name", device],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if res.returncode != 0:
+                return {}
+
+            props: Dict[str, str] = {}
+            for line in (res.stdout or "").splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    props[k.strip()] = v.strip()
+            return props
+        except FileNotFoundError:
+            # udevadm not installed
+            return {}
+        except subprocess.TimeoutExpired:
+            return {}
+        except Exception:
+            return {}
     
     def _classify_cameras(self, configs: List[CameraConfig]) -> None:
         """
