@@ -90,13 +90,26 @@ class FormatScanner:
             "preferred_format": "yuyv422",
             "fallback_formats": ["yuyv", "mjpeg", "auto"],
             "resolution": "640x480",
-            "framerate": 30,
+            "framerate": 25,
         },
         "/dev/video2": {
             "type": "external",
             "preferred_format": "mjpeg",
             "fallback_formats": ["yuyv422", "h264", "auto"],
             "resolution": "1280x720",
+            "framerate": 25,
+        },
+        # Generic USB camera profiles - match by device name patterns
+        "usb_camera": {
+            "preferred_format": "mjpeg",
+            "fallback_formats": ["yuyv422", "auto"],
+            "resolution": "1280x720",
+            "framerate": 25,
+        },
+        "a4tech_camera": {
+            "preferred_format": "mjpeg",
+            "fallback_formats": ["yuyv422", "auto"],
+            "resolution": "1920x1080",
             "framerate": 25,
         },
     }
@@ -146,45 +159,65 @@ class FormatScanner:
         """Use FFmpeg -list_formats all to detect supported formats."""
         formats = []
         try:
+            # Try with a very short timeout and minimal options to avoid device locking
             result = subprocess.run(
                 [
                     "ffmpeg",
                     "-hide_banner",
                     "-loglevel", "error",
                     "-f", "v4l2",
+                    "-framerate", "1",  # Very low framerate for probing
+                    "-video_size", "160x120",  # Very small size for probing
+                    "-t", "0.1",  # Very short duration
                     "-list_formats", "all",
                     "-i", device_path,
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=5,  # Shorter timeout
             )
-            
+
             # Parse output for format codes
-            # FFmpeg outputs lines like: "ioctl: VIDIOC_ENUM_FMT\n\tType: Video Capture\n\t[0]: 'MJPG' (Motion-JPEG, compressed)\n\t[1]: 'YUYV' (YUYV 4:2:2)\n"
             output = result.stderr + result.stdout
-            
+
             # Extract format codes in single quotes
             matches = re.findall(r"'([A-Z0-9]+)'", output)
             for fmt in matches:
                 fmt_lower = fmt.lower()
-                if fmt_lower in ["mjpeg", "mjpg", "yuyv", "yuyv422", "yuv422", 
-                                 "h264", "nv12", "yuv420"]:
+                # Map common format names
+                if fmt_lower in ["mjpeg", "mjpg"]:
+                    fmt_lower = "mjpeg"
+                elif fmt_lower in ["yuyv", "yuyv422", "yuv422"]:
+                    fmt_lower = "yuyv422"
+                elif fmt_lower in ["h264"]:
+                    fmt_lower = "h264"
+                elif fmt_lower in ["nv12"]:
+                    fmt_lower = "nv12"
+
+                if fmt_lower in ["mjpeg", "yuyv422", "h264", "nv12"]:
                     if fmt_lower not in formats:
                         formats.append(fmt_lower)
-            
+
             if formats:
-                logger.info("FFmpeg probe detected formats: %s", formats)
+                logger.debug("FFmpeg probe detected formats: %s", formats)
             else:
-                logger.info("FFmpeg probe found no standard formats")
-                
+                logger.debug("FFmpeg probe found no standard formats, trying fallback")
+
+                # Fallback: try common USB camera formats
+                if not formats:
+                    formats = ["mjpeg", "yuyv422"]  # Most USB cameras support these
+
         except FileNotFoundError:
             logger.warning("FFmpeg not available for format probing")
+            # Fallback formats
+            return ["mjpeg", "yuyv422"]
         except subprocess.TimeoutExpired:
-            logger.warning("FFmpeg format probe timed out")
+            logger.warning("FFmpeg format probe timed out, using fallback formats")
+            return ["mjpeg", "yuyv422"]
         except Exception as e:
-            logger.warning("FFmpeg format probe failed: %s", e)
-        
+            logger.warning("FFmpeg format probe failed: %s, using fallback formats", e)
+            return ["mjpeg", "yuyv422"]
+
         return formats
     
     @staticmethod
@@ -193,27 +226,36 @@ class FormatScanner:
         formats = []
         try:
             result = subprocess.run(
-                ["v4l2-ctl", "--device", device_path, "--list-formats"],
+                ["v4l2-ctl", "--device", device_path, "--list-formats-ext"],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=3,
             )
             if result.returncode == 0:
                 for line in result.stdout.splitlines():
                     line = line.strip()
-                    if line.startswith("'") and "'" in line:
-                        fmt = line.split("'")[1].lower()
-                        if fmt in ["mjpeg", "mjpg"]:
-                            formats.append("mjpeg")
-                        elif fmt in ["yuyv", "yuyv422", "yuv422"]:
-                            formats.append("yuyv422")
-                        elif fmt in ["h264"]:
-                            formats.append("h264")
-                        elif fmt in ["nv12"]:
-                            formats.append("nv12")
+                    # Look for format lines like: ioctl: VIDIOC_ENUM_FMT or '[0]: 'MJPG' (Motion-JPEG, compressed)'
+                    if "'" in line:
+                        parts = line.split("'")
+                        if len(parts) >= 2:
+                            fmt = parts[1].lower()
+                            if fmt in ["mjpeg", "mjpg"]:
+                                if "mjpeg" not in formats:
+                                    formats.append("mjpeg")
+                            elif fmt in ["yuyv", "yuyv422", "yuv422"]:
+                                if "yuyv422" not in formats:
+                                    formats.append("yuyv422")
+                            elif fmt in ["h264"]:
+                                if "h264" not in formats:
+                                    formats.append("h264")
+                            elif fmt in ["nv12"]:
+                                if "nv12" not in formats:
+                                    formats.append("nv12")
+        except FileNotFoundError:
+            logger.debug("v4l2-ctl not available")
         except Exception as e:
             logger.warning("v4l2-ctl format probe failed: %s", e)
-        
+
         return formats
     
     @staticmethod
@@ -334,7 +376,12 @@ class StreamProcess:
 
     # Watchdog
     watchdog_active: bool = False
-    
+
+    # Progress monitoring
+    _progress_thread: Optional[threading.Thread] = None
+    _progress_stop: threading.Event = field(default_factory=threading.Event)
+    _last_progress_time: float = 0
+
     def get_format_chain(self) -> List[str]:
         """Get format fallback chain for this stream."""
         return FormatScanner.get_format_fallback_chain(
@@ -673,10 +720,21 @@ class FFmpegStreamEngine:
                 # Process started successfully!
                 stream.last_start_time = time.time()
                 stream.last_frame_time = time.time()
+                stream.last_progress_time = time.time()
                 stream.selected_format = input_format if input_format else "auto"
                 stream.state = STREAM_STATE_RUNNING
                 stream.consecutive_failures = 0
                 stream.last_command = cmd
+
+                # Start progress reader to parse FFmpeg -progress output
+                stream._progress_stop.clear()
+                stream._progress_thread = threading.Thread(
+                    target=self._progress_reader,
+                    args=(stream,),
+                    daemon=True,
+                    name=f"ffmpeg-progress-{stream.camera_type}",
+                )
+                stream._progress_thread.start()
 
                 logger.info(
                     "✓ FFmpeg started for %s (PID: %d, format=%s, resolution=%s)",
@@ -747,6 +805,30 @@ class FFmpegStreamEngine:
         # Check for explicit camera profile
         profile = FormatScanner.CAMERA_PROFILES.get(device_path, {})
 
+        # If no exact match, try pattern matching on device name
+        if not profile:
+            try:
+                # Get device name for pattern matching
+                from pathlib import Path
+                device_name = ""
+                try:
+                    name_file = Path(f"/sys/class/video4linux/{Path(device_path).name}/name")
+                    if name_file.exists():
+                        device_name = name_file.read_text().strip().lower()
+                except:
+                    pass
+
+                # Match patterns
+                if "a4tech" in device_name:
+                    profile = FormatScanner.CAMERA_PROFILES.get("a4tech_camera", {})
+                elif "usb" in device_name and "camera" in device_name:
+                    profile = FormatScanner.CAMERA_PROFILES.get("usb_camera", {})
+                elif device_name:  # Any named USB device
+                    profile = FormatScanner.CAMERA_PROFILES.get("usb_camera", {})
+
+            except Exception as e:
+                logger.debug("Error matching camera profile: %s", e)
+
         # Determine framerate from profile or default
         framerate = profile.get("framerate", 25)
 
@@ -798,14 +880,14 @@ class FFmpegStreamEngine:
                 "-hide_banner",
                 "-loglevel", "warning",
                 "-f", "v4l2",
-                "-fflags", "nobuffer",
+                "-fflags", "nobuffer+discardcorrupt",
                 "-flags", "low_delay",
                 "-analyzeduration", "0",
                 "-probesize", "32",
                 "-framerate", str(framerate),
                 "-video_size", stream.selected_resolution,
-                "-fflags", "nobuffer",
-                "-flags", "low_delay",
+                "-threads", "1",  # Single thread for USB cameras
+                "-thread_type", "slice",  # Slice threading for lower latency
             ]
 
             # Add -input_format only when explicitly specified
@@ -813,20 +895,15 @@ class FFmpegStreamEngine:
             if input_format:
                 cmd.extend(["-input_format", input_format])
 
+            # Add input_format if specified
+            if input_format:
+                cmd.extend(["-input_format", input_format])
+
             cmd.extend(["-i", device_path])
 
-            # Prefer explicit input_format for UVC devices when known
-            if input_format:
-                # Insert input_format immediately before -i
-                # find index of '-i'
-                try:
-                    i_idx = cmd.index("-i")
-                    cmd[i_idx:i_idx] = ["-input_format", input_format]
-                except ValueError:
-                    cmd.extend(["-input_format", input_format])
-
-            # Low-latency tuning: reduce probe/analyze overhead and enable low-delay options
-            # (already added above, ensure additional options before encoding)
+            # Include FFmpeg progress to stdout so we can monitor frame progress
+            # This will be parsed by progress reader thread
+            cmd.extend(["-nostats", "-progress", "pipe:1"])
 
             # Encoding options optimized for Raspberry Pi
             cmd.extend([
@@ -855,7 +932,55 @@ class FFmpegStreamEngine:
             cmd.append(output_url)
 
             return cmd
-    
+
+    def _progress_reader(self, stream: StreamProcess) -> None:
+        """
+        Read FFmpeg "-progress pipe:1" output from stdout and update frame/fps
+        metrics for health monitoring.
+        """
+        if not stream.process or not stream.process.stdout:
+            return
+
+        try:
+            # Read lines until process ends or stop requested
+            while not stream._progress_stop.is_set():
+                line = stream.process.stdout.readline()
+                if not line:
+                    # EOF or process exit
+                    break
+                try:
+                    if isinstance(line, bytes):
+                        s = line.decode(errors="replace").strip()
+                    else:
+                        s = str(line).strip()
+                except Exception:
+                    s = ""
+
+                if not s:
+                    continue
+
+                # Progress format: key=value lines, e.g. frame=123, fps=25.0
+                if s.startswith("frame="):
+                    try:
+                        frame_num = int(s.split("=", 1)[1].strip())
+                        stream.last_frame_time = time.time()
+                        stream._last_progress_time = time.time()
+                        logger.debug("Stream %s frame: %d", stream.camera_type, frame_num)
+                    except Exception:
+                        pass
+                elif s.startswith("fps="):
+                    try:
+                        fps_val = float(s.split("=", 1)[1].strip())
+                        stream.last_frame_time = time.time()
+                        stream._last_progress_time = time.time()
+                        logger.debug("Stream %s fps: %.1f", stream.camera_type, fps_val)
+                    except Exception:
+                        pass
+                # continue reading
+        except Exception:
+            # Reader may fail if process ends; ignore
+            pass
+
     def _is_device_busy_error(self, error: str) -> bool:
         """Check if error indicates device is busy."""
         error_lower = error.lower()
@@ -1106,29 +1231,29 @@ class FFmpegStreamEngine:
                     self._restart_stream(stream)
                     return
             
-            # Check for frame stalls (no frames for extended period)
+            # Check for frame stalls (no progress updates for extended period)
             now = time.time()
-            time_since_last_frame = now - stream.last_frame_time
+            time_since_last_progress = now - stream._last_progress_time
 
             # Update frame stall tracking
-            if stream.last_frame_count > 0 and time_since_last_frame > self.FRAME_STALL_THRESHOLD:
+            if stream._last_progress_time > 0 and time_since_last_progress > self.FRAME_STALL_THRESHOLD:
                 if stream.frame_stall_start is None:
                     # Start of stall period
                     stream.frame_stall_start = now
                     logger.warning(
-                        "Stream %s frame stall detected (no frames for %.1fs)",
+                        "Stream %s frame stall detected (no progress for %.1fs)",
                         stream.camera_type,
-                        time_since_last_frame,
+                        time_since_last_progress,
                     )
                 elif now - stream.frame_stall_start > self.FRAME_STALL_THRESHOLD:
                     # Stall confirmed, restart stream
                     logger.error(
-                        "Stream %s confirmed stalled (no frames for %.1fs), restarting",
+                        "Stream %s confirmed stalled (no progress for %.1fs), restarting",
                         stream.camera_type,
-                        time_since_last_frame,
+                        time_since_last_progress,
                     )
                     stream.state = STREAM_STATE_RECOVERING
-                    stream.last_error = f"Frame stall: {time_since_last_frame:.1f}s"
+                    stream.last_error = f"Frame stall: {time_since_last_progress:.1f}s"
                     self._restart_stream(stream)
                     return
             else:
