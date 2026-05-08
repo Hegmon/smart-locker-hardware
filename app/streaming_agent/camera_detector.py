@@ -303,27 +303,21 @@ class CameraDetector:
         return "v4l2"
 
     def _probe_formats(self, device_path: str) -> List[str]:
-        """Use v4l2-ctl or ffmpeg to get supported pixel formats."""
-        formats = []
+        """Probe supported formats using v4l2-ctl and ffmpeg."""
+        from .ffmpeg_manager import FormatScanner
 
-        # Try v4l2-ctl first (fast, clean output)
-        try:
-            result = subprocess.run(
-                ["v4l2-ctl", "--device", device_path, "--list-formats"],
-                capture_output=True, text=True, timeout=self.FORMAT_PROBE_TIMEOUT
-            )
-            if result.returncode == 0:
-                for line in result.stdout.splitlines():
-                    line = line.strip()
-                    if line.startswith("'") and "'" in line:
-                        fmt = line.split("'")[1].lower()
-                        formats.append(fmt)
-                if formats:
-                    return formats
-        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
-            pass
+        # Use FormatScanner for format detection
+        profile = FormatScanner.probe_device(device_path)
+        formats = profile.supported_formats
 
-        # Fallback: use ffmpeg to enumerate formats
+        # If no formats detected but device is valid, provide USB camera defaults
+        if not formats:
+            # Check if this is a USB camera by device path
+            if 'usb-' in device_path or self._confirm_usb_device(device_path):
+                logger.info("No formats detected for USB camera %s, using defaults", device_path)
+                formats = ["mjpeg", "yuyv422"]  # Common USB camera formats
+
+        return formats
         try:
             result = subprocess.run(
                 [
