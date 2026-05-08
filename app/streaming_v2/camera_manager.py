@@ -59,6 +59,8 @@ class CameraManager:
             List of CameraConfig for each detected camera
         """
         devices = self._list_video_devices()
+        # Filter out secondary/metadata nodes so we only probe primary capture nodes
+        devices = self._filter_primary_nodes(devices)
         logger.info("Discovered %d video device(s): %s", len(devices), devices)
         
         configs = []
@@ -76,6 +78,44 @@ class CameraManager:
             self._cache_time[config.device] = time.time()
         
         return configs
+
+    def _filter_primary_nodes(self, devices: List[str]) -> List[str]:
+        """
+        Filter a list of /dev/video* nodes, keeping only the primary capture
+        node for each physical device. This avoids probing metadata/control
+        nodes (commonly odd-numbered nodes like /dev/video1, /dev/video3).
+
+        Strategy:
+        - Group nodes by physical id (from _get_physical_id)
+        - For each physical id, keep the node with the lowest numeric index
+        - Return the filtered list sorted by device number
+        """
+        primary: dict[str, str] = {}
+
+        def dev_num(d: str) -> int:
+            import re
+            m = re.search(r"(\d+)$", d)
+            try:
+                return int(m.group(1)) if m else 999
+            except Exception:
+                return 999
+
+        for dev in devices:
+            try:
+                phys = self._get_physical_id(dev) or dev
+            except Exception:
+                phys = dev
+
+            if phys in primary:
+                # keep the lower-numbered node as primary
+                if dev_num(dev) < dev_num(primary[phys]):
+                    primary[phys] = dev
+            else:
+                primary[phys] = dev
+
+        # Return sorted primary nodes
+        filtered = sorted(primary.values(), key=lambda d: dev_num(d))
+        return filtered
     
     def get_camera_config(self, device: str) -> Optional[CameraConfig]:
         """
