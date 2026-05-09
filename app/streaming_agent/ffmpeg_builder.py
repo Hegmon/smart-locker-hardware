@@ -1,5 +1,5 @@
 from app.streaming_agent.config_loader import get_device_id
-
+import shlex
 MEDIAMTX_HOST="69.62.125.223"
 
 MEDIAMTX_RTSP_PORT = 8554
@@ -35,4 +35,4 @@ if __name__=="__main__":
     video_device="/dev/video0"
     camera_role="internal"
     cmd=build_ffmpeg_command(video_device,camera_role)
-    print("FFmpeg command:",cmd)
+    print("FFmpeg command:",shlex.join(cmd))
