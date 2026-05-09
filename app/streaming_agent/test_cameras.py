@@ -5,10 +5,10 @@ def test_usb_camera_detection(video_device):
     cmd=[
         "ffmpeg",
         "-f","v4l2",
-        "input_format","mjpeg",
-        "video_size","1280x720",
+        "-input_format","mjpeg",
+        "-video_size","1280x720",
+        "-framerate","30",
         "-i",video_device,
-        "framerate","30",
         "-t","3",
         "-f","null",
         "-"
@@ -22,13 +22,17 @@ def test_usb_camera_detection(video_device):
             timeout=10
         )
         if result.returncode==0:
-            return True,print(f"Camera {video_device} is working correctly.")
-        return result.stderr,print(f"Camera {video_device} is not working correctly.")
+            print(f"Camera {video_device} is working correctly.")
+            return True,"Camera stream is working correctly"
+        print(f"Camera {video_device} is not working correctly.")
+        return False,result.stderr,
     except subprocess.TimeoutExpired:
-        return "Timeout",print(f"Camera {video_device} test timed out.")
+        print(f"Camera {video_device} test timed out.")
+        return False,"Timeout",
     except Exception as e:
-        return str(e),print(f"An error occurred while testing camera {video_device}: {e}")
-    
+        print(f"An error occurred while testing camera {video_device}: {e}")
+        return False,str(e)
+
 def main():
     cameras=detect_usb_cameras()
     if not cameras:
