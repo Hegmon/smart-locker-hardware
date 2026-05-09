@@ -8,8 +8,7 @@ def build_rtsp_url(camera_role):
     device_id=get_device_id()
     return (
         f"rtsp://"
-        f"{MEDIAMTX_HOST}"
-        f"{MEDIAMTX_RTSP_PORT}/"
+        f"{MEDIAMTX_HOST}:{MEDIAMTX_RTSP_PORT}"
         f"{device_id}/"
         f"{camera_role}"
     )
