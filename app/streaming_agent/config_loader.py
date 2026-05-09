@@ -2,12 +2,12 @@ import json
 from pathlib import Path
 
 BASE_DIR=Path(__file__).parent.parent
-print("Base directory:", BASE_DIR)
+
 CONFIG_FILE=BASE_DIR / "config"
-print("Config directory:", CONFIG_FILE)
+
 
 BACKEND_CONFIG_FILE=CONFIG_FILE / "backend_config.json"
-print("Backend config file path:", BACKEND_CONFIG_FILE)
+
 
 def load_backend_device_config():
     if not BACKEND_CONFIG_FILE.exists():
@@ -23,3 +23,8 @@ def get_device_id():
         raise ValueError("Device ID not found in backend config")
     print("Loaded device ID:",device_id)
     return device_id
+
+if __name__=="__main__":
+    get_device_id()
+
+
