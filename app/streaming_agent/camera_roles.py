@@ -13,9 +13,9 @@ def assign_camera_roles():
     for camera in cameras:
         usb_path=camera["usb_path"].lower()
         if INTERNAL_CAMERA_KEYWORDS in usb_path:
-            assigned_roles["internal"]=camera
+            assigned_roles["internal"]=camera["video_device"]
         elif EXTERNAL_CAMERA_KEYWORDS in usb_path:
-            assigned_roles["external"]=camera
+            assigned_roles["external"]=camera["video_device"]
         print(f"assigned roles:",assigned_roles)
     return assigned_roles
 
