@@ -3,7 +3,7 @@ from app.streaming_agent.camera_detector import detect_usb_cameras
 
 def test_usb_camera_detection(video_device):
     cmd=[
-        "ffmeg",
+        "ffmpeg",
         "-f","v4l2",
         "input_format","mjpeg",
         "video_size","1280x720",
