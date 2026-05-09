@@ -16,8 +16,5 @@ def assign_camera_roles():
             assigned_roles["internal"]=camera["video_device"]
         elif EXTERNAL_CAMERA_KEYWORDS in usb_path:
             assigned_roles["external"]=camera["video_device"]
-        print(f"assigned roles:",assigned_roles)
+        
     return assigned_roles
-
-if __name__=="__main__":
-    assign_camera_roles()
