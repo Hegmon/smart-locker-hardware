@@ -24,7 +24,4 @@ def get_device_id():
     print("Loaded device ID:",device_id)
     return device_id
 
-if __name__=="__main__":
-    get_device_id()
-
 
