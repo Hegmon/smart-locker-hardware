@@ -6,7 +6,7 @@ BASE_DIR=Path(__file__).parent.parent
 CONFIG_FILE=BASE_DIR / "config"
 
 
-BACKEND_CONFIG_FILE=CONFIG_FILE / "backend_config.json"
+BACKEND_CONFIG_FILE=CONFIG_FILE / "backend_device.json"
 
 
 def load_backend_device_config():
