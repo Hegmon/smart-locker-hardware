@@ -1,5 +1,5 @@
 import subprocess
-from app.streaming_agent.camera_detector import detect_usb_cameras
+from .camera_detector import detect_usb_cameras
 
 def test_usb_camera_detection(video_device):
     cmd=[
