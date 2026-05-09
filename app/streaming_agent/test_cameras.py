@@ -36,13 +36,13 @@ def main():
         return
     print("\nTesting USB Cameras:\n")
     for idx,camera in enumerate(cameras):
-        print(f"Testing Camera {idx+1}:{camera["name"]} at {camera["usb_path"]} with device {camera["device"]}")
+        print(f"Testing Camera {idx+1}:{camera["camera_name"]} at {camera["usb_path"]} with device {camera["device"]}")
         video_device=camera["device"]
         success,message=test_usb_camera_detection(video_device)
         if success:
-            print(f"Camera {camera['name']} passed the test.\n")
+            print(f"Camera {camera['camera_name']} passed the test.\n")
         else:
-            print(f"Camera {camera['name']} failed the test: {message}\n")
+            print(f"Camera {camera['camera_name']} failed the test: {message}\n")
 
 if __name__ == "__main__":
     main()
