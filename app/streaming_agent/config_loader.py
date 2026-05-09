@@ -21,3 +21,4 @@ def get_device_id():
         raise ValueError("Device ID not found in backend config")
     print("Loaded device ID:",device_id)
     return device_id
+get_device_id()
