@@ -17,7 +17,7 @@ class MQTTPublisher:
         stream_manager,
         health_monitor,
         broker_host="69.62.125.223",
-        broker_port=8554,
+        broker_port=1883,
         username=None,
         password=None,
         heartbeat_interval=10,
@@ -136,7 +136,7 @@ class MQTTPublisher:
             time.sleep(self.heartbeat_interval)
 
     def publish_device_status(self):
-      topic = f"devices/{self.device_uuid}/heartbeat"
+      topic = f"devices/{self.device_id}/heartbeat"
       payload = {
         "device_id": self.device_id,
         "status": "online",
@@ -145,12 +145,12 @@ class MQTTPublisher:
       self._publish(topic, payload)
 
     def publish_stream_status(self):
-       topic = f"devices/{self.device_uuid}/events/state"
+       topic = f"devices/{self.device_id}/events/state"
        payload = self.stream_manager.get_stream_status()
        self._publish(topic, payload)
 
     def publish_health_metrics(self):
-      topic = f"devices/{self.device_uuid}/services/health/response"
+      topic = f"devices/{self.device_id}/services/health/response"
       payload = self.health_monitor.get_metrics()
       self._publish(topic, payload)
 
