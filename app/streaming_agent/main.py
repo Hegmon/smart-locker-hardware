@@ -31,7 +31,7 @@ class StreamingAgent:
             stream_manager=self.stream_manager,
             health_monitor=self.health_monitor,
             broker_host="69.62.125.223",
-            broker_port=8554,
+            broker_port=1883,
             username=MQTT_USERNAME,
             password=MQTT_PASSWORD,
         )
