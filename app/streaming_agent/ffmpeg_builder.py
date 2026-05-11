@@ -28,7 +28,7 @@ def build_ffmpeg_command(video_device, camera_role):
     "-b:v", "800k",
     "-g", "30",
     "-keyint_min", "30",
-    "-rtsp_transport", "udp", 
+    "-rtsp_transport", "tcp", 
     "-f", "rtsp",
     rtsp_url,
 ]
