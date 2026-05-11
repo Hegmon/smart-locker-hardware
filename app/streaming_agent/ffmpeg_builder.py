@@ -20,7 +20,7 @@ def build_ffmpeg_command(video_device, camera_role):
     "-f", "v4l2",
     "-input_format", "mjpeg",
     "-video_size", "1280x720",
-    "-framerate", "30",
+    "-framerate", "20",
     "-i", video_device,
     "-c:v", "libx264",
     "-preset", "ultrafast",
