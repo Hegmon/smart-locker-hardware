@@ -16,33 +16,57 @@ class MQTTPublisher:
         self,
         stream_manager,
         health_monitor,
-        broker_host="localhost",
+        broker_host="69.62.125.223",
         broker_port=1883,
+        username=None,
+        password=None,
         heartbeat_interval=10,
+        reconnect_interval=5,
     ):
         self.device_id = get_device_id()
         self.stream_manager = stream_manager
         self.health_monitor = health_monitor
         self.broker_host = broker_host
         self.broker_port = broker_port
+        self.username = username
+        self.password = password
         self.heartbeat_interval = heartbeat_interval
+        self.reconnect_interval = reconnect_interval
+
         self.client = mqtt.Client(client_id=f"streaming-agent-{self.device_id}")
+        if self.username:
+            self.client.username_pw_set(self.username, self.password)
+
         self.running = False
+        self.connected = False
         self.thread = None
         self.lock = threading.Lock()
+
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
-        logger.info(
-            "Connected to MQTT broker at %s:%s with reason code %s",
-            self.broker_host,
-            self.broker_port,
-            reason_code,
-        )
+        self.connected = reason_code == 0
+        if self.connected:
+            logger.info(
+                "Connected to MQTT broker at %s:%s",
+                self.broker_host,
+                self.broker_port,
+            )
+        else:
+            logger.warning(
+                "MQTT connection failed to %s:%s with reason code %s",
+                self.broker_host,
+                self.broker_port,
+                reason_code,
+            )
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None):
-        logger.warning("Disconnected from MQTT broker with reason code %s", reason_code)
+        self.connected = False
+        if self.running:
+            logger.warning("Disconnected from MQTT broker with reason code %s", reason_code)
+        else:
+            logger.info("MQTT client disconnected")
 
     def start(self):
         with self.lock:
@@ -50,10 +74,10 @@ class MQTTPublisher:
                 logger.info("MQTT publisher is already running")
                 return
 
-            logger.info("Starting MQTT publisher")
-            self.client.connect(self.broker_host, self.broker_port, keepalive=60)
-            self.client.loop_start()
+            logger.info("Starting MQTT publisher for broker %s:%s", self.broker_host, self.broker_port)
             self.running = True
+            self.client.loop_start()
+            self._connect_async()
             self.thread = threading.Thread(target=self._publish_loop, daemon=True, name="mqtt-publisher")
             self.thread.start()
 
@@ -65,21 +89,50 @@ class MQTTPublisher:
 
             logger.info("Stopping MQTT publisher")
             self.running = False
-            self.client.loop_stop()
+
+        if self.thread:
+            self.thread.join(timeout=self.heartbeat_interval + 1)
+            self.thread = None
+
+        self.client.loop_stop()
+        try:
             self.client.disconnect()
-            if self.thread:
-                self.thread.join(timeout=self.heartbeat_interval + 1)
-                self.thread = None
-            logger.info("MQTT publisher stopped successfully")
+        except Exception:
+            logger.exception("Error while disconnecting MQTT client")
+
+        self.connected = False
+        logger.info("MQTT publisher stopped successfully")
+
+    def _connect_async(self):
+        try:
+            self.client.connect_async(self.broker_host, self.broker_port, keepalive=60)
+            logger.info("MQTT async connect requested for %s:%s", self.broker_host, self.broker_port)
+        except Exception:
+            logger.exception("Failed to schedule MQTT async connect")
 
     def _publish_loop(self):
         while self.running:
             try:
+                if not self.connected:
+                    logger.warning(
+                        "MQTT broker %s:%s unavailable, retrying in background",
+                        self.broker_host,
+                        self.broker_port,
+                    )
+                    try:
+                        self.client.reconnect()
+                    except Exception:
+                        logger.debug("MQTT reconnect attempt failed", exc_info=True)
+                        self._connect_async()
+                    time.sleep(self.reconnect_interval)
+                    continue
+
                 self.publish_device_status()
                 self.publish_stream_status()
                 self.publish_health_metrics()
             except Exception:
                 logger.exception("MQTT publishing error")
+
             time.sleep(self.heartbeat_interval)
 
     def publish_device_status(self):
@@ -102,6 +155,10 @@ class MQTTPublisher:
         self._publish(topic, payload)
 
     def _publish(self, topic, payload):
+        if not self.connected:
+            logger.warning("Skipping MQTT publish to %s because broker is not connected", topic)
+            return
+
         message = json.dumps(payload)
         result = self.client.publish(topic, message, qos=1)
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
