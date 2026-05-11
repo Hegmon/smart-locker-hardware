@@ -2,6 +2,7 @@ import signal
 import sys
 import time
 
+from app.core.config import MQTT_HOST, MQTT_PASSWORD, MQTT_PORT, MQTT_USERNAME
 from app.streaming_agent.health_monitor import HealthMonitor
 from app.streaming_agent.hot_plug_monitor import HotPlugMonitor
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
@@ -29,8 +30,10 @@ class StreamingAgent:
         self.mqtt_publisher = MQTTPublisher(
             stream_manager=self.stream_manager,
             health_monitor=self.health_monitor,
-            broker_host="localhost",
-            broker_port=1883,
+            broker_host=MQTT_HOST,
+            broker_port=MQTT_PORT,
+            username=MQTT_USERNAME,
+            password=MQTT_PASSWORD,
         )
         logger.info("Streaming agent initialized successfully")
 
