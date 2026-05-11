@@ -30,8 +30,8 @@ class StreamingAgent:
         self.mqtt_publisher = MQTTPublisher(
             stream_manager=self.stream_manager,
             health_monitor=self.health_monitor,
-            broker_host=MQTT_HOST,
-            broker_port=MQTT_PORT,
+            broker_host="69.62.125.223",
+            broker_port=8554,
             username=MQTT_USERNAME,
             password=MQTT_PASSWORD,
         )
