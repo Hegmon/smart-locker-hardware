@@ -15,39 +15,35 @@ def build_ffmpeg_command(video_device, camera_role):
     return  [
     "ffmpeg",
     "-loglevel", "warning",
-
+ 
     # Low latency
     "-fflags", "nobuffer",
     "-flags", "low_delay",
-
+ 
     # Camera input
     "-f", "v4l2",
     "-input_format", "mjpeg",
     "-video_size", "1280x720",
-    "-framerate", "50",
+    "-framerate", "20",
     "-i", video_device,
-
+ 
     "-an",
-
-    # Encoder
-    "-c:v", "libx264",
-    "-preset", "veryfast",          # better quality than ultrafast
-    "-tune", "zerolatency",
-
+ 
+    # Hardware encoder (IMPORTANT)
+    "-c:v", "h264_v4l2m2m",
+ 
+    # Low latency tuning
     "-pix_fmt", "yuv420p",
-    "-profile:v", "main",
-
-    # Quality settings
-    "-b:v", "2500k",
-    "-maxrate", "3000k",
-    "-bufsize", "6000k",
-
+ 
+    # Bitrate
+    "-b:v", "1200k",
+    "-maxrate", "1200k",
+    "-bufsize", "2400k",
+ 
     # GOP
-    "-g", "30",
-    "-keyint_min", "30",
-    "-sc_threshold", "0",
+    "-g", "40",
     "-bf", "0",
-
+ 
     # RTSP output
     "-rtsp_transport", "tcp",
     "-f", "rtsp",
