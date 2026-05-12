@@ -363,11 +363,11 @@ def _create_wifi_profile(ssid: str, password: str) -> None:
             "modify",
             "id",
             ssid,
-            "802-11-wireless-security.key-mgmt",
+            "wifi-sec.key-mgmt",
             "wpa-psk",
-            "802-11-wireless-security.psk",
+            "wifi-sec.psk",
             password,
-            "802-11-wireless-security.psk-flags",
+            "wifi-sec.psk-flags",
             "0",
         ], timeout=8, require_root=True)
 
@@ -379,8 +379,13 @@ def _raise_classified_wifi_error(ssid: str, error: Exception) -> None:
         "secrets were required" in lowered
         or "no secrets" in lowered
         or "802-11-wireless-security.psk" in lowered
+        or "wifi-sec.psk" in lowered
+        or "802-11-wireless-security" in lowered
         or "wrong password" in lowered
+        or "wrong or missing" in lowered
         or "password" in lowered and "not given" in lowered
+        or "auth" in lowered and "fail" in lowered
+        or "secrets" in lowered
     ):
         raise WifiAuthenticationError(f"Authentication failed for {ssid}: wrong or missing WiFi password") from error
     raise WifiCommandError(text) from error
@@ -483,6 +488,14 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
         try:
             if password:
                 _create_wifi_profile(ssid, password)
+                verify = _nmcli(
+                    ["-g", "802-11-wireless-security.psk-flags", "connection", "show", "id", ssid],
+                    check=False,
+                    timeout=5,
+                    require_root=True,
+                )
+                if verify.returncode != 0 or verify.stdout.strip() not in {"0", ""}:
+                    raise WifiAuthenticationError(f"Authentication failed for {ssid}: WiFi password was not stored")
             elif not _saved_profile_exists(ssid):
                 raise WifiAuthenticationError(f"Authentication failed for {ssid}: password required for new network")
 
