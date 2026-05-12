@@ -35,6 +35,7 @@ class BLEHandler:
         networks = self.scanner.scan()
 
         return {
+            "status": "success",
             "networks": [
                 {
                     "ssid": n.ssid,
@@ -49,7 +50,7 @@ class BLEHandler:
     # ===================== CONNECT =====================
     def _connect_wifi(self, ssid: str, password: str) -> Dict[str, Any]:
         if not ssid:
-            return {"error": "ssid_required"}
+            return {"status": "failed", "error": "ssid_required"}
 
         try:
             result = connect_wifi(ssid, password)
