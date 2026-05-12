@@ -7,6 +7,7 @@ from typing import Any
 import subprocess
 
 from app.deployment.runtime_config import get_str_setting
+from app.utils.logger import get_logger
 
 #========================================================================================
 # CONFIG
@@ -17,6 +18,7 @@ DEFAULT_HOTSPOT_CONNECTION = get_str_setting("HOTSPOT_CONNECTION", "SmartLockerH
 DEFAULT_HOTSPOT_SSID = get_str_setting("HOTSPOT_SSID", "SmartLocker-Setup")
 DEFAULT_HOTSPOT_PASSWORD = get_str_setting("HOTSPOT_PASSWORD", "SmartLocker123")
 _WIFI_LOCK = threading.Lock()
+logger = get_logger(__name__)
 
 #=================================================================================
 # EXCEPTION
@@ -138,14 +140,16 @@ def get_connected_wifi_details() -> dict[str, Any]:
         "connected": False,
         "connected_ssid": "",
         "signal_strength": 0,
+        "rssi": 0,
         "is_secured": False,
+        "ip_address": "",
     }
     try:
         result = _run([
             "nmcli",
             "-t",
             "-f",
-            "GENERAL.CONNECTION,GENERAL.STATE",
+            "GENERAL.CONNECTION,GENERAL.STATE,IP4.ADDRESS[1]",
             "device",
             "show",
             DEFAULT_INTERFACE,
@@ -157,6 +161,11 @@ def get_connected_wifi_details() -> dict[str, Any]:
                 if ssid and ssid != "--":
                     data["connected"] = True
                     data["connected_ssid"] = ssid
+            elif "IP4.ADDRESS" in line:
+                parts = line.split(":", 1)
+                address = (parts[1].strip() if len(parts) > 1 else "")
+                if address:
+                    data["ip_address"] = address.split("/", 1)[0]
 
         signal = _run([
             "nmcli",
@@ -179,6 +188,31 @@ def get_connected_wifi_details() -> dict[str, Any]:
         return data
 
     return data
+
+
+def list_saved_wifi_networks() -> list[str]:
+    ensure_wifi_radio()
+    result = _run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"])
+    saved_ssids: list[str] = []
+    seen: set[str] = set()
+
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(":", 1)
+        if len(parts) != 2:
+            continue
+        name, connection_type = parts
+        ssid = name.strip()
+        if connection_type.strip() != "802-11-wireless":
+            continue
+        if not ssid or ssid == DEFAULT_HOTSPOT_CONNECTION or ssid in seen:
+            continue
+        seen.add(ssid)
+        saved_ssids.append(ssid)
+
+    logger.info("Saved WiFi profiles detected: %s", saved_ssids)
+    return saved_ssids
 
 
 # =========================================================
@@ -236,6 +270,7 @@ def stop_hotspot() -> None:
 def reconnect_saved_wifi(ssid: str) -> dict[str, Any]:
     def _connect():
         ensure_wifi_radio()
+        stop_hotspot()
 
         result = _run(
             ["nmcli", "dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE],
