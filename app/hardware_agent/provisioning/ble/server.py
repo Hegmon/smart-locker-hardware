@@ -24,7 +24,7 @@ ADAPTER_PATH = "/org/bluez/hci0"
 
 class Application(dbus.service.Object):
     def __init__(self, bus):
-        self.path = "/"
+        self.path = "/org/bluez/example"
         self.services = []
         super().__init__(bus, self.path)
 
@@ -91,12 +91,8 @@ class BLEServer:
                 self.bus.get_object(BLUEZ_SERVICE_NAME, ADAPTER_PATH),
                 "org.bluez.GattManager1",
             )
-            service_manager.RegisterApplication(
-                app.path,
-                {},
-                reply_handler=lambda: logger.info("BLE GATT registered"),
-                error_handler=lambda error: logger.error("BLE GATT register error: %s", error),
-            )
+            service_manager.RegisterApplication(app.path, {})
+            logger.info("BLE GATT registered")
 
             ad_manager = dbus.Interface(
                 self.bus.get_object(BLUEZ_SERVICE_NAME, ADAPTER_PATH),
@@ -108,17 +104,14 @@ class BLEServer:
                 service_uuid=SERVICE_UUID,
                 device_name=device_name,
             )
-            ad_manager.RegisterAdvertisement(
-                self.advertisement.get_path(),
-                {},
-                reply_handler=self._on_advertisement_registered,
-                error_handler=lambda error: logger.error("BLE advertisement register error: %s", error),
-            )
+            ad_manager.RegisterAdvertisement(self.advertisement.get_path(), {})
+            self._on_advertisement_registered()
 
             self.loop.run()
 
         except Exception:
             logger.exception("BLE server failed")
+            self._disable_bluetooth()
         finally:
             with self._lock:
                 self._running = False
