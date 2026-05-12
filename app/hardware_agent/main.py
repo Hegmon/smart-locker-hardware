@@ -513,9 +513,11 @@ class WifiUploadAgent:
                 except WifiCommandError as exc:
                     logger.warning("WiFi connect failed for %s: %s", ssid, exc)
                     last_error = str(exc)
+                    self.saved_networks.mark_failure(ssid, last_error)
                 except Exception as exc:
                     logger.exception("Unexpected WiFi connect failure for %s", ssid)
                     last_error = str(exc)
+                    self.saved_networks.mark_failure(ssid, last_error)
 
                 current_status = get_connected_wifi_details()
                 if current_status.get("connected_ssid") == ssid and self._internet_is_available(force=True):
