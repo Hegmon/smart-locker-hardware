@@ -302,7 +302,7 @@ def reconnect_saved_wifi(ssid: str) -> dict[str, Any]:
         }
 
     with _WIFI_LOCK:
-        return _retry(_connect)
+        return _retry(_connect, retires=1)
 
 
 # =========================================================
@@ -330,7 +330,7 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
         }
 
     with _WIFI_LOCK:
-        return _retry(_connect)
+        return _retry(_connect, retires=1)
 
 
 # =================================================================================
