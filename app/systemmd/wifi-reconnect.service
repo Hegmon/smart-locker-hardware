@@ -13,6 +13,7 @@ User=root
 WorkingDirectory=/opt/smart-locker-hardware
 
 Environment=PYTHONUNBUFFERED=1
+Environment=ENABLE_LEGACY_HOTSPOT_RECONNECT=false
 ExecStart=/opt/smart-locker-hardware/.venv/bin/python -m app.services.reconnect
 
 Restart=always
