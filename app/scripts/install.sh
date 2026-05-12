@@ -160,8 +160,10 @@ sudo cp "$WIFI_UNIT_TMP" /etc/systemd/system/wifi-reconnect.service
 sudo cp "$WIFI_UPLOAD_UNIT_TMP" /etc/systemd/system/wifi-upload-agent.service
 
 sudo systemctl daemon-reload
-sudo systemctl enable fastapi.service wifi-reconnect.service wifi-upload-agent.service
-sudo systemctl restart fastapi.service wifi-reconnect.service wifi-upload-agent.service
+sudo systemctl enable fastapi.service wifi-upload-agent.service
+sudo systemctl disable wifi-reconnect.service || true
+sudo systemctl stop wifi-reconnect.service || true
+sudo systemctl restart fastapi.service wifi-upload-agent.service
 
 # =========================================================
 # OPTIONAL: Streaming components (MediaMTX + Streaming Agent)
