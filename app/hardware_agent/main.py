@@ -112,6 +112,10 @@ class WifiUploadAgent:
         self.mqtt.connect()
         self.mqtt.wait_until_connected(timeout_seconds=3.0)
         self._running = True
+        initial_status = get_connected_wifi_details()
+        self._handle_wifi_observation(initial_status, source="startup")
+        if initial_status.get("connected_ssid"):
+            self.publish_status(connected=initial_status, force=True)
 
         threading.Thread(target=self._watchdog_loop, daemon=True, name="wifi-watchdog").start()
         threading.Thread(target=self._heartbeat_loop, daemon=True, name="wifi-heartbeat").start()
@@ -184,6 +188,9 @@ class WifiUploadAgent:
                 reason=f"WiFi connected via {source}",
                 connected_ssid=connected_ssid,
             )
+            if not transitioned and (self._ble_active or self.ble.is_bluetooth_enabled() or self.ble.is_advertising()):
+                logger.info("WiFi is connected on %s, forcing BLE shutdown", connected_ssid)
+                self._stop_ble()
             if transitioned:
                 self._publish_connectivity_snapshot(status)
             return
