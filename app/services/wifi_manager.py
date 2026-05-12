@@ -271,11 +271,26 @@ def reconnect_saved_wifi(ssid: str) -> dict[str, Any]:
     def _connect():
         ensure_wifi_radio()
         stop_hotspot()
-
-        result = _run(
+        commands = [
+            ["nmcli", "connection", "up", ssid, "ifname", DEFAULT_INTERFACE],
+            ["nmcli", "connection", "up", "id", ssid, "ifname", DEFAULT_INTERFACE],
             ["nmcli", "dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE],
-            timeout=30,
-        )
+        ]
+        last_error: Exception | None = None
+        result: subprocess.CompletedProcess[str] | None = None
+
+        for command in commands:
+            try:
+                result = _run(command, timeout=30)
+                logger.info("Saved WiFi reconnect command succeeded for %s via: %s", ssid, _redact_command(command))
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Saved WiFi reconnect command failed for %s via %s: %s", ssid, _redact_command(command), exc)
+
+        if result is None:
+            raise WifiCommandError(f"Reconnect failed:{ssid}: {last_error}")
+
         if not _wait_for_connection(ssid, timeout=25):
             raise WifiCommandError(f"Reconnect failed:{ssid}")
         return {
