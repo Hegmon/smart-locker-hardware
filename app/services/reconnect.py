@@ -1,14 +1,18 @@
 import os
 import time
 
-from app.deployment.runtime_config import get_int_setting
+from app.deployment.runtime_config import get_bool_setting, get_int_setting
 from app.services.wifi_manager import WifiCommandError, get_wifi_status, is_wifi_connected, start_hotspot, stop_hotspot
 
 
 CHECK_INTERVAL_SECONDS = get_int_setting("WIFI_CHECK_INTERVAL_SECONDS", 15)
+ENABLE_LEGACY_HOTSPOT_RECONNECT = get_bool_setting("ENABLE_LEGACY_HOTSPOT_RECONNECT", False)
 
 
 def maintain_network_mode() -> None:
+    if not ENABLE_LEGACY_HOTSPOT_RECONNECT:
+        return
+
     status = get_wifi_status()
     if is_wifi_connected():
         if status["hotspot_active"]:
