@@ -12,6 +12,7 @@ MQTT_PORT="${MQTT_PORT:-1883}"
 FASTAPI_UNIT_TMP="$(mktemp)"
 WIFI_UNIT_TMP="$(mktemp)"
 WIFI_UPLOAD_UNIT_TMP="$(mktemp)"
+POLKIT_RULE_SRC="$PROJECT_DIR/deploy/polkit/49-smartlocker-networkmanager.rules"
 
 cleanup() {
   rm -f "$FASTAPI_UNIT_TMP" "$WIFI_UNIT_TMP" "$WIFI_UPLOAD_UNIT_TMP"
@@ -64,6 +65,16 @@ sudo systemctl start bluetooth
 
 sudo systemctl enable NetworkManager
 sudo systemctl start NetworkManager
+
+echo "🔐 Configuring passwordless NetworkManager control for smart locker agent..."
+sudo groupadd -f netdev
+sudo usermod -aG netdev "$(whoami)" || true
+if [ -f "$POLKIT_RULE_SRC" ]; then
+  sudo install -m 0644 "$POLKIT_RULE_SRC" /etc/polkit-1/rules.d/49-smartlocker-networkmanager.rules
+  sudo systemctl restart polkit || sudo systemctl restart polkit.service || true
+else
+  echo "⚠️ Polkit rule not found at $POLKIT_RULE_SRC"
+fi
 
 echo "🐍 Creating Python virtual environment..."
 if [ -d "$VENV_DIR" ]; then
