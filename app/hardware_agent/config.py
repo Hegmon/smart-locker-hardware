@@ -206,7 +206,7 @@ def load_agent_config() -> AgentConfig:
         connectivity_http_url=QBOX_WIFI_AGENT_CONNECTIVITY_HTTP_URL,
         ble_discoverable_timeout_seconds=_clamp(QBOX_WIFI_AGENT_BLE_DISCOVERABLE_TIMEOUT_SECONDS, 30),
         ble_reenable_after_timeout=QBOX_WIFI_AGENT_BLE_REENABLE_AFTER_TIMEOUT,
-        wifi_connect_timeout_seconds=_clamp(QBOX_WIFI_AGENT_WIFI_CONNECT_TIMEOUT_SECONDS, 10),
+        wifi_connect_timeout_seconds=_clamp(QBOX_WIFI_AGENT_WIFI_CONNECT_TIMEOUT_SECONDS, 8),
 
         # -------- RETRY --------
         retry_max_attempts=_clamp(QBOX_WIFI_AGENT_RETRY_MAX_ATTEMPTS, 3),
