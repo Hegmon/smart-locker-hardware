@@ -55,6 +55,7 @@ class BLEServer:
         self._running = False
         self._bluetooth_enabled = False
         self._advertising_active = False
+        self._gatt_registered = False
         self._lock = threading.RLock()
 
     def start_async(self) -> bool:
@@ -91,21 +92,12 @@ class BLEServer:
                 self.bus.get_object(BLUEZ_SERVICE_NAME, ADAPTER_PATH),
                 "org.bluez.GattManager1",
             )
-            service_manager.RegisterApplication(app.path, {})
-            logger.info("BLE GATT registered")
-
-            ad_manager = dbus.Interface(
-                self.bus.get_object(BLUEZ_SERVICE_NAME, ADAPTER_PATH),
-                "org.bluez.LEAdvertisingManager1",
+            service_manager.RegisterApplication(
+                app.path,
+                {},
+                reply_handler=lambda: self._on_gatt_registered(device_name),
+                error_handler=self._on_gatt_registration_error,
             )
-            self.advertisement = Advertisement(
-                self.bus,
-                index=0,
-                service_uuid=SERVICE_UUID,
-                device_name=device_name,
-            )
-            ad_manager.RegisterAdvertisement(self.advertisement.get_path(), {})
-            self._on_advertisement_registered()
 
             self.loop.run()
 
@@ -119,6 +111,7 @@ class BLEServer:
                 self.loop = None
                 self._thread = None
                 self._advertising_active = False
+                self._gatt_registered = False
             logger.info("BLE provisioning server stopped")
 
     def stop(self) -> bool:
@@ -177,8 +170,8 @@ class BLEServer:
 
         self._set_adapter_property(adapter, "Alias", device_name, required=False)
         self._set_adapter_property(adapter, "Powered", dbus.Boolean(1), required=True)
-        self._set_adapter_property(adapter, "Pairable", dbus.Boolean(1), required=False)
-        self._set_adapter_property(adapter, "Discoverable", dbus.Boolean(1), required=False)
+        self._set_adapter_property(adapter, "Pairable", dbus.Boolean(0), required=False)
+        self._set_adapter_property(adapter, "Discoverable", dbus.Boolean(0), required=False)
         self._set_adapter_property(adapter, "DiscoverableTimeout", dbus.UInt32(0), required=False)
         self._set_adapter_property(adapter, "PairableTimeout", dbus.UInt32(0), required=False)
 
@@ -225,6 +218,59 @@ class BLEServer:
         with self._lock:
             self._advertising_active = True
         logger.info("BLE advertising started")
+
+    def _on_gatt_registered(self, device_name: str) -> None:
+        with self._lock:
+            self._gatt_registered = True
+        logger.info("BLE GATT registered")
+
+        try:
+            ad_manager = dbus.Interface(
+                self.bus.get_object(BLUEZ_SERVICE_NAME, ADAPTER_PATH),
+                "org.bluez.LEAdvertisingManager1",
+            )
+            self.advertisement = Advertisement(
+                self.bus,
+                index=0,
+                service_uuid=SERVICE_UUID,
+                device_name=device_name,
+            )
+            ad_manager.RegisterAdvertisement(
+                self.advertisement.get_path(),
+                {},
+                reply_handler=self._on_advertisement_ready,
+                error_handler=self._on_advertisement_error,
+            )
+        except Exception:
+            logger.exception("BLE advertisement registration setup failed")
+            self._shutdown_failed_ble()
+
+    def _on_advertisement_ready(self) -> None:
+        try:
+            adapter = self._get_adapter()
+            self._set_adapter_property(adapter, "Pairable", dbus.Boolean(1), required=False)
+            self._set_adapter_property(adapter, "Discoverable", dbus.Boolean(1), required=False)
+            self._on_advertisement_registered()
+        except Exception:
+            logger.exception("BLE advertisement activation failed")
+            self._shutdown_failed_ble()
+
+    def _on_gatt_registration_error(self, error) -> None:
+        logger.error("BLE GATT register error: %s", error)
+        self._shutdown_failed_ble()
+
+    def _on_advertisement_error(self, error) -> None:
+        logger.error("BLE advertisement register error: %s", error)
+        self._shutdown_failed_ble()
+
+    def _shutdown_failed_ble(self) -> None:
+        self._disable_bluetooth()
+        loop = self.loop
+        if loop is not None and loop.is_running():
+            try:
+                loop.quit()
+            except Exception:
+                logger.exception("BLE loop stop failed during error shutdown")
 
     @staticmethod
     def _run_best_effort(command: list[str]) -> None:
