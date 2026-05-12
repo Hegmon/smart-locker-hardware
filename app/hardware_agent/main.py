@@ -126,6 +126,8 @@ class WifiUploadAgent:
         self._ble_started_at = 0.0
         self._last_internet_check_at = 0.0
         self._last_internet_online = False
+        self._manual_connect_active = False
+        self._auto_reconnect_deferred = False
 
         self.mqtt.register_command_handler(self.handle_command)
         self.mqtt.register_ble_fallback_handler(self._handle_mqtt_reconnect_pressure)
@@ -175,6 +177,19 @@ class WifiUploadAgent:
 
         logger.info("Startup internet unavailable; scanning saved WiFi before BLE provisioning")
         if self._attempt_best_saved_reconnect(source="startup", allow_roam=True):
+            return get_connected_wifi_details()
+
+        if self._should_pause_automatic_wifi():
+            logger.info("Startup WiFi recovery paused because a remote WiFi command is active")
+            self._transition_to(NetworkState.DISCONNECTED, reason="startup paused for remote WiFi command")
+            return get_connected_wifi_details()
+
+        if self._has_saved_wifi_profiles():
+            self._transition_to(
+                NetworkState.ERROR_BACKOFF,
+                reason="startup saved WiFi profiles exist; BLE provisioning suppressed",
+            )
+            self._ensure_recovery_running(reason="startup saved WiFi retry backoff")
             return get_connected_wifi_details()
 
         self._transition_to(
@@ -280,7 +295,7 @@ class WifiUploadAgent:
         with self._state_lock:
             current_state = self.network_state
 
-        if current_state == NetworkState.DISCONNECTED:
+        if current_state == NetworkState.DISCONNECTED and not self._should_pause_automatic_wifi():
             self._ensure_recovery_running(reason="MQTT reconnect pressure while offline")
 
     def _ensure_recovery_running(self, reason: str) -> bool:
@@ -301,9 +316,22 @@ class WifiUploadAgent:
         try:
             if self._is_connected():
                 return
+            if self._should_pause_automatic_wifi():
+                logger.info("Recovery paused because a remote WiFi command is active")
+                return
 
             self._transition_to(NetworkState.SCANNING_SAVED_NETWORKS, reason="recovery scanning saved WiFi")
             if self._attempt_best_saved_reconnect(source="recovery", allow_roam=False):
+                return
+            if self._should_pause_automatic_wifi():
+                logger.info("Recovery will not enter BLE while a remote WiFi command is active")
+                return
+            if self._has_saved_wifi_profiles():
+                self._transition_to(
+                    NetworkState.ERROR_BACKOFF,
+                    reason="saved WiFi profiles exist; BLE provisioning suppressed",
+                )
+                self._retry_saved_networks_without_ble()
                 return
 
             self._transition_to(
@@ -323,6 +351,9 @@ class WifiUploadAgent:
 
                 now = time.monotonic()
                 if now >= next_saved_retry_at:
+                    if self._should_pause_automatic_wifi():
+                        next_saved_retry_at = now + self.config.reconnect_interval_seconds
+                        continue
                     if self._attempt_best_saved_reconnect(source="recovery-retry", allow_roam=True):
                         return
                     next_saved_retry_at = now + self.config.reconnect_interval_seconds
@@ -453,99 +484,115 @@ class WifiUploadAgent:
                 self.publish_command_result(command_id, "FAILED", "", "ssid is required", None)
             return response
 
-        with self._command_lock:
-            self._transition_to(NetworkState.CONNECTING, reason=f"Remote WiFi connect for {ssid}")
+        with self._state_lock:
+            self._manual_connect_active = True
+            self._auto_reconnect_deferred = False
 
-            try:
-                result = connect_wifi(ssid, password)
-                connected = result.get("connection") if isinstance(result, dict) else {}
-                connected = connected or get_connected_wifi_details()
-                if not connected.get("connected_ssid") or not self._internet_is_available(force=True):
-                    raise WifiCommandError(f"Connected to {ssid} but internet validation failed")
-                self._handle_wifi_observation(connected, source="mqtt")
-
-                response = {
-                    "status": "SUCCESS",
-                    "ssid": ssid,
-                    "message": "Connected",
-                    "details": result,
-                }
-                if command_id:
-                    self.publish_command_result(command_id, "SUCCESS", ssid, "Connected", result)
-                return response
-
-            except WifiCommandError as exc:
-                logger.warning("WiFi connect failed for %s: %s", ssid, exc)
-                last_error = str(exc)
-            except Exception as exc:
-                logger.exception("Unexpected WiFi connect failure for %s", ssid)
-                last_error = str(exc)
-
-            current_status = get_connected_wifi_details()
-            if current_status.get("connected_ssid") == ssid and self._internet_is_available(force=True):
-                self._handle_wifi_observation(current_status, source="mqtt-late-success")
-                response = {
-                    "status": "SUCCESS",
-                    "ssid": ssid,
-                    "message": "Connected",
-                    "details": {"late_success": True, "error": last_error},
-                }
-                if command_id:
-                    self.publish_command_result(
-                        command_id,
-                        "SUCCESS",
-                        ssid,
-                        "Connected",
-                        {"late_success": True, "error": last_error},
-                    )
-                return response
-
-            if previous and previous != ssid:
+        try:
+            with self._command_lock:
+                self._transition_to(NetworkState.CONNECTING, reason=f"Remote WiFi connect for {ssid}")
                 try:
-                    result = reconnect_saved_wifi(previous)
+                    result = connect_wifi(ssid, password)
                     connected = result.get("connection") if isinstance(result, dict) else {}
                     connected = connected or get_connected_wifi_details()
                     if not connected.get("connected_ssid") or not self._internet_is_available(force=True):
-                        raise WifiCommandError(f"Fallback to {previous} failed internet validation")
-                    self._handle_wifi_observation(connected, source="mqtt-fallback")
+                        raise WifiCommandError(f"Connected to {ssid} but internet validation failed")
+                    self._handle_wifi_observation(connected, source="mqtt")
+                    self._schedule_best_network_check(reason=f"post remote connect {ssid}")
 
                     response = {
                         "status": "SUCCESS",
-                        "ssid": previous,
-                        "message": "Fallback to previous WiFi",
-                        "details": {"fallback": True, "result": result, "error": last_error},
+                        "ssid": ssid,
+                        "message": "Connected",
+                        "details": result,
+                    }
+                    if command_id:
+                        self.publish_command_result(command_id, "SUCCESS", ssid, "Connected", result)
+                    return response
+
+                except WifiCommandError as exc:
+                    logger.warning("WiFi connect failed for %s: %s", ssid, exc)
+                    last_error = str(exc)
+                except Exception as exc:
+                    logger.exception("Unexpected WiFi connect failure for %s", ssid)
+                    last_error = str(exc)
+
+                current_status = get_connected_wifi_details()
+                if current_status.get("connected_ssid") == ssid and self._internet_is_available(force=True):
+                    self._handle_wifi_observation(current_status, source="mqtt-late-success")
+                    self._schedule_best_network_check(reason=f"post late remote connect {ssid}")
+                    response = {
+                        "status": "SUCCESS",
+                        "ssid": ssid,
+                        "message": "Connected",
+                        "details": {"late_success": True, "error": last_error},
                     }
                     if command_id:
                         self.publish_command_result(
                             command_id,
                             "SUCCESS",
-                            previous,
-                            "Fallback to previous WiFi",
-                            {"fallback": True, "result": result, "error": last_error},
+                            ssid,
+                            "Connected",
+                            {"late_success": True, "error": last_error},
                         )
                     return response
-                except Exception as exc:
-                    logger.warning("Fallback reconnect failed for %s: %s", previous, exc)
 
-            self._transition_to(
-                NetworkState.BLE_PROVISIONING,
-                reason=f"Remote WiFi connect failed for {ssid}",
-            )
-            response = {
-                "status": "FAILED",
-                "ssid": ssid,
-                "message": "Failed -> switched to BLE provisioning",
-                "details": {"error": last_error},
-            }
-            if command_id:
-                self.publish_command_result(
-                    command_id,
-                    "FAILED",
-                    ssid,
-                    "Failed -> switched to BLE provisioning",
-                    {"error": last_error},
-                )
-            return response
+                if previous and previous != ssid:
+                    try:
+                        result = reconnect_saved_wifi(previous)
+                        connected = result.get("connection") if isinstance(result, dict) else {}
+                        connected = connected or get_connected_wifi_details()
+                        if not connected.get("connected_ssid") or not self._internet_is_available(force=True):
+                            raise WifiCommandError(f"Fallback to {previous} failed internet validation")
+                        self._handle_wifi_observation(connected, source="mqtt-fallback")
+
+                        response = {
+                            "status": "SUCCESS",
+                            "ssid": previous,
+                            "message": "Fallback to previous WiFi",
+                            "details": {"fallback": True, "result": result, "error": last_error},
+                        }
+                        if command_id:
+                            self.publish_command_result(
+                                command_id,
+                                "SUCCESS",
+                                previous,
+                                "Fallback to previous WiFi",
+                                {"fallback": True, "result": result, "error": last_error},
+                            )
+                        return response
+                    except Exception as exc:
+                        logger.warning("Fallback reconnect failed for %s: %s", previous, exc)
+
+                if self._has_saved_wifi_profiles():
+                    self._transition_to(
+                        NetworkState.ERROR_BACKOFF,
+                        reason=f"Remote WiFi connect failed for {ssid}; saved profiles exist",
+                    )
+                else:
+                    self._transition_to(
+                        NetworkState.BLE_PROVISIONING,
+                        reason=f"Remote WiFi connect failed for {ssid}",
+                    )
+                response = {
+                    "status": "FAILED",
+                    "ssid": ssid,
+                    "message": "Failed",
+                    "details": {"error": last_error},
+                }
+                if command_id:
+                    self.publish_command_result(
+                        command_id,
+                        "FAILED",
+                        ssid,
+                        "Failed",
+                        {"error": last_error},
+                    )
+                return response
+        finally:
+            with self._state_lock:
+                self._manual_connect_active = False
+                self._auto_reconnect_deferred = False
 
     def _handle_wifi_scan_command(self) -> dict[str, Any]:
         networks = self.scanner.scan()
@@ -694,6 +741,9 @@ class WifiUploadAgent:
 
         if current_state == NetworkState.HOTSPOT or recovery_in_progress:
             return
+        if self._should_pause_automatic_wifi():
+            logger.info("Skipping saved WiFi switch because a remote WiFi command is active")
+            return
 
         current_ssid = str(connected.get("connected_ssid") or "").strip() or None
         current_rssi = self._network_rssi(networks, current_ssid)
@@ -715,6 +765,12 @@ class WifiUploadAgent:
         self._attempt_saved_wifi_reconnect(policy_candidate.ssid, source="priority", reason=reason)
 
     def _attempt_best_saved_reconnect(self, source: str, allow_roam: bool) -> bool:
+        if self._should_pause_automatic_wifi():
+            logger.info("Saved WiFi reconnect paused for %s because a remote WiFi command is active", source)
+            with self._state_lock:
+                self._auto_reconnect_deferred = True
+            return False
+
         networks = self.scanner.scan()
         connected = get_connected_wifi_details()
         current_ssid = str(connected.get("connected_ssid") or "").strip() or None
@@ -749,6 +805,8 @@ class WifiUploadAgent:
     def _attempt_saved_wifi_reconnect(self, ssid: str, *, source: str, reason: str) -> bool:
         if not self._command_lock.acquire(blocking=False):
             logger.info("Skipping WiFi reconnect to %s because another network command is active", ssid)
+            with self._state_lock:
+                self._auto_reconnect_deferred = True
             return False
 
         try:
@@ -773,6 +831,45 @@ class WifiUploadAgent:
             return False
         finally:
             self._command_lock.release()
+
+    def _retry_saved_networks_without_ble(self) -> None:
+        while self._running:
+            time.sleep(self.config.reconnect_interval_seconds)
+            if self._should_pause_automatic_wifi():
+                continue
+            if self._is_connected():
+                return
+            if not self._has_saved_wifi_profiles():
+                self._transition_to(
+                    NetworkState.BLE_PROVISIONING,
+                    reason="no saved WiFi profiles remain; provisioning required",
+                )
+                return
+            self._attempt_best_saved_reconnect(source="saved-retry", allow_roam=True)
+
+    def _schedule_best_network_check(self, *, reason: str) -> None:
+        def _run_check() -> None:
+            time.sleep(3)
+            try:
+                networks = self.scanner.scan()
+                connected = get_connected_wifi_details()
+                self._maybe_switch_to_best_saved_network(networks, connected)
+            except Exception:
+                logger.exception("Post-connect best saved WiFi check failed")
+
+        logger.info("Scheduling best saved WiFi check: %s", reason)
+        threading.Thread(target=_run_check, daemon=True, name="wifi-post-connect-roam").start()
+
+    def _should_pause_automatic_wifi(self) -> bool:
+        with self._state_lock:
+            return self._manual_connect_active
+
+    def _has_saved_wifi_profiles(self) -> bool:
+        try:
+            return bool(self.saved_networks.list())
+        except Exception:
+            logger.exception("Saved WiFi profile check failed")
+            return False
 
     def _select_best_saved_network(self, networks: list[object]):
         candidates = self._build_saved_wifi_candidates(networks)
