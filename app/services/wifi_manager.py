@@ -6,7 +6,7 @@ import threading
 from typing import Any
 import subprocess
 
-from app.deployment.runtime_config import get_str_setting
+from app.deployment.runtime_config import get_int_setting, get_str_setting
 from app.utils.logger import get_logger
 
 #========================================================================================
@@ -17,6 +17,7 @@ DEFAULT_INTERFACE = get_str_setting("WIFI_INTERFACE", "wlan0")
 DEFAULT_HOTSPOT_CONNECTION = get_str_setting("HOTSPOT_CONNECTION", "SmartLockerHotspot")
 DEFAULT_HOTSPOT_SSID = get_str_setting("HOTSPOT_SSID", "SmartLocker-Setup")
 DEFAULT_HOTSPOT_PASSWORD = get_str_setting("HOTSPOT_PASSWORD", "SmartLocker123")
+DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS = get_int_setting("QBOX_WIFI_AGENT_WIFI_CONNECT_TIMEOUT_SECONDS", 35)
 _WIFI_LOCK = threading.Lock()
 logger = get_logger(__name__)
 
@@ -281,7 +282,7 @@ def reconnect_saved_wifi(ssid: str) -> dict[str, Any]:
 
         for command in commands:
             try:
-                result = _run(command, timeout=30)
+                result = _run(command, timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)
                 logger.info("Saved WiFi reconnect command succeeded for %s via: %s", ssid, _redact_command(command))
                 break
             except Exception as exc:
@@ -291,7 +292,7 @@ def reconnect_saved_wifi(ssid: str) -> dict[str, Any]:
         if result is None:
             raise WifiCommandError(f"Reconnect failed:{ssid}: {last_error}")
 
-        if not _wait_for_connection(ssid, timeout=25):
+        if not _wait_for_connection(ssid, timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS):
             raise WifiCommandError(f"Reconnect failed:{ssid}")
         return {
             "status": "reconnected",
@@ -318,8 +319,8 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
         cmd = ["nmcli", "dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE]
         if password:
             cmd += ["password", password]
-        result = _run(cmd, timeout=35)
-        if not _wait_for_connection(ssid, timeout=30):
+        result = _run(cmd, timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)
+        if not _wait_for_connection(ssid, timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS):
             raise WifiCommandError(f"Connection failed:{ssid}")
         return {
             "status": "connected",
