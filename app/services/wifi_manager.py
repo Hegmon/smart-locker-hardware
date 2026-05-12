@@ -137,6 +137,19 @@ def _retry(fn, retires=2, delay=1):
     raise last_error
 
 
+def _empty_wifi_details() -> dict[str, Any]:
+    return {
+        "connected": False,
+        "connected_ssid": "",
+        "connection_profile": "",
+        "device_state": "",
+        "signal_strength": 0,
+        "rssi": 0,
+        "is_secured": False,
+        "ip_address": "",
+    }
+
+
 #=================================================================
 # CORE
 #=================================================================
@@ -218,7 +231,7 @@ def _connection_summary() -> dict[str, str]:
     result = _nmcli([
         "-t",
         "-f",
-        "GENERAL.CONNECTION,GENERAL.STATE,IP4.ADDRESS[1]",
+        "GENERAL.CONNECTION,GENERAL.STATE,IP4.ADDRESS",
         "device",
         "show",
         DEFAULT_INTERFACE,
@@ -233,6 +246,22 @@ def _connection_summary() -> dict[str, str]:
         elif "IP4.ADDRESS" in line:
             _, _, value = line.partition(":")
             summary["ip_address"] = value.strip().split("/", 1)[0]
+    return summary
+
+
+def _device_status_summary() -> dict[str, str]:
+    summary = {
+        "profile": "",
+        "state": "",
+    }
+    result = _nmcli(["-t", "-f", "DEVICE,STATE,CONNECTION", "device", "status"], timeout=5)
+    for line in result.stdout.splitlines():
+        parts = _split_nmcli(line, 3)
+        if parts[0] != DEFAULT_INTERFACE:
+            continue
+        summary["state"] = parts[1].strip()
+        summary["profile"] = "" if parts[2].strip() == "--" else parts[2].strip()
+        break
     return summary
 
 
@@ -263,7 +292,7 @@ def get_wifi_status() -> dict[str, Any]:
 
     result = _nmcli(["-t", "-f", "DEVICE,STATE,CONNECTION", "device", "status"], timeout=5)
     for line in result.stdout.splitlines():
-        parts = line.split(":")
+        parts = _split_nmcli(line, 3)
 
         if parts[0] != DEFAULT_INTERFACE:
             continue
@@ -292,39 +321,49 @@ def get_wifi_status() -> dict[str, Any]:
 def get_connected_wifi_details() -> dict[str, Any]:
     ensure_wifi_radio()
 
-    data = {
-        "connected": False,
-        "connected_ssid": "",
-        "connection_profile": "",
-        "device_state": "",
-        "signal_strength": 0,
-        "rssi": 0,
-        "is_secured": False,
-        "ip_address": "",
-    }
+    data = _empty_wifi_details()
+    summary = {"profile": "", "state": "", "ip_address": ""}
+    active_connection: dict[str, str] = {}
+    active_wifi: dict[str, Any] = {}
+
     try:
         summary = _connection_summary()
-        active_connection = _active_connection_for_interface()
-        active_wifi = {}
-        try:
-            active_wifi = _active_wifi_details()
-        except Exception as exc:
-            logger.debug("Active WiFi scan details unavailable: %s", exc)
-
-        data["connection_profile"] = summary["profile"] if summary["profile"] != "--" else ""
-        data["device_state"] = summary["state"]
-        data["ip_address"] = summary["ip_address"]
-        connected = _is_connected_state(summary["state"])
-        connected_ssid = str(active_wifi.get("ssid") or active_connection.get("profile") or data["connection_profile"] or "").strip()
-        if connected and connected_ssid and connected_ssid != "--":
-            data["connected"] = True
-            data["connected_ssid"] = connected_ssid
-            data["signal_strength"] = active_wifi.get("signal_strength", 0)
-            data["rssi"] = active_wifi.get("rssi", 0)
-            data["is_secured"] = active_wifi.get("is_secured", False)
     except Exception as exc:
-        logger.debug("Connected WiFi details unavailable: %s", exc)
-        return data
+        logger.debug("WiFi device summary unavailable: %s", exc)
+
+    if not summary.get("profile") or not summary.get("state"):
+        try:
+            fallback_summary = _device_status_summary()
+            summary["profile"] = summary.get("profile") or fallback_summary.get("profile", "")
+            summary["state"] = summary.get("state") or fallback_summary.get("state", "")
+        except Exception as exc:
+            logger.debug("WiFi device status fallback unavailable: %s", exc)
+
+    try:
+        active_connection = _active_connection_for_interface()
+    except Exception as exc:
+        logger.debug("Active WiFi connection unavailable: %s", exc)
+
+    try:
+        active_wifi = _active_wifi_details()
+    except Exception as exc:
+        logger.debug("Active WiFi scan details unavailable: %s", exc)
+
+    profile = str(summary.get("profile") or "").strip()
+    if profile == "--":
+        profile = ""
+
+    data["connection_profile"] = profile
+    data["device_state"] = str(summary.get("state") or "").strip()
+    data["ip_address"] = str(summary.get("ip_address") or "").strip()
+    connected = _is_connected_state(data["device_state"]) or bool(active_connection.get("profile"))
+    connected_ssid = str(active_wifi.get("ssid") or active_connection.get("profile") or profile or "").strip()
+    if connected and connected_ssid and connected_ssid != "--":
+        data["connected"] = True
+        data["connected_ssid"] = connected_ssid
+        data["signal_strength"] = active_wifi.get("signal_strength", 0)
+        data["rssi"] = active_wifi.get("rssi", 0)
+        data["is_secured"] = active_wifi.get("is_secured", False)
 
     return data
 
@@ -377,6 +416,12 @@ def _delete_saved_profile(ssid: str) -> None:
 
 def _cancel_wifi_activation() -> None:
     _nmcli(["device", "disconnect", DEFAULT_INTERFACE], check=False, timeout=5, require_root=True)
+    ensure_wifi_radio()
+
+
+def _cancel_profile_activation(ssid: str) -> None:
+    if ssid and _saved_profile_exists(ssid):
+        _nmcli(["connection", "down", "id", ssid], check=False, timeout=5, require_root=True)
     ensure_wifi_radio()
 
 
@@ -529,9 +574,16 @@ def reconnect_saved_wifi(ssid: str) -> dict[str, Any]:
                 details = get_connected_wifi_details()
                 logger.warning("Reconnect wait failed for %s; current WiFi details: %s", ssid, details)
                 raise WifiCommandError(f"Reconnect failed:{ssid}")
+            _nmcli(
+                ["connection", "modify", "id", ssid, "connection.autoconnect", "yes"],
+                check=False,
+                timeout=5,
+                require_root=True,
+            )
         except Exception as exc:
-            _disable_profile_autoconnect(ssid)
-            _cancel_wifi_activation()
+            if isinstance(exc, WifiAuthenticationError):
+                _disable_profile_autoconnect(ssid)
+            _cancel_profile_activation(ssid)
             _raise_classified_wifi_error(ssid, exc)
         return {
             "status": "reconnected",
@@ -632,6 +684,7 @@ def is_wifi_connected() -> bool:
 # =========================================================
 def scan_wifi() -> list[dict[str, Any]]:
     ensure_wifi_radio()
+    _nmcli(["dev", "wifi", "rescan", "ifname", DEFAULT_INTERFACE], check=False, timeout=8, require_root=True)
     result = _nmcli([
         "-t",
         "-f",
@@ -646,7 +699,7 @@ def scan_wifi() -> list[dict[str, Any]]:
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
-        parts = line.split(":", 2)
+        parts = _split_nmcli(line, 3)
         ssid = parts[0] if len(parts) > 0 else ""
         if not ssid or ssid in ("--", "<hidden>"):
             continue
