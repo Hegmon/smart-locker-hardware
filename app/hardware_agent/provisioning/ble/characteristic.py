@@ -32,7 +32,7 @@ class CommandCharacteristic(dbus.service.Object):
             GATT_CHARACTERISTIC_IFACE: {
                 "Service": dbus.ObjectPath(self.service.path),
                 "UUID": dbus.String(CHAR_COMMAND_UUID),
-                "Flags": dbus.Array(["write"], signature="s"),
+                "Flags": dbus.Array(["write", "write-without-response"], signature="s"),
             }
         }
 
@@ -105,6 +105,7 @@ class ResponseCharacteristic(dbus.service.Object):
                 "UUID": dbus.String(CHAR_RESPONSE_UUID),
                 "Flags": dbus.Array(["notify", "read"], signature="s"),
                 "Notifying": dbus.Boolean(self.notifying),
+                "Value": dbus.Array([dbus.Byte(byte) for byte in self.value], signature="y"),
             }
         }
 
@@ -120,15 +121,40 @@ class ResponseCharacteristic(dbus.service.Object):
     def notify(self, data):
         self.value = json.dumps(data).encode()
         logger.info("BLE TX payload: %s", data)
+        if self.notifying:
+            self.PropertiesChanged(
+                GATT_CHARACTERISTIC_IFACE,
+                {"Value": dbus.Array([dbus.Byte(byte) for byte in self.value], signature="y")},
+                [],
+            )
+        else:
+            logger.info("BLE response stored for read because notifications are not enabled")
 
     @dbus.service.method(GATT_CHARACTERISTIC_IFACE, in_signature="a{sv}", out_signature="ay")
     def ReadValue(self, options):
+        logger.info("BLE response characteristic read")
         return dbus.ByteArray(self.value)
 
     @dbus.service.method(GATT_CHARACTERISTIC_IFACE, in_signature="", out_signature="")
     def StartNotify(self):
         self.notifying = True
+        logger.info("BLE notifications enabled")
+        self.PropertiesChanged(
+            GATT_CHARACTERISTIC_IFACE,
+            {"Notifying": dbus.Boolean(True)},
+            [],
+        )
 
     @dbus.service.method(GATT_CHARACTERISTIC_IFACE, in_signature="", out_signature="")
     def StopNotify(self):
         self.notifying = False
+        logger.info("BLE notifications disabled")
+        self.PropertiesChanged(
+            GATT_CHARACTERISTIC_IFACE,
+            {"Notifying": dbus.Boolean(False)},
+            [],
+        )
+
+    @dbus.service.signal(DBUS_PROP_IFACE, signature="sa{sv}as")
+    def PropertiesChanged(self, interface, changed, invalidated):
+        pass
