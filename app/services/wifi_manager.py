@@ -5,8 +5,9 @@ import time
 import threading
 from typing import Any
 import subprocess
+import shutil
 
-from app.deployment.runtime_config import get_int_setting, get_str_setting
+from app.deployment.runtime_config import get_bool_setting, get_int_setting, get_str_setting
 from app.utils.logger import get_logger
 
 #========================================================================================
@@ -17,8 +18,9 @@ DEFAULT_INTERFACE = get_str_setting("WIFI_INTERFACE", "wlan0")
 DEFAULT_HOTSPOT_CONNECTION = get_str_setting("HOTSPOT_CONNECTION", "SmartLockerHotspot")
 DEFAULT_HOTSPOT_SSID = get_str_setting("HOTSPOT_SSID", "SmartLocker-Setup")
 DEFAULT_HOTSPOT_PASSWORD = get_str_setting("HOTSPOT_PASSWORD", "SmartLocker123")
-DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS = get_int_setting("QBOX_WIFI_AGENT_WIFI_CONNECT_TIMEOUT_SECONDS", 35)
-_WIFI_LOCK = threading.Lock()
+DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS = get_int_setting("QBOX_WIFI_AGENT_WIFI_CONNECT_TIMEOUT_SECONDS", 15)
+ALLOW_NON_ROOT_NMCLI = get_bool_setting("ALLOW_NON_ROOT_NMCLI", False)
+_WIFI_LOCK = threading.RLock()
 logger = get_logger(__name__)
 
 #=================================================================================
@@ -30,17 +32,24 @@ class WifiCommandError(RuntimeError):
 #==============================================================================
 # SAFE EXECUTION
 #==============================================================================
-def _run(command: list[str], check: bool = True, timeout: int = 12) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: list[str],
+    check: bool = True,
+    timeout: int = 12,
+    *,
+    require_root: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    effective_command = _noninteractive_command(command, require_root=require_root)
     try:
         result = subprocess.run(
-            command,
+            effective_command,
             capture_output=True,
             text=True,
             timeout=timeout,
             check=check,
         )
     except subprocess.TimeoutExpired:
-        raise WifiCommandError(f"Timeout: {' '.join(command)}")
+        raise WifiCommandError(f"Timeout: {_redact_command(command)}")
     except subprocess.CalledProcessError as exc:
         output = (exc.stderr or exc.stdout or "").strip()
         safe_command = _redact_command(command)
@@ -54,6 +63,38 @@ def _run(command: list[str], check: bool = True, timeout: int = 12) -> subproces
         raise WifiCommandError(f"{safe_command}: {msg}")
 
     return result
+
+
+def _nmcli(
+    args: list[str],
+    *,
+    check: bool = True,
+    timeout: int = 12,
+    require_root: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    wait_seconds = max(1, min(timeout, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS))
+    return _run(
+        ["nmcli", "--wait", str(wait_seconds), *args],
+        check=check,
+        timeout=timeout + 3,
+        require_root=require_root,
+    )
+
+
+def _noninteractive_command(command: list[str], *, require_root: bool) -> list[str]:
+    if not require_root or not command or command[0] != "nmcli":
+        return command
+    if ALLOW_NON_ROOT_NMCLI or getattr(os, "geteuid", lambda: 0)() == 0:
+        return command
+
+    sudo_path = shutil.which("sudo")
+    if sudo_path:
+        return [sudo_path, "-n", *command]
+
+    raise WifiCommandError(
+        "NetworkManager changes require root. Run the hardware agent via systemd/root "
+        "or set ALLOW_NON_ROOT_NMCLI=true if your Pi user is authorized for nmcli."
+    )
 
 
 def _redact_command(command: list[str]) -> str:
@@ -84,7 +125,10 @@ def _retry(fn, retires=2, delay=1):
 #=================================================================
 
 def ensure_wifi_radio() -> None:
-    _run(["nmcli", "radio", "wifi", "on"], check=False)
+    try:
+        _nmcli(["radio", "wifi", "on"], check=False, timeout=5, require_root=True)
+    except WifiCommandError as exc:
+        logger.debug("WiFi radio enable skipped: %s", exc)
 
 
 def _wait_for_connection(ssid: str, timeout: int = 15) -> bool:
@@ -106,7 +150,7 @@ def _wait_for_connection(ssid: str, timeout: int = 15) -> bool:
 def get_wifi_status() -> dict[str, Any]:
     ensure_wifi_radio()
 
-    result = _run(["nmcli", "-t", "-f", "DEVICE,STATE,CONNECTION", "device", "status"])
+    result = _nmcli(["-t", "-f", "DEVICE,STATE,CONNECTION", "device", "status"], timeout=5)
     for line in result.stdout.splitlines():
         parts = line.split(":")
 
@@ -146,8 +190,7 @@ def get_connected_wifi_details() -> dict[str, Any]:
         "ip_address": "",
     }
     try:
-        result = _run([
-            "nmcli",
+        result = _nmcli([
             "-t",
             "-f",
             "GENERAL.CONNECTION,GENERAL.STATE,IP4.ADDRESS[1]",
@@ -168,8 +211,7 @@ def get_connected_wifi_details() -> dict[str, Any]:
                 if address:
                     data["ip_address"] = address.split("/", 1)[0]
 
-        signal = _run([
-            "nmcli",
+        signal = _nmcli([
             "-t",
             "-f",
             "IN-USE,SIGNAL",
@@ -193,7 +235,7 @@ def get_connected_wifi_details() -> dict[str, Any]:
 
 def list_saved_wifi_networks() -> list[str]:
     ensure_wifi_radio()
-    result = _run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"])
+    result = _nmcli(["-t", "-f", "NAME,TYPE", "connection", "show"], timeout=5)
     saved_ssids: list[str] = []
     seen: set[str] = set()
 
@@ -216,27 +258,37 @@ def list_saved_wifi_networks() -> list[str]:
     return saved_ssids
 
 
+def _saved_profile_exists(ssid: str) -> bool:
+    if not ssid:
+        return False
+    result = _nmcli(["-t", "-f", "NAME,TYPE", "connection", "show"], timeout=5)
+    for line in result.stdout.splitlines():
+        name, _, connection_type = line.partition(":")
+        if name == ssid and connection_type.strip() == "802-11-wireless":
+            return True
+    return False
+
+
 # =========================================================
 # HOTSPOT START
 # =========================================================
 def start_hotspot() -> dict[str, Any]:
     def _start():
         ensure_wifi_radio()
-        _run([
-            "nmcli",
-            "connection",
-            "add",
-            "type",
-            "wifi",
-            "ifname",
-            DEFAULT_INTERFACE,
-            "con-name",
-            DEFAULT_HOTSPOT_CONNECTION,
-            "ssid",
-            DEFAULT_HOTSPOT_SSID,
-        ])
-        _run([
-            "nmcli",
+        if not _saved_profile_exists(DEFAULT_HOTSPOT_CONNECTION):
+            _nmcli([
+                "connection",
+                "add",
+                "type",
+                "wifi",
+                "ifname",
+                DEFAULT_INTERFACE,
+                "con-name",
+                DEFAULT_HOTSPOT_CONNECTION,
+                "ssid",
+                DEFAULT_HOTSPOT_SSID,
+            ], require_root=True)
+        _nmcli([
             "connection",
             "modify",
             DEFAULT_HOTSPOT_CONNECTION,
@@ -248,9 +300,9 @@ def start_hotspot() -> dict[str, Any]:
             "wpa-psk",
             "wifi-sec.psk",
             DEFAULT_HOTSPOT_PASSWORD,
-        ])
+        ], require_root=True)
 
-        result = _run(["nmcli", "connection", "up", DEFAULT_HOTSPOT_CONNECTION])
+        result = _nmcli(["connection", "up", DEFAULT_HOTSPOT_CONNECTION], timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS, require_root=True)
         return {
             "status": "hotspot_enabled",
             "ssid": DEFAULT_HOTSPOT_SSID,
@@ -262,7 +314,7 @@ def start_hotspot() -> dict[str, Any]:
 
 
 def stop_hotspot() -> None:
-    _run(["nmcli", "connection", "down", DEFAULT_HOTSPOT_CONNECTION], check=False)
+    _nmcli(["connection", "down", DEFAULT_HOTSPOT_CONNECTION], check=False, timeout=8, require_root=True)
 
 
 # =========================================================
@@ -272,27 +324,18 @@ def reconnect_saved_wifi(ssid: str) -> dict[str, Any]:
     def _connect():
         ensure_wifi_radio()
         stop_hotspot()
-        commands = [
-            ["nmcli", "connection", "up", ssid, "ifname", DEFAULT_INTERFACE],
-            ["nmcli", "connection", "up", "id", ssid, "ifname", DEFAULT_INTERFACE],
-            ["nmcli", "dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE],
-        ]
-        last_error: Exception | None = None
-        result: subprocess.CompletedProcess[str] | None = None
 
-        for command in commands:
-            try:
-                result = _run(command, timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)
-                logger.info("Saved WiFi reconnect command succeeded for %s via: %s", ssid, _redact_command(command))
-                break
-            except Exception as exc:
-                last_error = exc
-                logger.warning("Saved WiFi reconnect command failed for %s via %s: %s", ssid, _redact_command(command), exc)
+        if not _saved_profile_exists(ssid):
+            raise WifiCommandError(f"Reconnect failed:{ssid}: saved profile not found")
 
-        if result is None:
-            raise WifiCommandError(f"Reconnect failed:{ssid}: {last_error}")
+        result = _nmcli(
+            ["connection", "up", "id", ssid, "ifname", DEFAULT_INTERFACE],
+            timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS,
+            require_root=True,
+        )
+        logger.info("Saved WiFi reconnect command succeeded for %s", ssid)
 
-        if not _wait_for_connection(ssid, timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS):
+        if not _wait_for_connection(ssid, timeout=min(10, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)):
             raise WifiCommandError(f"Reconnect failed:{ssid}")
         return {
             "status": "reconnected",
@@ -313,14 +356,37 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
         ensure_wifi_radio()
 
         stop_hotspot()
-        time.sleep(1)
-        _run(["nmcli", "connection", "delete", ssid], check=False)
+        time.sleep(0.3)
 
-        cmd = ["nmcli", "dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE]
-        if password:
-            cmd += ["password", password]
-        result = _run(cmd, timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)
-        if not _wait_for_connection(ssid, timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS):
+        if _saved_profile_exists(ssid):
+            if password:
+                _nmcli(
+                    [
+                        "connection",
+                        "modify",
+                        "id",
+                        ssid,
+                        "wifi-sec.key-mgmt",
+                        "wpa-psk",
+                        "wifi-sec.psk",
+                        password,
+                        "connection.autoconnect",
+                        "yes",
+                    ],
+                    timeout=8,
+                    require_root=True,
+                )
+            result = _nmcli(
+                ["connection", "up", "id", ssid, "ifname", DEFAULT_INTERFACE],
+                timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS,
+                require_root=True,
+            )
+        else:
+            cmd = ["dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE, "name", ssid]
+            if password:
+                cmd += ["password", password]
+            result = _nmcli(cmd, timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS, require_root=True)
+        if not _wait_for_connection(ssid, timeout=min(10, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)):
             raise WifiCommandError(f"Connection failed:{ssid}")
         return {
             "status": "connected",
@@ -338,7 +404,7 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
 # =================================================================================
 def disconnect_wifi() -> dict[str, Any]:
     with _WIFI_LOCK:
-        _run(["nmcli", "device", "disconnect", DEFAULT_INTERFACE], check=False)
+        _nmcli(["device", "disconnect", DEFAULT_INTERFACE], check=False, timeout=8, require_root=True)
         hotspot = start_hotspot()
         return {"status": "disconnected", "hotspot": hotspot}
 
@@ -360,8 +426,7 @@ def is_wifi_connected() -> bool:
 # =========================================================
 def scan_wifi() -> list[dict[str, Any]]:
     ensure_wifi_radio()
-    result = _run([
-        "nmcli",
+    result = _nmcli([
         "-t",
         "-f",
         "SSID,SIGNAL,SECURITY",
@@ -395,7 +460,7 @@ def scan_wifi() -> list[dict[str, Any]]:
 def scan_hotspot() -> list[dict[str, Any]]:
     # Provide a simple listing for hotspot-like connections (active/available)
     try:
-        result = _run(["nmcli", "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show"])
+        result = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show"], timeout=5)
         hotspots = []
         for line in result.stdout.splitlines():
             if not line.strip():
