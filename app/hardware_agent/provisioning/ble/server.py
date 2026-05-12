@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import subprocess
 import time
+import uuid
 
 import dbus
 import dbus.mainloop.glib
@@ -23,8 +24,8 @@ ADAPTER_PATH = "/org/bluez/hci0"
 
 
 class Application(dbus.service.Object):
-    def __init__(self, bus):
-        self.path = "/org/bluez/example"
+    def __init__(self, bus, path: str):
+        self.path = path
         self.services = []
         super().__init__(bus, self.path)
 
@@ -57,6 +58,9 @@ class BLEServer:
         self._advertising_active = False
         self._gatt_registered = False
         self._startup_failed = False
+        self._stop_requested = False
+        self._app = None
+        self._service = None
         self._lock = threading.RLock()
 
     def start_async(self) -> bool:
@@ -73,6 +77,7 @@ class BLEServer:
             if self._running:
                 return
             self._running = True
+            self._stop_requested = False
 
         try:
             logger.info("Starting BLE provisioning server")
@@ -86,10 +91,20 @@ class BLEServer:
             with self._lock:
                 self._bluetooth_enabled = True
 
-            app = Application(self.bus)
-            service = SmartLockerService(self.bus, self.handler)
+            if self._should_stop():
+                logger.info("BLE startup canceled before GATT registration")
+                self._disable_bluetooth()
+                return
+
+            run_id = uuid.uuid4().hex[:8]
+            app_path = f"/org/bluez/smartlocker/{run_id}"
+            app = Application(self.bus, app_path)
+            service = SmartLockerService(self.bus, self.handler, app_path=app_path)
             app.add_service(service)
             service.command_char.response_char = service.response_char
+            with self._lock:
+                self._app = app
+                self._service = service
 
             service_manager = dbus.Interface(
                 self.bus.get_object(BLUEZ_SERVICE_NAME, ADAPTER_PATH),
@@ -108,6 +123,7 @@ class BLEServer:
             logger.exception("BLE server failed")
             self._disable_bluetooth()
         finally:
+            self._cleanup_dbus_objects()
             with self._lock:
                 self._running = False
                 self.advertisement = None
@@ -115,11 +131,15 @@ class BLEServer:
                 self._thread = None
                 self._advertising_active = False
                 self._gatt_registered = False
+                self._app = None
+                self._service = None
             logger.info("BLE provisioning server stopped")
 
     def stop(self) -> bool:
         with self._lock:
+            self._stop_requested = True
             if not self._running and self.advertisement is None and self.loop is None:
+                self._disable_bluetooth()
                 return False
 
             advertisement = self.advertisement
@@ -227,6 +247,11 @@ class BLEServer:
         logger.info("BLE advertising started")
 
     def _on_gatt_registered(self, device_name: str) -> None:
+        if self._should_stop():
+            logger.info("BLE GATT registered after stop request; shutting down")
+            self._shutdown_failed_ble()
+            return
+
         with self._lock:
             self._gatt_registered = True
         logger.info("BLE GATT registered")
@@ -241,6 +266,7 @@ class BLEServer:
                 index=0,
                 service_uuid=SERVICE_UUID,
                 device_name=device_name,
+                path_base=f"{self._app.path}/advertisement" if self._app is not None else None,
             )
             ad_manager.RegisterAdvertisement(
                 self.advertisement.get_path(),
@@ -253,6 +279,11 @@ class BLEServer:
             self._shutdown_failed_ble()
 
     def _on_advertisement_ready(self) -> None:
+        if self._should_stop():
+            logger.info("BLE advertisement ready after stop request; shutting down")
+            self._shutdown_failed_ble()
+            return
+
         try:
             adapter = self._get_adapter()
             self._set_adapter_property(adapter, "Pairable", dbus.Boolean(1), required=False)
@@ -280,6 +311,26 @@ class BLEServer:
                 loop.quit()
             except Exception:
                 logger.exception("BLE loop stop failed during error shutdown")
+
+    def _should_stop(self) -> bool:
+        with self._lock:
+            return self._stop_requested
+
+    def _cleanup_dbus_objects(self) -> None:
+        objects = []
+        with self._lock:
+            service = self._service
+            app = self._app
+        if service is not None:
+            objects.extend([service.command_char, service.response_char, service])
+        if app is not None:
+            objects.append(app)
+
+        for obj in objects:
+            try:
+                obj.remove_from_connection()
+            except Exception:
+                logger.debug("BLE dbus object cleanup skipped for %s", getattr(obj, "path", obj), exc_info=True)
 
     @staticmethod
     def _run_best_effort(command: list[str]) -> None:
