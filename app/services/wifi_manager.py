@@ -331,6 +331,21 @@ def _delete_saved_profile(ssid: str) -> None:
         _nmcli(["connection", "delete", "id", ssid], check=False, timeout=8, require_root=True)
 
 
+def _cancel_wifi_activation() -> None:
+    _nmcli(["device", "disconnect", DEFAULT_INTERFACE], check=False, timeout=5, require_root=True)
+    ensure_wifi_radio()
+
+
+def _disable_profile_autoconnect(ssid: str) -> None:
+    if _saved_profile_exists(ssid):
+        _nmcli(
+            ["connection", "modify", "id", ssid, "connection.autoconnect", "no"],
+            check=False,
+            timeout=5,
+            require_root=True,
+        )
+
+
 def _create_wifi_profile(ssid: str, password: str) -> None:
     _delete_saved_profile(ssid)
     _nmcli([
@@ -350,8 +365,10 @@ def _create_wifi_profile(ssid: str, password: str) -> None:
         "modify",
         "id",
         ssid,
+        "802-11-wireless.hidden",
+        "no",
         "connection.autoconnect",
-        "yes",
+        "no",
         "ipv4.method",
         "auto",
         "ipv6.method",
@@ -365,9 +382,15 @@ def _create_wifi_profile(ssid: str, password: str) -> None:
             ssid,
             "wifi-sec.key-mgmt",
             "wpa-psk",
+            "802-11-wireless-security.key-mgmt",
+            "wpa-psk",
             "wifi-sec.psk",
             password,
+            "802-11-wireless-security.psk",
+            password,
             "wifi-sec.psk-flags",
+            "0",
+            "802-11-wireless-security.psk-flags",
             "0",
         ], timeout=8, require_root=True)
 
@@ -463,6 +486,8 @@ def reconnect_saved_wifi(ssid: str) -> dict[str, Any]:
                 logger.warning("Reconnect wait failed for %s; current WiFi details: %s", ssid, details)
                 raise WifiCommandError(f"Reconnect failed:{ssid}")
         except Exception as exc:
+            _disable_profile_autoconnect(ssid)
+            _cancel_wifi_activation()
             _raise_classified_wifi_error(ssid, exc)
         return {
             "status": "reconnected",
@@ -509,10 +534,18 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
                 details = get_connected_wifi_details()
                 logger.warning("Connection wait failed for %s; current WiFi details: %s", ssid, details)
                 raise WifiCommandError(f"Connection failed:{ssid}")
+            _nmcli(
+                ["connection", "modify", "id", ssid, "connection.autoconnect", "yes"],
+                check=False,
+                timeout=5,
+                require_root=True,
+            )
         except WifiAuthenticationError:
+            _cancel_wifi_activation()
             _delete_saved_profile(ssid)
             raise
         except Exception as exc:
+            _cancel_wifi_activation()
             if password:
                 _delete_saved_profile(ssid)
             _raise_classified_wifi_error(ssid, exc)
