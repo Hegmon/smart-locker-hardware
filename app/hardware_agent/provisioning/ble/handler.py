@@ -39,6 +39,7 @@ class BLEHandler:
                 {
                     "ssid": n.ssid,
                     "rssi": n.rssi,
+                    "security": n.security,
                     "secured": n.is_secured,
                 }
                 for n in networks
