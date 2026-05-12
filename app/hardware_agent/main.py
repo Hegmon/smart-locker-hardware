@@ -21,6 +21,7 @@ from app.services.wifi_manager import (
     WifiCommandError,
     connect_wifi,
     get_connected_wifi_details,
+    list_saved_wifi_networks,
     reconnect_saved_wifi,
     start_hotspot,
 )
@@ -56,6 +57,7 @@ class WifiUploadAgent:
     RECOVERY_POLL_SECONDS = 5
     RECOVERY_BLE_TIMEOUT_SECONDS = 60
     WATCHDOG_INTERVAL_SECONDS = 10
+    WIFI_PRIORITY_RECHECK_SECONDS = 30
 
     def __init__(self, config: AgentConfig):
         self.config = config
@@ -94,6 +96,7 @@ class WifiUploadAgent:
         self._last_scan_ssids: set[str] = set()
         self._last_scan_connected_ssid: str | None = None
         self._last_status_signature: tuple[str, str | None] | None = None
+        self._last_priority_reconnect_at = 0.0
 
         self.mqtt.register_command_handler(self.handle_command)
         self.mqtt.register_ble_fallback_handler(self._handle_mqtt_reconnect_pressure)
@@ -161,6 +164,7 @@ class WifiUploadAgent:
             try:
                 networks = self.scanner.scan()
                 connected = get_connected_wifi_details()
+                self._maybe_switch_to_best_saved_network(networks, connected)
                 self._maybe_publish_scan(networks, connected)
             except Exception:
                 logger.exception("WiFi scan loop failed")
@@ -242,20 +246,8 @@ class WifiUploadAgent:
             if self._is_connected():
                 return
 
-            last_good_ssid = self._snapshot().last_good_ssid
-            if last_good_ssid:
-                self._transition_to(
-                    NetworkState.CONNECTING,
-                    reason=f"Reconnect saved WiFi {last_good_ssid}",
-                )
-                try:
-                    reconnect_saved_wifi(last_good_ssid)
-                    status = get_connected_wifi_details()
-                    if status.get("connected_ssid"):
-                        self._handle_wifi_observation(status, source="recovery")
-                        return
-                except Exception as exc:
-                    logger.warning("Reconnect to saved WiFi failed for %s: %s", last_good_ssid, exc)
+            if self._attempt_best_saved_reconnect(source="recovery", allow_roam=False):
+                return
 
             self._transition_to(
                 NetworkState.BLE_PROVISIONING,
@@ -313,14 +305,15 @@ class WifiUploadAgent:
         return True
 
     def _on_state_enter(self, state: NetworkState):
-        if state == NetworkState.BLE_PROVISIONING:
+        if state in {
+            NetworkState.DISCONNECTED,
+            NetworkState.BLE_PROVISIONING,
+        }:
             self._start_ble()
             return
 
         if state in {
             NetworkState.CONNECTED,
-            NetworkState.CONNECTING,
-            NetworkState.DISCONNECTED,
             NetworkState.HOTSPOT,
         }:
             self._stop_ble()
@@ -348,11 +341,11 @@ class WifiUploadAgent:
         service = self._extract_service(payload, topic)
         data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
 
-        if service == "wifi.connect":
+        if service in {"wifi.connect", "wifi_connect"}:
             return self._handle_wifi_connect(command_id, data)
-        if service == "wifi.scan":
+        if service in {"wifi.scan", "wifi_scan"}:
             return self._handle_wifi_scan_command()
-        if service == "wifi.status":
+        if service in {"wifi.status", "state"}:
             return self._build_status_payload(get_connected_wifi_details())
 
         return {
@@ -465,13 +458,7 @@ class WifiUploadAgent:
     def _handle_wifi_scan_command(self) -> dict[str, Any]:
         networks = self.scanner.scan()
         connected = get_connected_wifi_details()
-        return {
-            "device_id": self.config.device_id,
-            "timestamp": utc_now(),
-            "state": self._snapshot().state,
-            "connected_ssid": connected.get("connected_ssid"),
-            "networks": [network.to_payload() for network in networks],
-        }
+        return self._build_wifi_scan_payload(networks, connected)
 
     def publish_wifi_scan(self):
         self._publish_wifi_scan_payload(self.scanner.scan(), get_connected_wifi_details())
@@ -520,8 +507,18 @@ class WifiUploadAgent:
         return {
             "device_id": self.config.device_id,
             "timestamp": utc_now(),
-            "state": snapshot.state,
-            "connected_ssid": connected.get("connected_ssid"),
+            "state": snapshot.state.value,
+            "wifi_connected": bool(connected.get("connected_ssid")),
+            "ssid": connected.get("connected_ssid") or "",
+            "connected_ssid": connected.get("connected_ssid") or "",
+            "ip": connected.get("ip_address") or "",
+            "signal_strength": connected.get("signal_strength", 0),
+            "rssi": connected.get("rssi", 0),
+            "bluetooth_enabled": self.ble.is_bluetooth_enabled(),
+            "ble_advertising": self.ble.is_advertising(),
+            "mqtt_connected": self.mqtt.is_connected(),
+            "recovery_active": snapshot.recovery_active,
+            "hotspot_active": snapshot.hotspot_active,
         }
 
     def _publish_connectivity_snapshot(self, connected: dict[str, Any]):
@@ -538,13 +535,7 @@ class WifiUploadAgent:
         self._publish_wifi_scan_payload(networks, connected)
 
     def _publish_wifi_scan_payload(self, networks: list[object], connected: dict[str, Any]):
-        payload = {
-            "device_id": self.config.device_id,
-            "timestamp": utc_now(),
-            "state": self._snapshot().state,
-            "connected_ssid": connected.get("connected_ssid"),
-            "networks": [network.to_payload() for network in networks],
-        }
+        payload = self._build_wifi_scan_payload(networks, connected)
         self.mqtt.publish(self.config.mqtt_scan_topic, payload)
 
     def publish_command_result(
@@ -571,10 +562,173 @@ class WifiUploadAgent:
         if isinstance(service, str) and service.strip():
             return service.strip()
 
+        if topic.startswith("hardware_agent/request/"):
+            return topic.rsplit("/", 1)[-1].strip()
+
         topic_parts = topic.split("/")
         if len(topic_parts) >= 5:
             return topic_parts[3]
         return ""
+
+    def _build_wifi_scan_payload(self, networks: list[object], connected: dict[str, Any]) -> dict[str, Any]:
+        connected_ssid = connected.get("connected_ssid")
+        return {
+            "device_id": self.config.device_id,
+            "timestamp": utc_now(),
+            "state": self._snapshot().state.value,
+            "connected_ssid": connected_ssid or "",
+            "networks": [
+                {
+                    "ssid": network.ssid,
+                    "rssi": network.rssi,
+                    "security": getattr(network, "security", "UNKNOWN"),
+                    "connected": network.ssid == connected_ssid,
+                }
+                for network in networks
+            ],
+        }
+
+    def _maybe_switch_to_best_saved_network(
+        self,
+        networks: list[object],
+        connected: dict[str, Any],
+    ) -> None:
+        if not self._running:
+            return
+
+        with self._state_lock:
+            current_state = self.network_state
+            recovery_in_progress = self._recovery_in_progress
+
+        if current_state == NetworkState.HOTSPOT or recovery_in_progress:
+            return
+
+        current_ssid = str(connected.get("connected_ssid") or "").strip() or None
+        current_rssi = self._network_rssi(networks, current_ssid)
+        candidate = self._select_best_saved_network(networks)
+
+        if candidate is None:
+            return
+
+        threshold = max(1, self.config.signal_change_threshold)
+        should_reconnect = False
+        reason = ""
+
+        if not current_ssid:
+            should_reconnect = True
+            reason = "WiFi disconnected"
+        elif candidate.ssid != current_ssid:
+            current_missing = current_rssi is None
+            stronger_signal = current_rssi is None or candidate.rssi >= current_rssi + threshold
+            if current_missing or stronger_signal:
+                should_reconnect = True
+                reason = (
+                    f"saved WiFi {candidate.ssid} is stronger than {current_ssid}"
+                    if not current_missing
+                    else f"current WiFi {current_ssid} is unavailable"
+                )
+
+        if not should_reconnect:
+            return
+
+        now = time.monotonic()
+        with self._state_lock:
+            if now - self._last_priority_reconnect_at < self.WIFI_PRIORITY_RECHECK_SECONDS:
+                return
+            self._last_priority_reconnect_at = now
+
+        self._attempt_saved_wifi_reconnect(candidate.ssid, source="priority", reason=reason)
+
+    def _attempt_best_saved_reconnect(self, source: str, allow_roam: bool) -> bool:
+        networks = self.scanner.scan()
+        connected = get_connected_wifi_details()
+        current_ssid = str(connected.get("connected_ssid") or "").strip() or None
+        current_rssi = self._network_rssi(networks, current_ssid)
+        candidate = self._select_best_saved_network(networks)
+        if candidate is None:
+            logger.info("No saved WiFi networks are currently visible")
+            return False
+
+        if (
+            not allow_roam
+            and current_ssid
+            and candidate.ssid == current_ssid
+        ):
+            logger.info("Already connected to strongest saved WiFi %s", current_ssid)
+            return False
+
+        if current_ssid and current_rssi is not None:
+            logger.info(
+                "Current WiFi %s RSSI %s dBm, strongest saved WiFi %s RSSI %s dBm",
+                current_ssid,
+                current_rssi,
+                candidate.ssid,
+                candidate.rssi,
+            )
+
+        return self._attempt_saved_wifi_reconnect(
+            candidate.ssid,
+            source=source,
+            reason=f"strongest saved WiFi RSSI {candidate.rssi} dBm",
+        )
+
+    def _attempt_saved_wifi_reconnect(self, ssid: str, *, source: str, reason: str) -> bool:
+        if not self._command_lock.acquire(blocking=False):
+            logger.info("Skipping WiFi reconnect to %s because another network command is active", ssid)
+            return False
+
+        try:
+            self._transition_to(NetworkState.CONNECTING, reason=f"{source} reconnect to {ssid} ({reason})")
+            result = reconnect_saved_wifi(ssid)
+            status = result.get("connection") if isinstance(result, dict) else {}
+            if not status.get("connected_ssid"):
+                status = get_connected_wifi_details()
+            if status.get("connected_ssid"):
+                logger.info("Selected saved WiFi %s connected successfully", ssid)
+                self._handle_wifi_observation(status, source=source)
+                return True
+            logger.warning("Selected saved WiFi %s did not become active", ssid)
+            self._handle_wifi_observation(get_connected_wifi_details(), source=f"{source}-post-failure")
+            return False
+        except Exception as exc:
+            logger.warning("Saved WiFi reconnect failed for %s: %s", ssid, exc)
+            self._handle_wifi_observation(get_connected_wifi_details(), source=f"{source}-error")
+            return False
+        finally:
+            self._command_lock.release()
+
+    def _select_best_saved_network(self, networks: list[object]):
+        saved_ssids = set(list_saved_wifi_networks())
+        saved_networks = [network for network in networks if network.ssid in saved_ssids]
+
+        if not saved_networks:
+            logger.info("Visible saved WiFi networks: none")
+            return None
+
+        logger.info(
+            "Visible saved WiFi networks: %s",
+            [
+                {
+                    "ssid": network.ssid,
+                    "rssi": network.rssi,
+                    "security": getattr(network, "security", "UNKNOWN"),
+                }
+                for network in saved_networks
+            ],
+        )
+
+        selected = max(saved_networks, key=lambda network: network.rssi)
+        logger.info("Selected strongest saved WiFi: %s (%s dBm)", selected.ssid, selected.rssi)
+        return selected
+
+    @staticmethod
+    def _network_rssi(networks: list[object], ssid: str | None) -> int | None:
+        if not ssid:
+            return None
+        for network in networks:
+            if network.ssid == ssid:
+                return network.rssi
+        return None
 
     def _is_connected(self) -> bool:
         return bool(get_connected_wifi_details().get("connected_ssid"))
