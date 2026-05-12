@@ -9,7 +9,7 @@ class BLEHandler:
     def __init__(
         self,
         interface: str,
-        on_wifi_connected: Callable[[str], None] | None = None,
+        on_wifi_connected: Callable[[str], bool | None] | None = None,
     ):
         self.scanner = WifiScanner(interface)
         self._on_wifi_connected = on_wifi_connected
@@ -54,11 +54,21 @@ class BLEHandler:
 
         try:
             result = connect_wifi(ssid, password)
+            internet_confirmed = True
             if self._on_wifi_connected:
                 try:
-                    self._on_wifi_connected(ssid)
+                    callback_result = self._on_wifi_connected(ssid)
+                    if callback_result is False:
+                        internet_confirmed = False
                 except Exception:
-                    pass
+                    internet_confirmed = False
+
+            if not internet_confirmed:
+                return {
+                    "status": "failed",
+                    "ssid": ssid,
+                    "error": "internet_validation_failed",
+                }
 
             return {
                 "status": "success",
