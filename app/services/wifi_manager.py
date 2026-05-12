@@ -28,6 +28,10 @@ logger = get_logger(__name__)
 class WifiCommandError(RuntimeError):
     pass
 
+
+class WifiAuthenticationError(WifiCommandError):
+    pass
+
 #==============================================================================
 # SAFE EXECUTION
 #==============================================================================
@@ -327,6 +331,61 @@ def _delete_saved_profile(ssid: str) -> None:
         _nmcli(["connection", "delete", "id", ssid], check=False, timeout=8, require_root=True)
 
 
+def _create_wifi_profile(ssid: str, password: str) -> None:
+    _delete_saved_profile(ssid)
+    _nmcli([
+        "connection",
+        "add",
+        "type",
+        "wifi",
+        "ifname",
+        DEFAULT_INTERFACE,
+        "con-name",
+        ssid,
+        "ssid",
+        ssid,
+    ], timeout=8, require_root=True)
+    _nmcli([
+        "connection",
+        "modify",
+        "id",
+        ssid,
+        "connection.autoconnect",
+        "yes",
+        "ipv4.method",
+        "auto",
+        "ipv6.method",
+        "auto",
+    ], timeout=8, require_root=True)
+    if password:
+        _nmcli([
+            "connection",
+            "modify",
+            "id",
+            ssid,
+            "802-11-wireless-security.key-mgmt",
+            "wpa-psk",
+            "802-11-wireless-security.psk",
+            password,
+            "802-11-wireless-security.psk-flags",
+            "0",
+        ], timeout=8, require_root=True)
+
+
+def _raise_classified_wifi_error(ssid: str, error: Exception) -> None:
+    text = str(error)
+    lowered = text.lower()
+    if (
+        "secrets were required" in lowered
+        or "no secrets" in lowered
+        or "802-11-wireless-security.psk" in lowered
+        or "wrong password" in lowered
+        or "password" in lowered and "not given" in lowered
+    ):
+        raise WifiAuthenticationError(f"Authentication failed for {ssid}: wrong or missing WiFi password") from error
+    raise WifiCommandError(text) from error
+
+
 # =========================================================
 # HOTSPOT START
 # =========================================================
@@ -386,17 +445,20 @@ def reconnect_saved_wifi(ssid: str) -> dict[str, Any]:
         if not _saved_profile_exists(ssid):
             raise WifiCommandError(f"Reconnect failed:{ssid}: saved profile not found")
 
-        result = _nmcli(
-            ["connection", "up", "id", ssid, "ifname", DEFAULT_INTERFACE],
-            timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS,
-            require_root=True,
-        )
-        logger.info("Saved WiFi reconnect command succeeded for %s", ssid)
+        try:
+            result = _nmcli(
+                ["connection", "up", "id", ssid, "ifname", DEFAULT_INTERFACE],
+                timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS,
+                require_root=True,
+            )
+            logger.info("Saved WiFi reconnect command succeeded for %s", ssid)
 
-        if not _wait_for_connection(ssid, timeout=min(20, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)):
-            details = get_connected_wifi_details()
-            logger.warning("Reconnect wait failed for %s; current WiFi details: %s", ssid, details)
-            raise WifiCommandError(f"Reconnect failed:{ssid}")
+            if not _wait_for_connection(ssid, timeout=min(20, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)):
+                details = get_connected_wifi_details()
+                logger.warning("Reconnect wait failed for %s; current WiFi details: %s", ssid, details)
+                raise WifiCommandError(f"Reconnect failed:{ssid}")
+        except Exception as exc:
+            _raise_classified_wifi_error(ssid, exc)
         return {
             "status": "reconnected",
             "ssid": ssid,
@@ -418,30 +480,30 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
         stop_hotspot()
         time.sleep(0.3)
 
-        if password:
-            _delete_saved_profile(ssid)
-            cmd = ["dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE, "name", ssid]
-            cmd += ["password", password]
-            result = _nmcli(cmd, timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS, require_root=True)
-            _nmcli(
-                ["connection", "modify", "id", ssid, "connection.autoconnect", "yes"],
-                check=False,
-                timeout=5,
-                require_root=True,
-            )
-        elif _saved_profile_exists(ssid):
+        try:
+            if password:
+                _create_wifi_profile(ssid, password)
+            elif not _saved_profile_exists(ssid):
+                raise WifiAuthenticationError(f"Authentication failed for {ssid}: password required for new network")
+
             result = _nmcli(
                 ["connection", "up", "id", ssid, "ifname", DEFAULT_INTERFACE],
                 timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS,
                 require_root=True,
             )
-        else:
-            raise WifiCommandError(f"Connection failed:{ssid}: password required for new network")
 
-        if not _wait_for_connection(ssid, timeout=min(20, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)):
-            details = get_connected_wifi_details()
-            logger.warning("Connection wait failed for %s; current WiFi details: %s", ssid, details)
-            raise WifiCommandError(f"Connection failed:{ssid}")
+            if not _wait_for_connection(ssid, timeout=min(20, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)):
+                details = get_connected_wifi_details()
+                logger.warning("Connection wait failed for %s; current WiFi details: %s", ssid, details)
+                raise WifiCommandError(f"Connection failed:{ssid}")
+        except WifiAuthenticationError:
+            _delete_saved_profile(ssid)
+            raise
+        except Exception as exc:
+            if password:
+                _delete_saved_profile(ssid)
+            _raise_classified_wifi_error(ssid, exc)
+
         return {
             "status": "connected",
             "ssid": ssid,
