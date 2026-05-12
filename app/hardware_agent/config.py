@@ -140,7 +140,7 @@ def load_agent_config() -> AgentConfig:
         or QBOX_WIFI_AGENT_DEVICE_ID
     )
 
-    device_id = str(backend_state.get("device_id") or "").strip()
+    device_id = str(backend_state.get("device_id") or "").strip() or device_uuid
 
     if not device_uuid:
         raise RuntimeError("Device UUID missing. Register device first.")
