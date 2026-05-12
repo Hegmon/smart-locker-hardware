@@ -50,14 +50,14 @@ class CommandCharacteristic(dbus.service.Object):
         response: dict[str, object]
         try:
             payload = self._decode_payload(bytes(value))
-            logger.info("BLE RX payload: %s", payload)
+            logger.info("BLE RX payload: %s", _redact_payload(payload))
             response = self.handler.handle(payload)
         except Exception as exc:
             logger.exception("BLE command write failed: %s", exc)
             response = {
                 "status": "failed",
                 "error": str(exc),
-                "hint": 'Use JSON like {"action":"scan_wifi"} or {"action":"connect_wifi","ssid":"MyWiFi","password":"secret"}',
+                "hint": 'Use JSON like {"action":"scan_wifi"} or {"action":"connect_wifi","ssid":"MyWiFi","password":"********"}',
             }
 
         if self.response_char:
@@ -120,7 +120,7 @@ class ResponseCharacteristic(dbus.service.Object):
 
     def notify(self, data):
         self.value = json.dumps(data).encode()
-        logger.info("BLE TX payload: %s", data)
+        logger.info("BLE TX payload: %s", _redact_payload(data))
         if self.notifying:
             self.PropertiesChanged(
                 GATT_CHARACTERISTIC_IFACE,
@@ -158,3 +158,17 @@ class ResponseCharacteristic(dbus.service.Object):
     @dbus.service.signal(DBUS_PROP_IFACE, signature="sa{sv}as")
     def PropertiesChanged(self, interface, changed, invalidated):
         pass
+
+
+def _redact_payload(payload):
+    if isinstance(payload, dict):
+        redacted = {}
+        for key, value in payload.items():
+            if str(key).lower() in {"password", "psk", "secret"}:
+                redacted[key] = "********"
+            else:
+                redacted[key] = _redact_payload(value)
+        return redacted
+    if isinstance(payload, list):
+        return [_redact_payload(item) for item in payload]
+    return payload
