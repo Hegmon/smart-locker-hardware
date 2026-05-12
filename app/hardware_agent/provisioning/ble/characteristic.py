@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 
 import dbus
@@ -46,18 +47,45 @@ class CommandCharacteristic(dbus.service.Object):
 
     @dbus.service.method(GATT_CHARACTERISTIC_IFACE, in_signature="aya{sv}", out_signature="")
     def WriteValue(self, value, options):
+        response: dict[str, object]
         try:
-            data = bytes(value).decode()
-            payload = json.loads(data)
+            payload = self._decode_payload(bytes(value))
             logger.info("BLE RX payload: %s", payload)
-
             response = self.handler.handle(payload)
-
-            if self.response_char:
-                self.response_char.notify(response)
-
         except Exception as exc:
             logger.exception("BLE command write failed: %s", exc)
+            response = {
+                "status": "failed",
+                "error": str(exc),
+                "hint": 'Use JSON like {"action":"scan_wifi"} or {"action":"connect_wifi","ssid":"MyWiFi","password":"secret"}',
+            }
+
+        if self.response_char:
+            self.response_char.notify(response)
+
+    @staticmethod
+    def _decode_payload(raw_value: bytes) -> dict[str, object]:
+        text = raw_value.decode("utf-8", errors="ignore").replace("\x00", "").strip()
+        if not text:
+            raise ValueError("empty BLE payload")
+
+        if text in {"scan_wifi", "wifi_scan", "scan"}:
+            return {"action": "scan_wifi"}
+
+        if text in {"connect_wifi", "wifi_connect", "connect"}:
+            raise ValueError("connect_wifi requires ssid and password fields")
+
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            try:
+                decoded = ast.literal_eval(text)
+            except Exception as exc:
+                raise ValueError(f"invalid BLE payload: {text}") from exc
+
+        if not isinstance(decoded, dict):
+            raise ValueError("BLE payload must decode to an object/dictionary")
+        return decoded
 
 
 class ResponseCharacteristic(dbus.service.Object):
