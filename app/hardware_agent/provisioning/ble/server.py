@@ -53,6 +53,8 @@ class BLEServer:
         self.advertisement = None
         self._thread: threading.Thread | None = None
         self._running = False
+        self._bluetooth_enabled = False
+        self._advertising_active = False
         self._lock = threading.RLock()
 
     def start_async(self) -> bool:
@@ -77,6 +79,8 @@ class BLEServer:
             device_name = get_device_name()
 
             self._prepare_adapter(adapter, device_name)
+            with self._lock:
+                self._bluetooth_enabled = True
 
             app = Application(self.bus)
             service = SmartLockerService(self.bus, self.handler)
@@ -107,7 +111,7 @@ class BLEServer:
             ad_manager.RegisterAdvertisement(
                 self.advertisement.get_path(),
                 {},
-                reply_handler=lambda: logger.info("BLE advertisement registered"),
+                reply_handler=self._on_advertisement_registered,
                 error_handler=lambda error: logger.error("BLE advertisement register error: %s", error),
             )
 
@@ -121,6 +125,7 @@ class BLEServer:
                 self.advertisement = None
                 self.loop = None
                 self._thread = None
+                self._advertising_active = False
             logger.info("BLE provisioning server stopped")
 
     def stop(self) -> bool:
@@ -139,6 +144,9 @@ class BLEServer:
                     "org.bluez.LEAdvertisingManager1",
                 )
                 ad_manager.UnregisterAdvertisement(advertisement.get_path())
+                with self._lock:
+                    self._advertising_active = False
+                logger.info("BLE advertising stopped")
             except Exception:
                 logger.exception("BLE advertisement stop failed")
 
@@ -148,11 +156,21 @@ class BLEServer:
             except Exception:
                 logger.exception("BLE loop stop failed")
 
+        self._disable_bluetooth()
+
         return True
 
     def is_running(self) -> bool:
         with self._lock:
             return self._running
+
+    def is_bluetooth_enabled(self) -> bool:
+        with self._lock:
+            return self._bluetooth_enabled
+
+    def is_advertising(self) -> bool:
+        with self._lock:
+            return self._advertising_active
 
     def _get_adapter(self):
         obj = self.bus.get_object(BLUEZ_SERVICE_NAME, ADAPTER_PATH)
@@ -162,6 +180,7 @@ class BLEServer:
         self._run_best_effort(["rfkill", "unblock", "bluetooth"])
         self._run_best_effort(["bluetoothctl", "power", "on"])
         self._run_best_effort(["hciconfig", "hci0", "up"])
+        logger.info("Bluetooth enabled")
 
         self._set_adapter_property(adapter, "Alias", device_name, required=False)
         self._set_adapter_property(adapter, "Powered", dbus.Boolean(1), required=True)
@@ -192,6 +211,27 @@ class BLEServer:
         if required and last_error is not None:
             raise last_error
         return False
+
+    def _disable_bluetooth(self) -> None:
+        try:
+            adapter = self._get_adapter()
+            self._set_adapter_property(adapter, "Discoverable", dbus.Boolean(0), required=False)
+            self._set_adapter_property(adapter, "Pairable", dbus.Boolean(0), required=False)
+            self._set_adapter_property(adapter, "Powered", dbus.Boolean(0), required=False)
+        except Exception:
+            logger.exception("Bluetooth adapter power down failed")
+        finally:
+            self._run_best_effort(["bluetoothctl", "power", "off"])
+            self._run_best_effort(["hciconfig", "hci0", "down"])
+            with self._lock:
+                self._bluetooth_enabled = False
+                self._advertising_active = False
+            logger.info("Bluetooth disabled after WiFi connection")
+
+    def _on_advertisement_registered(self) -> None:
+        with self._lock:
+            self._advertising_active = True
+        logger.info("BLE advertising started")
 
     @staticmethod
     def _run_best_effort(command: list[str]) -> None:
