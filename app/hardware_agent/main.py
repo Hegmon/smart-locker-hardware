@@ -651,33 +651,34 @@ class WifiUploadAgent:
         connected = get_connected_wifi_details()
         current_ssid = str(connected.get("connected_ssid") or "").strip() or None
         current_rssi = self._network_rssi(networks, current_ssid)
-        candidate = self._select_best_saved_network(networks)
-        if candidate is None:
-            logger.info("No saved WiFi networks are currently visible")
-            return False
-
-        if (
-            not allow_roam
-            and current_ssid
-            and candidate.ssid == current_ssid
-        ):
-            logger.info("Already connected to strongest saved WiFi %s", current_ssid)
+        candidates = self._build_saved_wifi_candidates(networks)
+        if not candidates:
+            logger.info("No saved WiFi reconnect candidates are available")
             return False
 
         if current_ssid and current_rssi is not None:
+            strongest = candidates[0]
             logger.info(
-                "Current WiFi %s RSSI %s dBm, strongest saved WiFi %s RSSI %s dBm",
+                "Current WiFi %s RSSI %s dBm, strongest saved WiFi candidate %s RSSI %s dBm",
                 current_ssid,
                 current_rssi,
-                candidate.ssid,
-                candidate.rssi,
+                strongest["ssid"],
+                strongest["rssi"],
             )
 
-        return self._attempt_saved_wifi_reconnect(
-            candidate.ssid,
-            source=source,
-            reason=f"strongest saved WiFi RSSI {candidate.rssi} dBm",
-        )
+        for candidate in candidates:
+            ssid = candidate["ssid"]
+            if not allow_roam and current_ssid and ssid == current_ssid:
+                logger.info("Already connected to strongest saved WiFi %s", current_ssid)
+                return False
+            if self._attempt_saved_wifi_reconnect(
+                ssid,
+                source=source,
+                reason=f"saved WiFi candidate RSSI {candidate['rssi']} dBm",
+            ):
+                return True
+
+        return False
 
     def _attempt_saved_wifi_reconnect(self, ssid: str, *, source: str, reason: str) -> bool:
         if not self._command_lock.acquire(blocking=False):
@@ -705,12 +706,20 @@ class WifiUploadAgent:
             self._command_lock.release()
 
     def _select_best_saved_network(self, networks: list[object]):
+        candidates = self._build_saved_wifi_candidates(networks)
+        if not candidates:
+            return None
+        selected_ssid = candidates[0]["ssid"]
+        for network in networks:
+            if network.ssid == selected_ssid:
+                logger.info("Selected strongest saved WiFi: %s (%s dBm)", network.ssid, network.rssi)
+                return network
+        return None
+
+    def _build_saved_wifi_candidates(self, networks: list[object]) -> list[dict[str, Any]]:
         saved_ssids = set(list_saved_wifi_networks())
         saved_networks = [network for network in networks if network.ssid in saved_ssids]
-
-        if not saved_networks:
-            logger.info("Visible saved WiFi networks: none")
-            return None
+        visible_saved_ssids = {network.ssid for network in saved_networks}
 
         logger.info(
             "Visible saved WiFi networks: %s",
@@ -721,12 +730,23 @@ class WifiUploadAgent:
                     "security": getattr(network, "security", "UNKNOWN"),
                 }
                 for network in saved_networks
-            ],
+            ] or "none",
         )
 
-        selected = max(saved_networks, key=lambda network: network.rssi)
-        logger.info("Selected strongest saved WiFi: %s (%s dBm)", selected.ssid, selected.rssi)
-        return selected
+        candidates = [
+            {
+                "ssid": network.ssid,
+                "rssi": network.rssi,
+            }
+            for network in sorted(saved_networks, key=lambda network: network.rssi, reverse=True)
+        ]
+
+        for ssid in saved_ssids:
+            if ssid not in visible_saved_ssids:
+                candidates.append({"ssid": ssid, "rssi": -999})
+
+        logger.info("Saved WiFi reconnect candidates: %s", candidates)
+        return candidates
 
     @staticmethod
     def _network_rssi(networks: list[object], ssid: str | None) -> int | None:
