@@ -239,7 +239,7 @@ class BLEServer:
             with self._lock:
                 self._bluetooth_enabled = False
                 self._advertising_active = False
-            logger.info("Bluetooth disabled after WiFi connection")
+            logger.info("Bluetooth disabled")
 
     def _on_advertisement_registered(self) -> None:
         with self._lock:
