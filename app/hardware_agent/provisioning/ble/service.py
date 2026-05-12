@@ -14,8 +14,8 @@ SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 
 
 class SmartLockerService(dbus.service.Object):
-    def __init__(self, bus, handler):
-        self.path = "/org/bluez/example/service0"
+    def __init__(self, bus, handler, app_path: str = "/org/bluez/example"):
+        self.path = f"{app_path}/service0"
         self.bus = bus
         super().__init__(bus, self.path)
 
