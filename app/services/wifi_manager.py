@@ -153,12 +153,28 @@ def _wait_for_connection(ssid: str, timeout: int = 15) -> bool:
 
     while time.time() - start < timeout:
         try:
-            if get_connected_wifi_details().get("connected_ssid") == ssid:
+            details = get_connected_wifi_details()
+            if details.get("connected_ssid") == ssid:
                 return True
+            if details.get("connection_profile") == ssid and _is_connected_state(str(details.get("device_state") or "")):
+                return True
+            if details.get("connection_profile") == ssid and _is_activating_state(str(details.get("device_state") or "")):
+                time.sleep(2)
+                continue
         except Exception:
             pass
         time.sleep(1)
     return False
+
+
+def _is_connected_state(state: str) -> bool:
+    state = str(state or "").strip().lower()
+    return state == "connected" or state.startswith("100")
+
+
+def _is_activating_state(state: str) -> bool:
+    state = str(state or "").strip().lower()
+    return state == "connecting" or state.startswith(("40", "50", "60", "70", "80", "90"))
 
 
 def _active_wifi_details() -> dict[str, Any]:
@@ -220,6 +236,25 @@ def _connection_summary() -> dict[str, str]:
     return summary
 
 
+def _active_connection_for_interface() -> dict[str, str]:
+    result = _nmcli([
+        "-t",
+        "-f",
+        "NAME,TYPE,DEVICE",
+        "connection",
+        "show",
+        "--active",
+    ], timeout=8)
+    for line in result.stdout.splitlines():
+        name, connection_type, device = _split_nmcli(line, 3)
+        if device == DEFAULT_INTERFACE and connection_type == "802-11-wireless":
+            return {
+                "profile": name.strip(),
+                "device": device,
+            }
+    return {}
+
+
 #==========================================================================
 # STATUS
 #=========================================================================
@@ -238,7 +273,7 @@ def get_wifi_status() -> dict[str, Any]:
         return {
             "interface": DEFAULT_INTERFACE,
             "state": state,
-            "connected": state == "connected",
+            "connected": _is_connected_state(state),
             "connection": connection if connection != "--" else "",
             "hotspot_active": connection == DEFAULT_HOTSPOT_CONNECTION,
         }
@@ -269,17 +304,26 @@ def get_connected_wifi_details() -> dict[str, Any]:
     }
     try:
         summary = _connection_summary()
-        active = _active_wifi_details()
+        active_connection = _active_connection_for_interface()
+        active_wifi = {}
+        try:
+            active_wifi = _active_wifi_details()
+        except Exception as exc:
+            logger.debug("Active WiFi scan details unavailable: %s", exc)
+
         data["connection_profile"] = summary["profile"] if summary["profile"] != "--" else ""
         data["device_state"] = summary["state"]
         data["ip_address"] = summary["ip_address"]
-        if active.get("ssid") and summary["state"].startswith("100"):
+        connected = _is_connected_state(summary["state"])
+        connected_ssid = str(active_wifi.get("ssid") or active_connection.get("profile") or data["connection_profile"] or "").strip()
+        if connected and connected_ssid and connected_ssid != "--":
             data["connected"] = True
-            data["connected_ssid"] = active["ssid"]
-            data["signal_strength"] = active["signal_strength"]
-            data["rssi"] = active["rssi"]
-            data["is_secured"] = active["is_secured"]
-    except Exception:
+            data["connected_ssid"] = connected_ssid
+            data["signal_strength"] = active_wifi.get("signal_strength", 0)
+            data["rssi"] = active_wifi.get("rssi", 0)
+            data["is_secured"] = active_wifi.get("is_secured", False)
+    except Exception as exc:
+        logger.debug("Connected WiFi details unavailable: %s", exc)
         return data
 
     return data
