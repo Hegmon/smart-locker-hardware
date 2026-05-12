@@ -19,12 +19,17 @@ class WifiScannerError(RuntimeError):
 class WifiNetwork:
     ssid: str
     rssi: int
-    is_secured: bool
+    security: str
+
+    @property
+    def is_secured(self) -> bool:
+        return self.security not in ("", "--", "OPEN")
 
     def to_payload(self) -> dict[str, object]:
         return {
             "ssid": self.ssid,
             "rssi": self.rssi,
+            "security": self.security,
             "is_secured": self.is_secured,
         }
 
@@ -144,7 +149,7 @@ class WifiScanner:
                 WifiNetwork(
                     ssid=ssid,
                     rssi=self._signal_to_dbm(signal),
-                    is_secured=security not in ("", "--"),
+                    security=security or "OPEN",
                 )
             )
         return networks
@@ -173,7 +178,7 @@ class WifiScanner:
                 secured = True
 
             if ssid and signal is not None:
-                yield WifiNetwork(ssid, int(signal), secured)
+                yield WifiNetwork(ssid, int(signal), "WPA/WPA2" if secured else "OPEN")
                 ssid, signal, secured = "", None, False
 
     # =========================================================
@@ -202,7 +207,7 @@ class WifiScanner:
                 secured = True
 
             if ssid and signal is not None:
-                yield WifiNetwork(ssid, signal, secured)
+                yield WifiNetwork(ssid, signal, "WPA/WPA2" if secured else "OPEN")
                 ssid, signal, secured = "", None, False
 
     #==================================================================================
