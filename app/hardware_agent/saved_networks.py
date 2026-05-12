@@ -134,7 +134,7 @@ class SavedNetworkManager:
     def _failure_delay(self, failure_count: int, reason: str) -> float:
         lowered = reason.lower()
         if "authentication failed" in lowered or "wrong or missing wifi password" in lowered:
-            return max(self.max_retry_delay_seconds, 900)
+            return 24 * 60 * 60
         return min(
             self.max_retry_delay_seconds,
             self.retry_base_delay_seconds * (2 ** max(0, failure_count - 1)),
