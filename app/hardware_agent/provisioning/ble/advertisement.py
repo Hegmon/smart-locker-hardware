@@ -9,8 +9,15 @@ DBUS_PROP_IFACE = "org.freedesktop.DBus.Properties"
 class Advertisement(dbus.service.Object):
     PATH_BASE = "/org/bluez/example/advertisement"
 
-    def __init__(self, bus, index: int, service_uuid: str, device_name: str):
-        self.path = self.PATH_BASE + str(index)
+    def __init__(
+        self,
+        bus,
+        index: int,
+        service_uuid: str,
+        device_name: str,
+        path_base: str | None = None,
+    ):
+        self.path = (path_base or self.PATH_BASE) + str(index)
         self.bus = bus
 
         self.service_uuids = [service_uuid]
