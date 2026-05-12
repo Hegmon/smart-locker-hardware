@@ -123,6 +123,7 @@ class WifiUploadAgent:
         self._last_scan_connected_ssid: str | None = None
         self._last_status_signature: tuple[str, str | None] | None = None
         self._last_priority_reconnect_at = 0.0
+        self._last_saved_retry_at = 0.0
         self._ble_started_at = 0.0
         self._last_internet_check_at = 0.0
         self._last_internet_online = False
@@ -615,7 +616,8 @@ class WifiUploadAgent:
                 self._last_status_signature = signature
 
         if should_publish:
-            self.mqtt.publish(self.config.mqtt_state_topic, payload)
+            if self.mqtt.is_connected():
+                self.mqtt.publish(self.config.mqtt_state_topic, payload)
 
     def _initial_publish(self):
         try:
@@ -676,6 +678,8 @@ class WifiUploadAgent:
         self._publish_wifi_scan_payload(networks, connected)
 
     def _publish_wifi_scan_payload(self, networks: list[object], connected: dict[str, Any]):
+        if not self.mqtt.is_connected():
+            return
         payload = self._build_wifi_scan_payload(networks, connected)
         self.mqtt.publish(self.config.mqtt_scan_topic, payload)
 
@@ -772,6 +776,13 @@ class WifiUploadAgent:
             with self._state_lock:
                 self._auto_reconnect_deferred = True
             return False
+
+        now = time.monotonic()
+        with self._state_lock:
+            if source not in {"startup", "recovery"} and now - self._last_saved_retry_at < self.config.reconnect_interval_seconds:
+                logger.info("Saved WiFi reconnect throttled for %s", source)
+                return False
+            self._last_saved_retry_at = now
 
         networks = self.scanner.scan()
         connected = get_connected_wifi_details()
