@@ -5,7 +5,6 @@ import time
 import threading
 from typing import Any
 import subprocess
-import shutil
 
 from app.deployment.runtime_config import get_bool_setting, get_int_setting, get_str_setting
 from app.utils.logger import get_logger
@@ -87,14 +86,7 @@ def _noninteractive_command(command: list[str], *, require_root: bool) -> list[s
     if ALLOW_NON_ROOT_NMCLI or getattr(os, "geteuid", lambda: 0)() == 0:
         return command
 
-    sudo_path = shutil.which("sudo")
-    if sudo_path:
-        return [sudo_path, "-n", *command]
-
-    raise WifiCommandError(
-        "NetworkManager changes require root. Run the hardware agent via systemd/root "
-        "or set ALLOW_NON_ROOT_NMCLI=true if your Pi user is authorized for nmcli."
-    )
+    return command
 
 
 def _redact_command(command: list[str]) -> str:
