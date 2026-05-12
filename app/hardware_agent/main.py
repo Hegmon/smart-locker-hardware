@@ -23,7 +23,6 @@ from app.services.wifi_manager import (
     get_connected_wifi_details,
     list_saved_wifi_networks,
     reconnect_saved_wifi,
-    start_hotspot,
 )
 from app.utils.logger import get_logger
 
@@ -55,9 +54,9 @@ class NetworkSnapshot:
 
 class WifiUploadAgent:
     RECOVERY_POLL_SECONDS = 5
-    RECOVERY_BLE_TIMEOUT_SECONDS = 60
     WATCHDOG_INTERVAL_SECONDS = 10
     WIFI_PRIORITY_RECHECK_SECONDS = 30
+    BLE_RESTART_SECONDS = 15
 
     def __init__(self, config: AgentConfig):
         self.config = config
@@ -261,25 +260,20 @@ class WifiUploadAgent:
                 reason="Recovery entering BLE provisioning",
             )
 
-            deadline = time.monotonic() + self.RECOVERY_BLE_TIMEOUT_SECONDS
-            while self._running and time.monotonic() < deadline:
+            next_ble_restart_at = time.monotonic() + self.BLE_RESTART_SECONDS
+            while self._running:
                 time.sleep(self.RECOVERY_POLL_SECONDS)
                 status = get_connected_wifi_details()
                 if status.get("connected_ssid"):
                     self._handle_wifi_observation(status, source="recovery-ble")
                     return
 
-            if self._is_connected():
-                return
-
-            self._transition_to(NetworkState.HOTSPOT, reason="BLE provisioning timed out")
-            try:
-                hotspot = start_hotspot()
-                with self._state_lock:
-                    self._hotspot_active = True
-                logger.info("Hotspot started: %s", hotspot.get("ssid"))
-            except Exception:
-                logger.exception("Failed to start hotspot after BLE timeout")
+                now = time.monotonic()
+                if now >= next_ble_restart_at:
+                    if self.ble.startup_failed() or not self.ble.is_running():
+                        logger.info("BLE provisioning is not active, retrying BLE startup")
+                        self._restart_ble_provisioning()
+                    next_ble_restart_at = now + self.BLE_RESTART_SECONDS
 
         finally:
             with self._recovery_gate:
@@ -342,6 +336,11 @@ class WifiUploadAgent:
 
         logger.info("BLE provisioning disabled")
         self.ble.stop()
+
+    def _restart_ble_provisioning(self):
+        with self._ble_gate:
+            self._ble_active = False
+        self._start_ble()
 
     def handle_command(self, payload: dict[str, Any], topic: str) -> dict[str, Any]:
         command_id = payload.get("command_id")
