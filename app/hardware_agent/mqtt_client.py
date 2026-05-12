@@ -34,6 +34,7 @@ class MqttClient:
         self._running = True
         self._connected = False
         self._connection_lock = threading.Lock()
+        self._handler_lock = threading.RLock()
         self._pending_lock = threading.Lock()
         self._processed_lock = threading.Lock()
         self._processed_commands: list[str] = []
@@ -107,6 +108,7 @@ class MqttClient:
             self._fallback_notified = False
 
         client.subscribe("devices/+/services/+/request", qos=1)
+        client.subscribe("hardware_agent/request/+", qos=1)
         logger.info("MQTT connected to %s:%s", self.host, self.port)
         self._flush_pending_messages()
 
@@ -119,19 +121,12 @@ class MqttClient:
             logger.warning("MQTT disconnected with rc=%s", rc)
 
     def _on_message(self, client, userdata, msg):
-        try:
-            payload = json.loads(msg.payload.decode())
-        except Exception:
-            logger.exception("MQTT payload decode failed for topic %s", msg.topic)
-            return
-
-        topic_parts = msg.topic.split("/")
-        if len(topic_parts) < 5:
+        payload = self._decode_payload(msg.topic, msg.payload)
+        response_topic = self._response_topic_for_request(msg.topic, payload)
+        if response_topic is None:
             logger.warning("MQTT topic ignored: %s", msg.topic)
             return
 
-        device_id = topic_parts[1]
-        service = topic_parts[3]
         command_id = payload.get("command_id")
 
         if command_id and self._is_duplicate_command(command_id):
@@ -141,19 +136,26 @@ class MqttClient:
             return
 
         try:
-            response = self._command_handler(payload, msg.topic)
+            with self._handler_lock:
+                response = self._command_handler(payload, msg.topic)
             if response is None:
                 return
 
-            response_topic = f"devices/{device_id}/services/{service}/response"
-            self.publish(
-                response_topic,
-                {
-                    "command_id": command_id,
-                    "service": service,
-                    "result": response,
-                },
-            )
+            if msg.topic.startswith("hardware_agent/request/"):
+                self.publish(response_topic, response)
+            else:
+                service = payload.get("service")
+                if not isinstance(service, str) or not service.strip():
+                    topic_parts = msg.topic.split("/")
+                    service = topic_parts[3]
+                self.publish(
+                    response_topic,
+                    {
+                        "command_id": command_id,
+                        "service": service,
+                        "result": response,
+                    },
+                )
         except Exception:
             logger.exception("MQTT command handler failed for topic %s", msg.topic)
 
@@ -168,8 +170,12 @@ class MqttClient:
                     except Exception as exc:
                         logger.warning("MQTT reconnect retry failed: %s", exc)
 
-                    if self._ble_fallback_handler and not self._fallback_notified:
-                        self._fallback_notified = True
+                    notify_fallback = False
+                    with self._connection_lock:
+                        if self._ble_fallback_handler and not self._fallback_notified:
+                            self._fallback_notified = True
+                            notify_fallback = True
+                    if notify_fallback:
                         try:
                             self._ble_fallback_handler()
                         except Exception:
@@ -233,3 +239,32 @@ class MqttClient:
             if not published:
                 self._queue_publish(topic, payload)
                 return
+
+    @staticmethod
+    def _decode_payload(topic: str, payload_bytes: bytes) -> dict[str, Any]:
+        raw_payload = payload_bytes.decode().strip()
+        if not raw_payload:
+            return {}
+        try:
+            decoded = json.loads(raw_payload)
+        except Exception:
+            logger.exception("MQTT payload decode failed for topic %s", topic)
+            return {}
+        if isinstance(decoded, dict):
+            return decoded
+        return {"value": decoded}
+
+    @staticmethod
+    def _response_topic_for_request(topic: str, payload: dict[str, Any]) -> str | None:
+        if topic.startswith("hardware_agent/request/"):
+            return topic.replace("/request/", "/response/", 1)
+
+        topic_parts = topic.split("/")
+        if len(topic_parts) < 5:
+            return None
+
+        device_id = topic_parts[1]
+        service = payload.get("service")
+        if not isinstance(service, str) or not service.strip():
+            service = topic_parts[3]
+        return f"devices/{device_id}/services/{service}/response"
