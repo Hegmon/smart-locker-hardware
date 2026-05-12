@@ -97,6 +97,27 @@ def _redact_command(command: list[str]) -> str:
     return " ".join(shlex.quote(c) for c in redacted)
 
 
+def _split_nmcli(line: str, expected: int) -> list[str]:
+    parts, current, escaped = [], [], False
+    for char in line:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == ":" and len(parts) < expected - 1:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    parts.append("".join(current))
+    while len(parts) < expected:
+        parts.append("")
+    return parts
+
+
 # =========================================================
 # RETRY WRAPPER
 # =========================================================
@@ -134,6 +155,65 @@ def _wait_for_connection(ssid: str, timeout: int = 15) -> bool:
             pass
         time.sleep(1)
     return False
+
+
+def _active_wifi_details() -> dict[str, Any]:
+    result = _nmcli([
+        "-t",
+        "-f",
+        "IN-USE,SSID,SIGNAL,SECURITY",
+        "dev",
+        "wifi",
+        "list",
+        "ifname",
+        DEFAULT_INTERFACE,
+    ], timeout=8)
+
+    for line in result.stdout.splitlines():
+        parts = _split_nmcli(line, 4)
+        if parts[0] != "*":
+            continue
+        ssid = parts[1].strip()
+        signal = 0
+        try:
+            signal = int(parts[2] or 0)
+        except ValueError:
+            signal = 0
+        security = parts[3].strip()
+        return {
+            "ssid": ssid,
+            "signal_strength": signal,
+            "rssi": int((signal / 2) - 100),
+            "is_secured": security not in ("", "--"),
+        }
+    return {}
+
+
+def _connection_summary() -> dict[str, str]:
+    summary = {
+        "profile": "",
+        "state": "",
+        "ip_address": "",
+    }
+    result = _nmcli([
+        "-t",
+        "-f",
+        "GENERAL.CONNECTION,GENERAL.STATE,IP4.ADDRESS[1]",
+        "device",
+        "show",
+        DEFAULT_INTERFACE,
+    ], timeout=8)
+    for line in result.stdout.splitlines():
+        if "GENERAL.CONNECTION" in line:
+            _, _, value = line.partition(":")
+            summary["profile"] = value.strip()
+        elif "GENERAL.STATE" in line:
+            _, _, value = line.partition(":")
+            summary["state"] = value.strip()
+        elif "IP4.ADDRESS" in line:
+            _, _, value = line.partition(":")
+            summary["ip_address"] = value.strip().split("/", 1)[0]
+    return summary
 
 
 #==========================================================================
@@ -176,49 +256,25 @@ def get_connected_wifi_details() -> dict[str, Any]:
     data = {
         "connected": False,
         "connected_ssid": "",
+        "connection_profile": "",
+        "device_state": "",
         "signal_strength": 0,
         "rssi": 0,
         "is_secured": False,
         "ip_address": "",
     }
     try:
-        result = _nmcli([
-            "-t",
-            "-f",
-            "GENERAL.CONNECTION,GENERAL.STATE,IP4.ADDRESS[1]",
-            "device",
-            "show",
-            DEFAULT_INTERFACE,
-        ])
-        for line in result.stdout.splitlines():
-            if "GENERAL.CONNECTION" in line:
-                parts = line.split(":", 1)
-                ssid = (parts[1].strip() if len(parts) > 1 else "")
-                if ssid and ssid != "--":
-                    data["connected"] = True
-                    data["connected_ssid"] = ssid
-            elif "IP4.ADDRESS" in line:
-                parts = line.split(":", 1)
-                address = (parts[1].strip() if len(parts) > 1 else "")
-                if address:
-                    data["ip_address"] = address.split("/", 1)[0]
-
-        signal = _nmcli([
-            "-t",
-            "-f",
-            "IN-USE,SIGNAL",
-            "dev",
-            "wifi",
-            "list",
-            "ifname",
-            DEFAULT_INTERFACE,
-        ])
-        for line in signal.stdout.splitlines():
-            if line.startswith("*"):
-                s = int(line.split(":")[1] or 0)
-                data["signal_strength"] = s
-                data["rssi"] = int((s / 2) - 100)
-                break
+        summary = _connection_summary()
+        active = _active_wifi_details()
+        data["connection_profile"] = summary["profile"] if summary["profile"] != "--" else ""
+        data["device_state"] = summary["state"]
+        data["ip_address"] = summary["ip_address"]
+        if active.get("ssid") and summary["state"].startswith("100"):
+            data["connected"] = True
+            data["connected_ssid"] = active["ssid"]
+            data["signal_strength"] = active["signal_strength"]
+            data["rssi"] = active["rssi"]
+            data["is_secured"] = active["is_secured"]
     except Exception:
         return data
 
@@ -259,6 +315,16 @@ def _saved_profile_exists(ssid: str) -> bool:
         if name == ssid and connection_type.strip() == "802-11-wireless":
             return True
     return False
+
+
+def _delete_saved_profile(ssid: str) -> None:
+    if not ssid:
+        return
+    for _ in range(3):
+        if not _saved_profile_exists(ssid):
+            return
+        _nmcli(["connection", "down", "id", ssid], check=False, timeout=5, require_root=True)
+        _nmcli(["connection", "delete", "id", ssid], check=False, timeout=8, require_root=True)
 
 
 # =========================================================
@@ -327,7 +393,9 @@ def reconnect_saved_wifi(ssid: str) -> dict[str, Any]:
         )
         logger.info("Saved WiFi reconnect command succeeded for %s", ssid)
 
-        if not _wait_for_connection(ssid, timeout=min(10, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)):
+        if not _wait_for_connection(ssid, timeout=min(20, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)):
+            details = get_connected_wifi_details()
+            logger.warning("Reconnect wait failed for %s; current WiFi details: %s", ssid, details)
             raise WifiCommandError(f"Reconnect failed:{ssid}")
         return {
             "status": "reconnected",
@@ -350,35 +418,29 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
         stop_hotspot()
         time.sleep(0.3)
 
-        if _saved_profile_exists(ssid):
-            if password:
-                _nmcli(
-                    [
-                        "connection",
-                        "modify",
-                        "id",
-                        ssid,
-                        "wifi-sec.key-mgmt",
-                        "wpa-psk",
-                        "wifi-sec.psk",
-                        password,
-                        "connection.autoconnect",
-                        "yes",
-                    ],
-                    timeout=8,
-                    require_root=True,
-                )
+        if password:
+            _delete_saved_profile(ssid)
+            cmd = ["dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE, "name", ssid]
+            cmd += ["password", password]
+            result = _nmcli(cmd, timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS, require_root=True)
+            _nmcli(
+                ["connection", "modify", "id", ssid, "connection.autoconnect", "yes"],
+                check=False,
+                timeout=5,
+                require_root=True,
+            )
+        elif _saved_profile_exists(ssid):
             result = _nmcli(
                 ["connection", "up", "id", ssid, "ifname", DEFAULT_INTERFACE],
                 timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS,
                 require_root=True,
             )
         else:
-            cmd = ["dev", "wifi", "connect", ssid, "ifname", DEFAULT_INTERFACE, "name", ssid]
-            if password:
-                cmd += ["password", password]
-            result = _nmcli(cmd, timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS, require_root=True)
-        if not _wait_for_connection(ssid, timeout=min(10, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)):
+            raise WifiCommandError(f"Connection failed:{ssid}: password required for new network")
+
+        if not _wait_for_connection(ssid, timeout=min(20, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)):
+            details = get_connected_wifi_details()
+            logger.warning("Connection wait failed for %s; current WiFi details: %s", ssid, details)
             raise WifiCommandError(f"Connection failed:{ssid}")
         return {
             "status": "connected",
