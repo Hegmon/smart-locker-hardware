@@ -13,15 +13,17 @@ from app.deployment.health_server import AgentHealthServer
 from app.deployment.runtime_config import get_int_setting
 from app.deployment.validation import validate_runtime_configuration
 from app.hardware_agent.config import AgentConfig, load_agent_config
+from app.hardware_agent.connectivity import ConnectivityConfig, InternetConnectivityChecker
 from app.hardware_agent.mqtt_client import MqttClient
 from app.hardware_agent.provisioning.ble.server import BLEServer
+from app.hardware_agent.reconnect_policy import ReconnectPolicy, ReconnectPolicyConfig
+from app.hardware_agent.saved_networks import SavedNetworkManager
 from app.services.hardware_manager import initialize_gpio_with_retry
 from app.hardware_agent.scanner import WifiScanner
 from app.services.wifi_manager import (
     WifiCommandError,
     connect_wifi,
     get_connected_wifi_details,
-    list_saved_wifi_networks,
     reconnect_saved_wifi,
 )
 from app.utils.logger import get_logger
@@ -35,10 +37,15 @@ def utc_now() -> str:
 
 
 class NetworkState(str, Enum):
+    BOOTING = "BOOTING"
+    CHECKING_INTERNET = "CHECKING_INTERNET"
     DISCONNECTED = "DISCONNECTED"
+    SCANNING_SAVED_NETWORKS = "SCANNING_SAVED_NETWORKS"
     CONNECTING = "CONNECTING"
     CONNECTED = "CONNECTED"
     BLE_PROVISIONING = "BLE_PROVISIONING"
+    RECONNECTING = "RECONNECTING"
+    ERROR_BACKOFF = "ERROR_BACKOFF"
     HOTSPOT = "HOTSPOT"
 
 
@@ -53,9 +60,7 @@ class NetworkSnapshot:
 
 
 class WifiUploadAgent:
-    RECOVERY_POLL_SECONDS = 5
     WATCHDOG_INTERVAL_SECONDS = 10
-    WIFI_PRIORITY_RECHECK_SECONDS = 30
     BLE_RESTART_SECONDS = 15
 
     def __init__(self, config: AgentConfig):
@@ -74,6 +79,28 @@ class WifiUploadAgent:
             password=config.mqtt_password,
         )
         self.scanner = WifiScanner(config.interface)
+        self.internet = InternetConnectivityChecker(
+            ConnectivityConfig(
+                method=config.connectivity_check_method,
+                timeout_seconds=config.connectivity_check_timeout_seconds,
+                retries=config.connectivity_check_retries,
+                dns_host=config.connectivity_dns_host,
+                ping_host=config.connectivity_ping_host,
+                http_url=config.connectivity_http_url,
+            )
+        )
+        self.saved_networks = SavedNetworkManager(
+            config.state_file,
+            retry_base_delay_seconds=config.retry_base_delay_seconds,
+            max_retry_delay_seconds=config.max_retry_delay_seconds,
+        )
+        self.policy = ReconnectPolicy(
+            ReconnectPolicyConfig(
+                minimum_signal_dbm=config.min_signal_dbm,
+                switch_hysteresis_dbm=config.switch_hysteresis_dbm,
+                switch_cooldown_seconds=config.switch_cooldown_seconds,
+            )
+        )
         self.ble = BLEServer(
             config.interface,
             on_wifi_connected=self._handle_ble_wifi_connected,
@@ -89,13 +116,16 @@ class WifiUploadAgent:
         self._ble_active = False
         self._hotspot_active = False
 
-        self.network_state = NetworkState.DISCONNECTED
+        self.network_state = NetworkState.BOOTING
         self.last_good_ssid: str | None = None
         self._last_connected_ssid: str | None = None
         self._last_scan_ssids: set[str] = set()
         self._last_scan_connected_ssid: str | None = None
         self._last_status_signature: tuple[str, str | None] | None = None
         self._last_priority_reconnect_at = 0.0
+        self._ble_started_at = 0.0
+        self._last_internet_check_at = 0.0
+        self._last_internet_online = False
 
         self.mqtt.register_command_handler(self.handle_command)
         self.mqtt.register_ble_fallback_handler(self._handle_mqtt_reconnect_pressure)
@@ -111,10 +141,8 @@ class WifiUploadAgent:
         self.mqtt.connect()
         self.mqtt.wait_until_connected(timeout_seconds=3.0)
         self._running = True
-        initial_status = get_connected_wifi_details()
-        self._handle_wifi_observation(initial_status, source="startup")
-        if initial_status.get("connected_ssid"):
-            self.publish_status(connected=initial_status, force=True)
+        initial_status = self._startup_network_flow()
+        self.publish_status(connected=initial_status, force=True)
 
         threading.Thread(target=self._watchdog_loop, daemon=True, name="wifi-watchdog").start()
         threading.Thread(target=self._heartbeat_loop, daemon=True, name="wifi-heartbeat").start()
@@ -137,6 +165,23 @@ class WifiUploadAgent:
             "hotspot_active": snapshot.hotspot_active,
             "ble_active": snapshot.ble_active,
         }
+
+    def _startup_network_flow(self) -> dict[str, Any]:
+        self._transition_to(NetworkState.CHECKING_INTERNET, reason="startup internet check")
+        status = get_connected_wifi_details()
+        if status.get("connected_ssid") and self._internet_is_available(force=True):
+            self._handle_wifi_observation(status, source="startup-online")
+            return status
+
+        logger.info("Startup internet unavailable; scanning saved WiFi before BLE provisioning")
+        if self._attempt_best_saved_reconnect(source="startup", allow_roam=True):
+            return get_connected_wifi_details()
+
+        self._transition_to(
+            NetworkState.BLE_PROVISIONING,
+            reason="startup requires provisioning; no saved network restored internet",
+        )
+        return get_connected_wifi_details()
 
     def _watchdog_loop(self):
         while self._running:
@@ -178,10 +223,23 @@ class WifiUploadAgent:
         connected_ssid = str(status.get("connected_ssid") or "").strip() or None
 
         if connected_ssid:
+            if not self._internet_is_available(force=source in {"startup-online", "ble", "mqtt", "recovery", "startup"}):
+                logger.warning(
+                    "WiFi associated to %s via %s but internet validation failed",
+                    connected_ssid,
+                    source,
+                )
+                with self._state_lock:
+                    self._last_connected_ssid = connected_ssid
+                self._transition_to(NetworkState.DISCONNECTED, reason=f"internet unavailable via {source}")
+                self._ensure_recovery_running(reason=f"internet unavailable via {source}")
+                return
+
             with self._state_lock:
                 self.last_good_ssid = connected_ssid
                 self._last_connected_ssid = connected_ssid
                 self._hotspot_active = False
+            self.saved_networks.mark_success(connected_ssid)
             transitioned = self._transition_to(
                 NetworkState.CONNECTED,
                 reason=f"WiFi connected via {source}",
@@ -203,28 +261,20 @@ class WifiUploadAgent:
             self._ensure_recovery_running(reason=f"WiFi lost via {source}")
             return
 
-        if current_state == NetworkState.DISCONNECTED:
+        if current_state in {NetworkState.DISCONNECTED, NetworkState.ERROR_BACKOFF}:
             self._ensure_recovery_running(reason=f"WiFi unavailable via {source}")
 
-    def _handle_ble_wifi_connected(self, ssid: str):
+    def _handle_ble_wifi_connected(self, ssid: str) -> bool:
         status = get_connected_wifi_details()
-        if status.get("connected_ssid"):
+        if status.get("connected_ssid") and self._internet_is_available(force=True):
             self._handle_wifi_observation(status, source="ble")
             self.publish_status(connected=status, force=False)
-            return
+            return True
 
-        transitioned = self._transition_to(
-            NetworkState.CONNECTED,
-            reason=f"BLE provisioned WiFi {ssid}",
-            connected_ssid=ssid,
-        )
-        if transitioned:
-            self._publish_connectivity_snapshot(
-                {
-                    "connected_ssid": ssid,
-                    "connected": True,
-                }
-            )
+        logger.warning("BLE provisioned WiFi %s did not pass internet validation", ssid)
+        self.saved_networks.mark_failure(ssid, "internet validation failed after BLE provisioning")
+        self._ensure_recovery_running(reason=f"BLE provisioned {ssid} without internet")
+        return False
 
     def _handle_mqtt_reconnect_pressure(self):
         with self._state_lock:
@@ -252,6 +302,7 @@ class WifiUploadAgent:
             if self._is_connected():
                 return
 
+            self._transition_to(NetworkState.SCANNING_SAVED_NETWORKS, reason="recovery scanning saved WiFi")
             if self._attempt_best_saved_reconnect(source="recovery", allow_roam=False):
                 return
 
@@ -261,16 +312,37 @@ class WifiUploadAgent:
             )
 
             next_ble_restart_at = time.monotonic() + self.BLE_RESTART_SECONDS
+            next_saved_retry_at = time.monotonic() + self.config.reconnect_interval_seconds
             while self._running:
-                time.sleep(self.RECOVERY_POLL_SECONDS)
+                time.sleep(5)
                 status = get_connected_wifi_details()
                 if status.get("connected_ssid"):
                     self._handle_wifi_observation(status, source="recovery-ble")
-                    return
+                    if self._internet_is_available():
+                        return
 
                 now = time.monotonic()
+                if now >= next_saved_retry_at:
+                    if self._attempt_best_saved_reconnect(source="recovery-retry", allow_roam=True):
+                        return
+                    next_saved_retry_at = now + self.config.reconnect_interval_seconds
+
+                if (
+                    self._ble_active
+                    and self.config.ble_discoverable_timeout_seconds > 0
+                    and self._ble_started_at > 0
+                    and now - self._ble_started_at >= self.config.ble_discoverable_timeout_seconds
+                ):
+                    logger.info("BLE provisioning discoverable timeout expired")
+                    self._stop_ble()
+                    if not self.config.ble_reenable_after_timeout:
+                        self._transition_to(NetworkState.ERROR_BACKOFF, reason="BLE timeout; waiting for saved WiFi retry")
+                        next_ble_restart_at = now + self.config.internet_check_interval_seconds
+                    else:
+                        next_ble_restart_at = now
+
                 if now >= next_ble_restart_at:
-                    if self.ble.startup_failed() or not self.ble.is_running():
+                    if self.config.ble_reenable_after_timeout and (self.ble.startup_failed() or not self.ble.is_running()):
                         logger.info("BLE provisioning is not active, retrying BLE startup")
                         self._restart_ble_provisioning()
                     next_ble_restart_at = now + self.BLE_RESTART_SECONDS
@@ -306,16 +378,20 @@ class WifiUploadAgent:
         return True
 
     def _on_state_enter(self, state: NetworkState):
-        if state in {
-            NetworkState.DISCONNECTED,
-            NetworkState.BLE_PROVISIONING,
-        }:
+        if state == NetworkState.BLE_PROVISIONING:
             self._start_ble()
             return
 
         if state in {
+            NetworkState.BOOTING,
+            NetworkState.CHECKING_INTERNET,
+            NetworkState.DISCONNECTED,
+            NetworkState.SCANNING_SAVED_NETWORKS,
+            NetworkState.CONNECTING,
+            NetworkState.RECONNECTING,
             NetworkState.CONNECTED,
             NetworkState.HOTSPOT,
+            NetworkState.ERROR_BACKOFF,
         }:
             self._stop_ble()
 
@@ -326,6 +402,8 @@ class WifiUploadAgent:
             self._ble_active = True
 
         logger.info("BLE provisioning enabled")
+        with self._state_lock:
+            self._ble_started_at = time.monotonic()
         self.ble.start_async()
 
     def _stop_ble(self):
@@ -335,6 +413,8 @@ class WifiUploadAgent:
             self._ble_active = False
 
         logger.info("BLE provisioning disabled")
+        with self._state_lock:
+            self._ble_started_at = 0.0
         self.ble.stop()
 
     def _restart_ble_provisioning(self):
@@ -379,7 +459,10 @@ class WifiUploadAgent:
             try:
                 result = connect_wifi(ssid, password)
                 connected = result.get("connection") if isinstance(result, dict) else {}
-                self._handle_wifi_observation(connected or get_connected_wifi_details(), source="mqtt")
+                connected = connected or get_connected_wifi_details()
+                if not connected.get("connected_ssid") or not self._internet_is_available(force=True):
+                    raise WifiCommandError(f"Connected to {ssid} but internet validation failed")
+                self._handle_wifi_observation(connected, source="mqtt")
 
                 response = {
                     "status": "SUCCESS",
@@ -399,7 +482,7 @@ class WifiUploadAgent:
                 last_error = str(exc)
 
             current_status = get_connected_wifi_details()
-            if current_status.get("connected_ssid") == ssid:
+            if current_status.get("connected_ssid") == ssid and self._internet_is_available(force=True):
                 self._handle_wifi_observation(current_status, source="mqtt-late-success")
                 response = {
                     "status": "SUCCESS",
@@ -421,7 +504,10 @@ class WifiUploadAgent:
                 try:
                     result = reconnect_saved_wifi(previous)
                     connected = result.get("connection") if isinstance(result, dict) else {}
-                    self._handle_wifi_observation(connected or get_connected_wifi_details(), source="mqtt-fallback")
+                    connected = connected or get_connected_wifi_details()
+                    if not connected.get("connected_ssid") or not self._internet_is_available(force=True):
+                        raise WifiCommandError(f"Fallback to {previous} failed internet validation")
+                    self._handle_wifi_observation(connected, source="mqtt-fallback")
 
                     response = {
                         "status": "SUCCESS",
@@ -611,45 +697,29 @@ class WifiUploadAgent:
 
         current_ssid = str(connected.get("connected_ssid") or "").strip() or None
         current_rssi = self._network_rssi(networks, current_ssid)
-        candidate = self._select_best_saved_network(networks)
-
-        if candidate is None:
-            return
-
-        threshold = max(1, self.config.signal_change_threshold)
-        should_reconnect = False
-        reason = ""
-
-        if not current_ssid:
-            should_reconnect = True
-            reason = "WiFi disconnected"
-        elif candidate.ssid != current_ssid:
-            current_missing = current_rssi is None
-            stronger_signal = current_rssi is None or candidate.rssi >= current_rssi + threshold
-            if current_missing or stronger_signal:
-                should_reconnect = True
-                reason = (
-                    f"saved WiFi {candidate.ssid} is stronger than {current_ssid}"
-                    if not current_missing
-                    else f"current WiFi {current_ssid} is unavailable"
-                )
-
-        if not should_reconnect:
+        policy_candidate = self._select_best_saved_candidate(networks)
+        should_reconnect, reason = self.policy.should_switch(
+            current_ssid=current_ssid,
+            current_rssi=current_rssi,
+            candidate=policy_candidate,
+            last_switch_at=self._last_priority_reconnect_at,
+        )
+        if not should_reconnect or policy_candidate is None:
+            logger.info("Skipping saved WiFi switch: %s", reason)
             return
 
         now = time.monotonic()
         with self._state_lock:
-            if now - self._last_priority_reconnect_at < self.WIFI_PRIORITY_RECHECK_SECONDS:
-                return
             self._last_priority_reconnect_at = now
 
-        self._attempt_saved_wifi_reconnect(candidate.ssid, source="priority", reason=reason)
+        self._attempt_saved_wifi_reconnect(policy_candidate.ssid, source="priority", reason=reason)
 
     def _attempt_best_saved_reconnect(self, source: str, allow_roam: bool) -> bool:
         networks = self.scanner.scan()
         connected = get_connected_wifi_details()
         current_ssid = str(connected.get("connected_ssid") or "").strip() or None
         current_rssi = self._network_rssi(networks, current_ssid)
+        self._transition_to(NetworkState.SCANNING_SAVED_NETWORKS, reason=f"{source} scan saved WiFi")
         candidates = self._build_saved_wifi_candidates(networks)
         if not candidates:
             logger.info("No saved WiFi reconnect candidates are available")
@@ -667,9 +737,6 @@ class WifiUploadAgent:
 
         for candidate in candidates:
             ssid = candidate["ssid"]
-            if not allow_roam and current_ssid and ssid == current_ssid:
-                logger.info("Already connected to strongest saved WiFi %s", current_ssid)
-                return False
             if self._attempt_saved_wifi_reconnect(
                 ssid,
                 source=source,
@@ -685,20 +752,23 @@ class WifiUploadAgent:
             return False
 
         try:
-            self._transition_to(NetworkState.CONNECTING, reason=f"{source} reconnect to {ssid} ({reason})")
+            self._transition_to(NetworkState.RECONNECTING, reason=f"{source} reconnect to {ssid} ({reason})")
             result = reconnect_saved_wifi(ssid)
             status = result.get("connection") if isinstance(result, dict) else {}
             if not status.get("connected_ssid"):
                 status = get_connected_wifi_details()
-            if status.get("connected_ssid"):
-                logger.info("Selected saved WiFi %s connected successfully", ssid)
+            if status.get("connected_ssid") and self._internet_is_available(force=True):
+                logger.info("Selected saved WiFi %s connected successfully and passed internet check", ssid)
+                self.saved_networks.mark_success(ssid)
                 self._handle_wifi_observation(status, source=source)
                 return True
-            logger.warning("Selected saved WiFi %s did not become active", ssid)
+            logger.warning("Selected saved WiFi %s did not become active or internet-valid", ssid)
+            self.saved_networks.mark_failure(ssid, "internet validation failed after reconnect")
             self._handle_wifi_observation(get_connected_wifi_details(), source=f"{source}-post-failure")
             return False
         except Exception as exc:
             logger.warning("Saved WiFi reconnect failed for %s: %s", ssid, exc)
+            self.saved_networks.mark_failure(ssid, str(exc))
             self._handle_wifi_observation(get_connected_wifi_details(), source=f"{source}-error")
             return False
         finally:
@@ -715,34 +785,57 @@ class WifiUploadAgent:
                 return network
         return None
 
+    def _select_best_saved_candidate(self, networks: list[object]):
+        candidates = self.policy.build_candidates(
+            networks,
+            self.saved_networks.policy_networks(),
+        )
+        if not candidates:
+            return None
+        candidate = candidates[0]
+        logger.info(
+            "Selected saved WiFi candidate %s RSSI %s dBm priority %s failures %s",
+            candidate.ssid,
+            candidate.rssi,
+            candidate.priority,
+            candidate.failure_count,
+        )
+        return candidate
+
     def _build_saved_wifi_candidates(self, networks: list[object]) -> list[dict[str, Any]]:
-        saved_ssids = set(list_saved_wifi_networks())
-        saved_networks = [network for network in networks if network.ssid in saved_ssids]
-        visible_saved_ssids = {network.ssid for network in saved_networks}
+        saved_records = self.saved_networks.list()
+        saved_ssids = {record.ssid for record in saved_records}
+        policy_candidates = self.policy.build_candidates(
+            networks,
+            [record.to_policy_network() for record in saved_records],
+        )
+        visible_saved_ssids = {candidate.ssid for candidate in policy_candidates}
 
         logger.info(
-            "Visible saved WiFi networks: %s",
+            "Visible saved WiFi networks above %s dBm: %s",
+            self.config.min_signal_dbm,
             [
                 {
-                    "ssid": network.ssid,
-                    "rssi": network.rssi,
-                    "security": getattr(network, "security", "UNKNOWN"),
+                    "ssid": candidate.ssid,
+                    "rssi": candidate.rssi,
+                    "priority": candidate.priority,
+                    "failure_count": candidate.failure_count,
                 }
-                for network in saved_networks
+                for candidate in policy_candidates
             ] or "none",
         )
 
         candidates = [
             {
-                "ssid": network.ssid,
-                "rssi": network.rssi,
+                "ssid": candidate.ssid,
+                "rssi": candidate.rssi,
             }
-            for network in sorted(saved_networks, key=lambda network: network.rssi, reverse=True)
+            for candidate in policy_candidates
         ]
 
         for ssid in saved_ssids:
             if ssid not in visible_saved_ssids:
-                candidates.append({"ssid": ssid, "rssi": -999})
+                logger.info("Saved WiFi %s ignored: not visible, weak, or in backoff", ssid)
 
         logger.info("Saved WiFi reconnect candidates: %s", candidates)
         return candidates
@@ -757,7 +850,23 @@ class WifiUploadAgent:
         return None
 
     def _is_connected(self) -> bool:
-        return bool(get_connected_wifi_details().get("connected_ssid"))
+        status = get_connected_wifi_details()
+        return bool(status.get("connected_ssid")) and self._internet_is_available()
+
+    def _internet_is_available(self, *, force: bool = False) -> bool:
+        now = time.monotonic()
+        with self._state_lock:
+            if (
+                not force
+                and now - self._last_internet_check_at < self.config.internet_check_interval_seconds
+            ):
+                return self._last_internet_online
+
+        online = self.internet.is_online()
+        with self._state_lock:
+            self._last_internet_check_at = now
+            self._last_internet_online = online
+        return online
 
     def _snapshot(self) -> NetworkSnapshot:
         with self._state_lock:
