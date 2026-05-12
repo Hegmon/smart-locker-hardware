@@ -17,6 +17,20 @@ from app.core.config import (
     QBOX_WIFI_AGENT_STATE_HEARTBEAT_SECONDS,
     QBOX_WIFI_AGENT_COMMAND_POLL_INTERVAL_SECONDS,
     QBOX_WIFI_AGENT_SIGNAL_CHANGE_THRESHOLD,
+    QBOX_WIFI_AGENT_MIN_SIGNAL_DBM,
+    QBOX_WIFI_AGENT_SWITCH_HYSTERESIS_DBM,
+    QBOX_WIFI_AGENT_SWITCH_COOLDOWN_SECONDS,
+    QBOX_WIFI_AGENT_INTERNET_CHECK_INTERVAL_SECONDS,
+    QBOX_WIFI_AGENT_RECONNECT_INTERVAL_SECONDS,
+    QBOX_WIFI_AGENT_CONNECTIVITY_CHECK_METHOD,
+    QBOX_WIFI_AGENT_CONNECTIVITY_CHECK_TIMEOUT_SECONDS,
+    QBOX_WIFI_AGENT_CONNECTIVITY_CHECK_RETRIES,
+    QBOX_WIFI_AGENT_CONNECTIVITY_DNS_HOST,
+    QBOX_WIFI_AGENT_CONNECTIVITY_PING_HOST,
+    QBOX_WIFI_AGENT_CONNECTIVITY_HTTP_URL,
+    QBOX_WIFI_AGENT_BLE_DISCOVERABLE_TIMEOUT_SECONDS,
+    QBOX_WIFI_AGENT_BLE_REENABLE_AFTER_TIMEOUT,
+    QBOX_WIFI_AGENT_WIFI_CONNECT_TIMEOUT_SECONDS,
     QBOX_WIFI_AGENT_RETRY_MAX_ATTEMPTS,
     QBOX_WIFI_AGENT_RETRY_BASE_DELAY_SECONDS,
     QBOX_WIFI_AGENT_MAX_RETRY_DELAY_SECONDS,
@@ -91,6 +105,20 @@ class AgentConfig:
 
     # -------- RETRY / LOGIC --------
     signal_change_threshold: int
+    min_signal_dbm: int
+    switch_hysteresis_dbm: int
+    switch_cooldown_seconds: int
+    internet_check_interval_seconds: int
+    reconnect_interval_seconds: int
+    connectivity_check_method: str
+    connectivity_check_timeout_seconds: float
+    connectivity_check_retries: int
+    connectivity_dns_host: str
+    connectivity_ping_host: str
+    connectivity_http_url: str
+    ble_discoverable_timeout_seconds: int
+    ble_reenable_after_timeout: bool
+    wifi_connect_timeout_seconds: int
     retry_max_attempts: int
     retry_base_delay_seconds: float
     max_retry_delay_seconds: int
@@ -165,6 +193,20 @@ def load_agent_config() -> AgentConfig:
 
         # -------- LOGIC --------
         signal_change_threshold=_clamp(QBOX_WIFI_AGENT_SIGNAL_CHANGE_THRESHOLD, 1),
+        min_signal_dbm=min(-1, QBOX_WIFI_AGENT_MIN_SIGNAL_DBM),
+        switch_hysteresis_dbm=_clamp(QBOX_WIFI_AGENT_SWITCH_HYSTERESIS_DBM, 1),
+        switch_cooldown_seconds=_clamp(QBOX_WIFI_AGENT_SWITCH_COOLDOWN_SECONDS, 30),
+        internet_check_interval_seconds=_clamp(QBOX_WIFI_AGENT_INTERNET_CHECK_INTERVAL_SECONDS, 10),
+        reconnect_interval_seconds=_clamp(QBOX_WIFI_AGENT_RECONNECT_INTERVAL_SECONDS, 10),
+        connectivity_check_method=QBOX_WIFI_AGENT_CONNECTIVITY_CHECK_METHOD,
+        connectivity_check_timeout_seconds=max(QBOX_WIFI_AGENT_CONNECTIVITY_CHECK_TIMEOUT_SECONDS, 1.0),
+        connectivity_check_retries=_clamp(QBOX_WIFI_AGENT_CONNECTIVITY_CHECK_RETRIES, 1),
+        connectivity_dns_host=QBOX_WIFI_AGENT_CONNECTIVITY_DNS_HOST,
+        connectivity_ping_host=QBOX_WIFI_AGENT_CONNECTIVITY_PING_HOST,
+        connectivity_http_url=QBOX_WIFI_AGENT_CONNECTIVITY_HTTP_URL,
+        ble_discoverable_timeout_seconds=_clamp(QBOX_WIFI_AGENT_BLE_DISCOVERABLE_TIMEOUT_SECONDS, 30),
+        ble_reenable_after_timeout=QBOX_WIFI_AGENT_BLE_REENABLE_AFTER_TIMEOUT,
+        wifi_connect_timeout_seconds=_clamp(QBOX_WIFI_AGENT_WIFI_CONNECT_TIMEOUT_SECONDS, 10),
 
         # -------- RETRY --------
         retry_max_attempts=_clamp(QBOX_WIFI_AGENT_RETRY_MAX_ATTEMPTS, 3),
