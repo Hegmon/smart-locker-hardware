@@ -73,6 +73,10 @@ class AgentConfig:
     mqtt_event_wifi: str
     mqtt_event_state: str
     mqtt_event_scan: str
+    mqtt_request_wifi_scan_topic: str
+    mqtt_response_wifi_scan_topic: str
+    mqtt_request_state_topic: str
+    mqtt_response_state_topic: str
     # compatibility/topic aliases used by WifiUploadAgent
     mqtt_command_topic: str
     mqtt_command_result_topic: str
@@ -143,6 +147,10 @@ def load_agent_config() -> AgentConfig:
         mqtt_event_wifi=mqtt_event_wifi,
         mqtt_event_state=mqtt_event_state,
         mqtt_event_scan=mqtt_event_scan,
+        mqtt_request_wifi_scan_topic="hardware_agent/request/wifi_scan",
+        mqtt_response_wifi_scan_topic="hardware_agent/response/wifi_scan",
+        mqtt_request_state_topic="hardware_agent/request/state",
+        mqtt_response_state_topic="hardware_agent/response/state",
         # compatibility/topic aliases used by WifiUploadAgent
         mqtt_command_topic=f"devices/{device_uuid}/command",
         mqtt_command_result_topic=f"devices/{device_uuid}/command/result",
