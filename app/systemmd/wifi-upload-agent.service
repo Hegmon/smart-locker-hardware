@@ -3,9 +3,8 @@ Description=Smart Locker WiFi Upload Agent (MQTT + Scan)
 After=network-online.target
 Wants=network-online.target
 
-# 🔥 IMPORTANT: depend on reconnect service
-After=wifi-reconnect.service
-Wants=wifi-reconnect.service
+# The hardware agent owns Wi-Fi recovery and BLE provisioning.
+# Do not couple it to the legacy hotspot reconnect service.
 
 [Service]
 Type=simple
