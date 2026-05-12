@@ -56,6 +56,7 @@ class BLEServer:
         self._bluetooth_enabled = False
         self._advertising_active = False
         self._gatt_registered = False
+        self._startup_failed = False
         self._lock = threading.RLock()
 
     def start_async(self) -> bool:
@@ -76,6 +77,8 @@ class BLEServer:
         try:
             logger.info("Starting BLE provisioning server")
             self.loop = GLib.MainLoop()
+            with self._lock:
+                self._startup_failed = False
             adapter = self._get_adapter()
             device_name = get_device_name()
 
@@ -157,6 +160,10 @@ class BLEServer:
     def is_advertising(self) -> bool:
         with self._lock:
             return self._advertising_active
+
+    def startup_failed(self) -> bool:
+        with self._lock:
+            return self._startup_failed
 
     def _get_adapter(self):
         obj = self.bus.get_object(BLUEZ_SERVICE_NAME, ADAPTER_PATH)
@@ -264,6 +271,8 @@ class BLEServer:
         self._shutdown_failed_ble()
 
     def _shutdown_failed_ble(self) -> None:
+        with self._lock:
+            self._startup_failed = True
         self._disable_bluetooth()
         loop = self.loop
         if loop is not None and loop.is_running():
