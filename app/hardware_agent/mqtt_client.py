@@ -21,6 +21,7 @@ class MqttClient:
         port: int,
         client_id: str,
         device_uuid: str | None = None,
+        strict_device_uuid: bool = False,
         keepalive: int = 60,
         username: str | None = None,
         password: str | None = None,
@@ -28,6 +29,7 @@ class MqttClient:
         self.host = host
         self.port = port
         self.device_uuid = str(device_uuid or client_id).strip()
+        self.strict_device_uuid = strict_device_uuid
         self.client_id = f"qbox_{client_id}"
         self.keepalive = keepalive
         self.username = username
@@ -144,12 +146,19 @@ class MqttClient:
         )
 
         if request.get("ignored"):
-            logger.info(
-                "Ignoring MQTT service request for device %s; this device is %s",
+            if self.strict_device_uuid:
+                logger.info(
+                    "Ignoring MQTT service request for device %s; this device is %s",
+                    request.get("device_uuid") or "",
+                    self.device_uuid,
+                )
+                return
+            logger.warning(
+                "Accepting MQTT service request for device %s even though configured device UUID is %s. "
+                "Set QBOX_MQTT_STRICT_DEVICE_UUID=true to reject mismatches.",
                 request.get("device_uuid") or "",
                 self.device_uuid,
             )
-            return
 
         if response_topic is None:
             logger.warning("MQTT topic ignored: %s", msg.topic)
