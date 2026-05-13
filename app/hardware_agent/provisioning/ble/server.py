@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import subprocess
 import time
@@ -21,6 +22,8 @@ logger = get_logger(__name__)
 
 BLUEZ_SERVICE_NAME = "org.bluez"
 ADAPTER_PATH = "/org/bluez/hci0"
+DBUS_PROP_IFACE = "org.freedesktop.DBus.Properties"
+BLUEZ_DEVICE_IFACE = "org.bluez.Device1"
 
 
 class Application(dbus.service.Object):
@@ -53,6 +56,8 @@ class BLEServer:
         self.loop: GLib.MainLoop | None = None
         self.advertisement = None
         self._thread: threading.Thread | None = None
+        self._async_loop: asyncio.AbstractEventLoop | None = None
+        self._stop_event: asyncio.Event | None = None
         self._running = False
         self._bluetooth_enabled = False
         self._advertising_active = False
@@ -61,6 +66,8 @@ class BLEServer:
         self._stop_requested = False
         self._app = None
         self._service = None
+        self._connected_devices: set[str] = set()
+        self._device_signal_registered = False
         self._lock = threading.RLock()
 
     def start_async(self) -> bool:
@@ -73,11 +80,16 @@ class BLEServer:
             return True
 
     def start(self):
+        asyncio.run(self._run())
+
+    async def _run(self):
         with self._lock:
             if self._running:
                 return
             self._running = True
             self._stop_requested = False
+            self._async_loop = asyncio.get_running_loop()
+            self._stop_event = asyncio.Event()
 
         try:
             logger.info("Starting BLE provisioning server")
@@ -90,6 +102,7 @@ class BLEServer:
             self._prepare_adapter(adapter, device_name)
             with self._lock:
                 self._bluetooth_enabled = True
+            self._register_device_signal_receiver()
 
             if self._should_stop():
                 logger.info("BLE startup canceled before GATT registration")
@@ -117,7 +130,7 @@ class BLEServer:
                 error_handler=self._on_gatt_registration_error,
             )
 
-            self.loop.run()
+            await self._pump_bluez_events()
 
         except Exception:
             logger.exception("BLE server failed")
@@ -129,10 +142,13 @@ class BLEServer:
                 self.advertisement = None
                 self.loop = None
                 self._thread = None
+                self._async_loop = None
+                self._stop_event = None
                 self._advertising_active = False
                 self._gatt_registered = False
                 self._app = None
                 self._service = None
+                self._connected_devices.clear()
             logger.info("BLE provisioning server stopped")
 
     def stop(self) -> bool:
@@ -165,6 +181,17 @@ class BLEServer:
             except Exception:
                 logger.exception("BLE loop stop failed")
 
+        async_loop = None
+        stop_event = None
+        with self._lock:
+            async_loop = self._async_loop
+            stop_event = self._stop_event
+        if async_loop is not None and stop_event is not None:
+            try:
+                async_loop.call_soon_threadsafe(stop_event.set)
+            except Exception:
+                logger.exception("BLE asyncio loop stop failed")
+
         self._disable_bluetooth()
 
         return True
@@ -184,6 +211,18 @@ class BLEServer:
     def startup_failed(self) -> bool:
         with self._lock:
             return self._startup_failed
+
+    def connected_devices(self) -> list[str]:
+        with self._lock:
+            return sorted(self._connected_devices)
+
+    async def _pump_bluez_events(self) -> None:
+        stop_event = self._stop_event
+        context = self.loop.get_context() if self.loop is not None else GLib.MainContext.default()
+        while stop_event is not None and not stop_event.is_set():
+            while context.pending():
+                context.iteration(False)
+            await asyncio.sleep(0.05)
 
     def _get_adapter(self):
         obj = self.bus.get_object(BLUEZ_SERVICE_NAME, ADAPTER_PATH)
@@ -286,8 +325,8 @@ class BLEServer:
 
         try:
             adapter = self._get_adapter()
-            self._set_adapter_property(adapter, "Pairable", dbus.Boolean(1), required=False)
-            self._set_adapter_property(adapter, "Discoverable", dbus.Boolean(1), required=False)
+            self._set_adapter_property(adapter, "Pairable", dbus.Boolean(0), required=False)
+            self._set_adapter_property(adapter, "Discoverable", dbus.Boolean(0), required=False)
             self._on_advertisement_registered()
         except Exception:
             logger.exception("BLE advertisement activation failed")
@@ -311,12 +350,34 @@ class BLEServer:
                 loop.quit()
             except Exception:
                 logger.exception("BLE loop stop failed during error shutdown")
+        async_loop = None
+        stop_event = None
+        with self._lock:
+            async_loop = self._async_loop
+            stop_event = self._stop_event
+        if async_loop is not None and stop_event is not None:
+            try:
+                async_loop.call_soon_threadsafe(stop_event.set)
+            except Exception:
+                logger.exception("BLE asyncio loop stop failed during error shutdown")
 
     def _should_stop(self) -> bool:
         with self._lock:
             return self._stop_requested
 
     def _cleanup_dbus_objects(self) -> None:
+        if self._device_signal_registered:
+            try:
+                self.bus.remove_signal_receiver(
+                    self._on_device_properties_changed,
+                    dbus_interface=DBUS_PROP_IFACE,
+                    signal_name="PropertiesChanged",
+                )
+            except Exception:
+                logger.debug("BLE device signal cleanup skipped", exc_info=True)
+            finally:
+                self._device_signal_registered = False
+
         objects = []
         with self._lock:
             service = self._service
@@ -340,3 +401,32 @@ class BLEServer:
             logger.debug("BLE helper command not found: %s", command[0])
         except Exception as exc:
             logger.debug("BLE helper command failed (%s): %s", " ".join(command), exc)
+
+    def _register_device_signal_receiver(self) -> None:
+        if self._device_signal_registered:
+            return
+        self.bus.add_signal_receiver(
+            self._on_device_properties_changed,
+            dbus_interface=DBUS_PROP_IFACE,
+            signal_name="PropertiesChanged",
+            path_keyword="path",
+        )
+        self._device_signal_registered = True
+
+    def _on_device_properties_changed(self, interface, changed, invalidated, path=None) -> None:
+        if interface != BLUEZ_DEVICE_IFACE or "Connected" not in changed:
+            return
+
+        connected = bool(changed["Connected"])
+        device_path = str(path or "")
+        with self._lock:
+            if connected:
+                self._connected_devices.add(device_path)
+            else:
+                self._connected_devices.discard(device_path)
+
+        logger.info(
+            "BLE central %s: %s",
+            "connected" if connected else "disconnected",
+            device_path or "unknown-device",
+        )
