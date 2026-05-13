@@ -10,7 +10,7 @@ from typing import Any
 
 from app.deployment.bootstrap import bootstrap_device
 from app.deployment.health_server import AgentHealthServer
-from app.deployment.runtime_config import get_int_setting
+from app.deployment.runtime_config import get_bool_setting, get_int_setting
 from app.deployment.validation import validate_runtime_configuration
 from app.hardware_agent.config import AgentConfig, load_agent_config
 from app.hardware_agent.connectivity import ConnectivityConfig, InternetConnectivityChecker
@@ -76,6 +76,7 @@ class WifiUploadAgent:
             port=config.mqtt_port,
             client_id=config.device_id,
             device_uuid=config.device_uuid,
+            strict_device_uuid=get_bool_setting("QBOX_MQTT_STRICT_DEVICE_UUID", False),
             keepalive=config.mqtt_keepalive,
             username=config.mqtt_username,
             password=config.mqtt_password,
