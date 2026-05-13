@@ -133,6 +133,7 @@ class WifiUploadAgent:
         self._last_internet_check_at = 0.0
         self._last_internet_online = False
         self._manual_connect_active = False
+        self._manual_connect_ssid: str | None = None
         self._auto_reconnect_deferred = False
 
         self.mqtt.register_command_handler(self.handle_command)
@@ -259,6 +260,22 @@ class WifiUploadAgent:
 
         if connected_ssid:
             if not self._internet_is_available(force=source in {"startup-online", "ble", "mqtt", "recovery", "startup"}):
+                with self._state_lock:
+                    manual_connect_active = self._manual_connect_active
+                    manual_connect_ssid = self._manual_connect_ssid
+                if (
+                    source == "watchdog"
+                    and manual_connect_active
+                    and manual_connect_ssid
+                    and connected_ssid == manual_connect_ssid
+                ):
+                    logger.info(
+                        "WiFi associated to %s via watchdog while remote connect is active; deferring recovery until command validation finishes",
+                        connected_ssid,
+                    )
+                    with self._state_lock:
+                        self._last_connected_ssid = connected_ssid
+                    return
                 logger.warning(
                     "WiFi associated to %s via %s but internet validation failed",
                     connected_ssid,
@@ -509,6 +526,7 @@ class WifiUploadAgent:
 
         with self._state_lock:
             self._manual_connect_active = True
+            self._manual_connect_ssid = ssid
             self._auto_reconnect_deferred = False
 
         try:
@@ -596,6 +614,7 @@ class WifiUploadAgent:
         finally:
             with self._state_lock:
                 self._manual_connect_active = False
+                self._manual_connect_ssid = None
                 self._auto_reconnect_deferred = False
 
     def _handle_wifi_scan_command(self) -> dict[str, Any]:
