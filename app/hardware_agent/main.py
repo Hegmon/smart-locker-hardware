@@ -18,6 +18,7 @@ from app.hardware_agent.mqtt_client import MqttClient
 from app.hardware_agent.provisioning.ble.server import BLEServer
 from app.hardware_agent.reconnect_policy import ReconnectPolicy, ReconnectPolicyConfig
 from app.hardware_agent.saved_networks import SavedNetworkManager
+from app.hardware_agent.wifi_responses import build_wifi_connect_failure, build_wifi_connect_success
 from app.services.hardware_manager import initialize_gpio_with_retry
 from app.hardware_agent.scanner import WifiScanner
 from app.services.wifi_manager import (
@@ -74,6 +75,7 @@ class WifiUploadAgent:
             host=config.mqtt_host,
             port=config.mqtt_port,
             client_id=config.device_id,
+            device_uuid=config.device_uuid,
             keepalive=config.mqtt_keepalive,
             username=config.mqtt_username,
             password=config.mqtt_password,
@@ -458,6 +460,8 @@ class WifiUploadAgent:
         command_id = payload.get("command_id")
         service = self._extract_service(payload, topic)
         data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        command_id_log = command_id if isinstance(command_id, str) else ""
+        logger.info("Handling MQTT service request service=%s command_id=%s", service, command_id_log)
 
         if service in {"wifi.connect", "wifi_connect"}:
             return self._handle_wifi_connect(command_id, data)
@@ -479,10 +483,12 @@ class WifiUploadAgent:
         if not ssid:
             response = {
                 "status": "FAILED",
+                "ssid": "",
                 "message": "ssid is required",
+                "details": {"reason": "missing_ssid"},
             }
             if command_id:
-                self.publish_command_result(command_id, "FAILED", "", "ssid is required", None)
+                self.publish_command_result(command_id, "FAILED", "", "ssid is required", response["details"])
             return response
 
         with self._state_lock:
@@ -501,14 +507,10 @@ class WifiUploadAgent:
                     self._handle_wifi_observation(connected, source="mqtt")
                     self._schedule_best_network_check(reason=f"post remote connect {ssid}")
 
-                    response = {
-                        "status": "SUCCESS",
-                        "ssid": ssid,
-                        "message": "Connected",
-                        "details": result,
-                    }
+                    response = build_wifi_connect_success(ssid, connected)
                     if command_id:
-                        self.publish_command_result(command_id, "SUCCESS", ssid, "Connected", result)
+                        self.publish_command_result(command_id, "SUCCESS", ssid, "Connected", response["details"])
+                    logger.info("WiFi connect service request succeeded for ssid=%s command_id=%s", ssid, command_id or "")
                     return response
 
                 except WifiCommandError as exc:
@@ -524,22 +526,19 @@ class WifiUploadAgent:
                 if current_status.get("connected_ssid") == ssid and self._internet_is_available(force=True):
                     self._handle_wifi_observation(current_status, source="mqtt-late-success")
                     self._schedule_best_network_check(reason=f"post late remote connect {ssid}")
-                    response = {
-                        "status": "SUCCESS",
-                        "ssid": ssid,
-                        "message": "Connected",
-                        "details": {"late_success": True, "error": last_error},
-                    }
+                    response = build_wifi_connect_success(ssid, current_status)
                     if command_id:
                         self.publish_command_result(
                             command_id,
                             "SUCCESS",
                             ssid,
                             "Connected",
-                            {"late_success": True, "error": last_error},
+                            response["details"],
                         )
+                    logger.info("WiFi connect service request succeeded late for ssid=%s command_id=%s", ssid, command_id or "")
                     return response
 
+                fallback_ssid = ""
                 if previous and previous != ssid:
                     try:
                         result = reconnect_saved_wifi(previous)
@@ -548,22 +547,7 @@ class WifiUploadAgent:
                         if not connected.get("connected_ssid") or not self._internet_is_available(force=True):
                             raise WifiCommandError(f"Fallback to {previous} failed internet validation")
                         self._handle_wifi_observation(connected, source="mqtt-fallback")
-
-                        response = {
-                            "status": "SUCCESS",
-                            "ssid": previous,
-                            "message": "Fallback to previous WiFi",
-                            "details": {"fallback": True, "result": result, "error": last_error},
-                        }
-                        if command_id:
-                            self.publish_command_result(
-                                command_id,
-                                "SUCCESS",
-                                previous,
-                                "Fallback to previous WiFi",
-                                {"fallback": True, "result": result, "error": last_error},
-                            )
-                        return response
+                        fallback_ssid = previous
                     except Exception as exc:
                         logger.warning("Fallback reconnect failed for %s: %s", previous, exc)
 
@@ -577,20 +561,21 @@ class WifiUploadAgent:
                         NetworkState.BLE_PROVISIONING,
                         reason=f"Remote WiFi connect failed for {ssid}",
                     )
-                response = {
-                    "status": "FAILED",
-                    "ssid": ssid,
-                    "message": "Failed",
-                    "details": {"error": last_error},
-                }
+                response = build_wifi_connect_failure(ssid, last_error, fallback_ssid=fallback_ssid)
                 if command_id:
                     self.publish_command_result(
                         command_id,
                         "FAILED",
                         ssid,
-                        "Failed",
-                        {"error": last_error},
+                        response["message"],
+                        response["details"],
                     )
+                logger.info(
+                    "WiFi connect service request failed for ssid=%s command_id=%s reason=%s",
+                    ssid,
+                    command_id or "",
+                    response["details"].get("reason"),
+                )
                 return response
         finally:
             with self._state_lock:
@@ -703,6 +688,10 @@ class WifiUploadAgent:
         self.mqtt.publish(self.config.mqtt_command_result_topic, payload)
 
     def _extract_service(self, payload: dict[str, Any], topic: str) -> str:
+        topic_parts = topic.split("/")
+        if len(topic_parts) == 5 and topic_parts[0] == "devices" and topic_parts[2] == "services":
+            return topic_parts[3].strip()
+
         service = payload.get("service")
         if isinstance(service, str) and service.strip():
             return service.strip()
@@ -710,7 +699,6 @@ class WifiUploadAgent:
         if topic.startswith("hardware_agent/request/"):
             return topic.rsplit("/", 1)[-1].strip()
 
-        topic_parts = topic.split("/")
         if len(topic_parts) >= 5:
             return topic_parts[3]
         return ""
