@@ -17,7 +17,8 @@ DEFAULT_INTERFACE = get_str_setting("WIFI_INTERFACE", "wlan0")
 DEFAULT_HOTSPOT_CONNECTION = get_str_setting("HOTSPOT_CONNECTION", "SmartLockerHotspot")
 DEFAULT_HOTSPOT_SSID = get_str_setting("HOTSPOT_SSID", "SmartLocker-Setup")
 DEFAULT_HOTSPOT_PASSWORD = get_str_setting("HOTSPOT_PASSWORD", "SmartLocker123")
-DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS = get_int_setting("QBOX_WIFI_AGENT_WIFI_CONNECT_TIMEOUT_SECONDS", 30)
+DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS = get_int_setting("QBOX_WIFI_AGENT_WIFI_CONNECT_TIMEOUT_SECONDS", 45)
+DEFAULT_WIFI_CONNECT_GRACE_SECONDS = get_int_setting("QBOX_WIFI_AGENT_WIFI_CONNECT_GRACE_SECONDS", 20)
 ALLOW_NON_ROOT_NMCLI = get_bool_setting("ALLOW_NON_ROOT_NMCLI", False)
 _WIFI_LOCK = threading.RLock()
 logger = get_logger(__name__)
@@ -167,11 +168,12 @@ def _wait_for_connection(ssid: str, timeout: int = 15) -> bool:
     while time.time() - start < timeout:
         try:
             details = get_connected_wifi_details()
-            if details.get("connected_ssid") == ssid:
+            device_state = str(details.get("device_state") or "")
+            if details.get("connected_ssid") == ssid and _is_connected_state(device_state):
                 return True
-            if details.get("connection_profile") == ssid and _is_connected_state(str(details.get("device_state") or "")):
+            if details.get("connection_profile") == ssid and _is_connected_state(device_state):
                 return True
-            if details.get("connection_profile") == ssid and _is_activating_state(str(details.get("device_state") or "")):
+            if details.get("connection_profile") == ssid and _is_activating_state(device_state):
                 time.sleep(2)
                 continue
         except Exception:
@@ -620,11 +622,22 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
             elif not _saved_profile_exists(ssid):
                 raise WifiAuthenticationError(f"Authentication failed for {ssid}: password required for new network")
 
-            result = _nmcli(
-                ["connection", "up", "id", ssid, "ifname", DEFAULT_INTERFACE],
-                timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS,
-                require_root=True,
-            )
+            result = None
+            try:
+                result = _nmcli(
+                    ["connection", "up", "id", ssid, "ifname", DEFAULT_INTERFACE],
+                    timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS,
+                    require_root=True,
+                )
+            except WifiCommandError as exc:
+                if "Timeout:" not in str(exc):
+                    raise
+                logger.warning(
+                    "WiFi activation command timed out for %s; waiting for NetworkManager to finish association",
+                    ssid,
+                )
+                if not _wait_for_connection(ssid, timeout=DEFAULT_WIFI_CONNECT_GRACE_SECONDS):
+                    raise
 
             if not _wait_for_connection(ssid, timeout=min(20, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)):
                 details = get_connected_wifi_details()
@@ -649,7 +662,7 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
         return {
             "status": "connected",
             "ssid": ssid,
-            "details": result.stdout.strip(),
+            "details": result.stdout.strip() if result else "connected after nmcli timeout",
             "connection": get_connected_wifi_details(),
         }
 
