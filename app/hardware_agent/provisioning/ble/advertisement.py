@@ -36,7 +36,6 @@ class Advertisement(dbus.service.Object):
                     signature="s",
                 ),
                 "LocalName": dbus.String(self.local_name),
-                "Discoverable": dbus.Boolean(True),
                 "Includes": dbus.Array(
                     [dbus.String(include) for include in self.includes],
                     signature="s",
