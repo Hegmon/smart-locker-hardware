@@ -7,7 +7,7 @@ DBUS_PROP_IFACE = "org.freedesktop.DBus.Properties"
 
 
 class Advertisement(dbus.service.Object):
-    PATH_BASE = "/org/bluez/example/advertisement"
+    PATH_BASE = "/org/bluez/smartlocker/advertisement"
 
     def __init__(
         self,
@@ -23,6 +23,7 @@ class Advertisement(dbus.service.Object):
         self.service_uuids = [service_uuid]
         self.local_name = device_name
         self.includes = ["tx-power"]
+        self.appearance = 0
 
         super().__init__(bus, self.path)
 
@@ -35,10 +36,12 @@ class Advertisement(dbus.service.Object):
                     signature="s",
                 ),
                 "LocalName": dbus.String(self.local_name),
+                "Discoverable": dbus.Boolean(True),
                 "Includes": dbus.Array(
                     [dbus.String(include) for include in self.includes],
                     signature="s",
                 ),
+                "Appearance": dbus.UInt16(self.appearance),
             }
         }
 
