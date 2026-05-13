@@ -20,12 +20,14 @@ class MqttClient:
         host: str,
         port: int,
         client_id: str,
+        device_uuid: str | None = None,
         keepalive: int = 60,
         username: str | None = None,
         password: str | None = None,
     ):
         self.host = host
         self.port = port
+        self.device_uuid = str(device_uuid or client_id).strip()
         self.client_id = f"qbox_{client_id}"
         self.keepalive = keepalive
         self.username = username
@@ -107,6 +109,8 @@ class MqttClient:
             self._connected = True
             self._fallback_notified = False
 
+        if self.device_uuid:
+            client.subscribe(f"devices/{self.device_uuid}/services/+/request", qos=1)
         client.subscribe("devices/+/services/+/request", qos=1)
         client.subscribe("hardware_agent/request/+", qos=1)
         logger.info("MQTT connected to %s:%s", self.host, self.port)
@@ -122,14 +126,37 @@ class MqttClient:
 
     def _on_message(self, client, userdata, msg):
         payload = self._decode_payload(msg.topic, msg.payload)
-        response_topic = self._response_topic_for_request(msg.topic, payload)
+        request = self._request_metadata(msg.topic, payload)
+        if request is None:
+            logger.warning("MQTT topic ignored: %s", msg.topic)
+            return
+
+        response_topic = request["response_topic"]
+        service = request["service"]
+        command_id = payload.get("command_id")
+        command_id_log = command_id if isinstance(command_id, str) else ""
+        logger.info(
+            "Received MQTT service request topic=%s service=%s command_id=%s response_topic=%s",
+            msg.topic,
+            service,
+            command_id_log,
+            response_topic,
+        )
+
+        if request.get("ignored"):
+            logger.info(
+                "Ignoring MQTT service request for device %s; this device is %s",
+                request.get("device_uuid") or "",
+                self.device_uuid,
+            )
+            return
+
         if response_topic is None:
             logger.warning("MQTT topic ignored: %s", msg.topic)
             return
 
-        command_id = payload.get("command_id")
-
         if command_id and self._is_duplicate_command(command_id):
+            logger.info("Ignoring duplicate MQTT command_id=%s service=%s", command_id, service)
             return
 
         if self._command_handler is None:
@@ -144,17 +171,20 @@ class MqttClient:
             if msg.topic.startswith("hardware_agent/request/"):
                 self.publish(response_topic, response)
             else:
-                service = payload.get("service")
-                if not isinstance(service, str) or not service.strip():
-                    topic_parts = msg.topic.split("/")
-                    service = topic_parts[3]
-                self.publish(
+                published = self.publish(
                     response_topic,
                     {
                         "command_id": command_id,
                         "service": service,
                         "result": response,
                     },
+                )
+                logger.info(
+                    "MQTT service response %s for service=%s command_id=%s response_topic=%s",
+                    "published" if published else "queued",
+                    service,
+                    command_id_log,
+                    response_topic,
                 )
         except Exception:
             logger.exception("MQTT command handler failed for topic %s", msg.topic)
@@ -256,15 +286,44 @@ class MqttClient:
 
     @staticmethod
     def _response_topic_for_request(topic: str, payload: dict[str, Any]) -> str | None:
+        metadata = MqttClient._request_metadata_static(topic, payload, device_uuid=None)
+        if metadata is None or metadata.get("ignored"):
+            return None
+        return str(metadata["response_topic"])
+
+    def _request_metadata(self, topic: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        return self._request_metadata_static(topic, payload, device_uuid=self.device_uuid)
+
+    @staticmethod
+    def _request_metadata_static(
+        topic: str,
+        payload: dict[str, Any],
+        *,
+        device_uuid: str | None,
+    ) -> dict[str, Any] | None:
         if topic.startswith("hardware_agent/request/"):
-            return topic.replace("/request/", "/response/", 1)
+            service = topic.rsplit("/", 1)[-1].strip()
+            if service == "wifi_scan":
+                service = "wifi.scan"
+            return {
+                "service": service,
+                "response_topic": topic.replace("/request/", "/response/", 1),
+                "device_uuid": "",
+                "ignored": False,
+            }
 
         topic_parts = topic.split("/")
-        if len(topic_parts) < 5:
+        if len(topic_parts) != 5:
+            return None
+        if topic_parts[0] != "devices" or topic_parts[2] != "services" or topic_parts[4] != "request":
             return None
 
-        device_id = topic_parts[1]
-        service = payload.get("service")
-        if not isinstance(service, str) or not service.strip():
-            service = topic_parts[3]
-        return f"devices/{device_id}/services/{service}/response"
+        requested_device_uuid = topic_parts[1].strip()
+        requested_service = topic_parts[3].strip()
+        ignored = bool(device_uuid and requested_device_uuid != device_uuid)
+        return {
+            "service": requested_service,
+            "response_topic": f"devices/{requested_device_uuid}/services/{requested_service}/response",
+            "device_uuid": requested_device_uuid,
+            "ignored": ignored,
+        }
