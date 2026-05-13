@@ -22,6 +22,8 @@ from app.hardware_agent.wifi_responses import build_wifi_connect_failure, build_
 from app.services.hardware_manager import initialize_gpio_with_retry
 from app.hardware_agent.scanner import WifiScanner
 from app.services.wifi_manager import (
+    DEFAULT_HOTSPOT_CONNECTION,
+    DEFAULT_HOTSPOT_SSID,
     WifiCommandError,
     connect_wifi,
     get_connected_wifi_details,
@@ -240,6 +242,20 @@ class WifiUploadAgent:
 
     def _handle_wifi_observation(self, status: dict[str, Any], source: str):
         connected_ssid = str(status.get("connected_ssid") or "").strip() or None
+        connection_profile = str(status.get("connection_profile") or "").strip()
+
+        if self._is_setup_hotspot(status):
+            logger.info(
+                "WiFi is associated to setup hotspot %s via %s; keeping BLE provisioning active",
+                connected_ssid or connection_profile or DEFAULT_HOTSPOT_SSID,
+                source,
+            )
+            with self._state_lock:
+                self._hotspot_active = True
+                self._last_connected_ssid = None
+            if not self._ble_active:
+                self._transition_to(NetworkState.BLE_PROVISIONING, reason=f"setup hotspot active via {source}")
+            return
 
         if connected_ssid:
             if not self._internet_is_available(force=source in {"startup-online", "ble", "mqtt", "recovery", "startup"}):
@@ -421,7 +437,6 @@ class WifiUploadAgent:
             NetworkState.BOOTING,
             NetworkState.CHECKING_INTERNET,
             NetworkState.DISCONNECTED,
-            NetworkState.SCANNING_SAVED_NETWORKS,
             NetworkState.CONNECTING,
             NetworkState.RECONNECTING,
             NetworkState.CONNECTED,
@@ -950,7 +965,18 @@ class WifiUploadAgent:
 
     def _is_connected(self) -> bool:
         status = get_connected_wifi_details()
+        if self._is_setup_hotspot(status):
+            return False
         return bool(status.get("connected_ssid")) and self._internet_is_available()
+
+    @staticmethod
+    def _is_setup_hotspot(status: dict[str, Any]) -> bool:
+        connected_ssid = str(status.get("connected_ssid") or "").strip()
+        connection_profile = str(status.get("connection_profile") or "").strip()
+        return (
+            connected_ssid == DEFAULT_HOTSPOT_SSID
+            or connection_profile == DEFAULT_HOTSPOT_CONNECTION
+        )
 
     def _internet_is_available(self, *, force: bool = False) -> bool:
         now = time.monotonic()
