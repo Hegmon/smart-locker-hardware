@@ -19,7 +19,7 @@ from app.core.config import (
     QBOX_TELEMETRY_URL,
 )
 from app.deployment.device_identity import ensure_device_id
-from app.streaming_agent.device_config import get_optional_config
+from app.deployment.runtime_config import get_str_setting
 from app.services.backend_state import load_backend_state, save_backend_state
 from app.services.hardware_manager import get_camera_inventory, get_system_metrics
 from app.utils.logger import get_logger
@@ -67,8 +67,8 @@ def _build_registration_payload() -> dict[str, Any]:
 
     # Allow the device to advertise a public stream hostname instead of its
     # private LAN address when the backend generates playback URLs.
-    public_base_url = get_optional_config("STREAM_PUBLIC_BASE_URL")
-    public_host = get_optional_config("STREAM_PUBLIC_HOST")
+    public_base_url = get_str_setting("STREAM_PUBLIC_BASE_URL", "")
+    public_host = get_str_setting("STREAM_PUBLIC_HOST", "")
     if public_base_url and not public_host:
         public_host = urlsplit(public_base_url).hostname or ""
 
