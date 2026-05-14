@@ -349,7 +349,10 @@ class WifiUploadAgent:
                 logger.info("WiFi is connected on %s, forcing BLE shutdown", connected_ssid)
                 self._stop_ble()
             if transitioned:
-                self._publish_connectivity_snapshot(status)
+                if manual_connect_active and source == "mqtt":
+                    logger.info("Deferring connectivity snapshot publish until remote WiFi connect response is ready")
+                else:
+                    self._publish_connectivity_snapshot(status)
             return
 
         with self._state_lock:
