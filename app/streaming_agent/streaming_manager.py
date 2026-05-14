@@ -61,6 +61,14 @@ class StreamingManager:
             logger.info("Stopping stream for %s camera", role)
             stream.stop()
 
+    def restart_all(self, reason="manual restart"):
+        logger.warning("Restarting all streams: %s", reason)
+        for role, stream in self.streams.items():
+            logger.info("Restarting stream for %s camera", role)
+            stream.stop()
+            stream.restart_attempts = 0
+            stream.start()
+
     def get_stream_status(self):
         status = {}
         for role, stream in self.streams.items():
