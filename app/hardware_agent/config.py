@@ -20,6 +20,7 @@ from app.core.config import (
     QBOX_WIFI_AGENT_MIN_SIGNAL_DBM,
     QBOX_WIFI_AGENT_SWITCH_HYSTERESIS_DBM,
     QBOX_WIFI_AGENT_SWITCH_COOLDOWN_SECONDS,
+    QBOX_WIFI_AGENT_POST_CONNECT_ROAM_HOLD_SECONDS,
     QBOX_WIFI_AGENT_INTERNET_CHECK_INTERVAL_SECONDS,
     QBOX_WIFI_AGENT_RECONNECT_INTERVAL_SECONDS,
     QBOX_WIFI_AGENT_CONNECTIVITY_CHECK_METHOD,
@@ -108,6 +109,7 @@ class AgentConfig:
     min_signal_dbm: int
     switch_hysteresis_dbm: int
     switch_cooldown_seconds: int
+    post_connect_roam_hold_seconds: int
     internet_check_interval_seconds: int
     reconnect_interval_seconds: int
     connectivity_check_method: str
@@ -196,6 +198,7 @@ def load_agent_config() -> AgentConfig:
         min_signal_dbm=min(-1, QBOX_WIFI_AGENT_MIN_SIGNAL_DBM),
         switch_hysteresis_dbm=_clamp(QBOX_WIFI_AGENT_SWITCH_HYSTERESIS_DBM, 1),
         switch_cooldown_seconds=_clamp(QBOX_WIFI_AGENT_SWITCH_COOLDOWN_SECONDS, 30),
+        post_connect_roam_hold_seconds=_clamp(QBOX_WIFI_AGENT_POST_CONNECT_ROAM_HOLD_SECONDS, 300),
         internet_check_interval_seconds=_clamp(QBOX_WIFI_AGENT_INTERNET_CHECK_INTERVAL_SECONDS, 10),
         reconnect_interval_seconds=_clamp(QBOX_WIFI_AGENT_RECONNECT_INTERVAL_SECONDS, 10),
         connectivity_check_method=QBOX_WIFI_AGENT_CONNECTIVITY_CHECK_METHOD,
