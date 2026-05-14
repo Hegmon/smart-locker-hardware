@@ -39,6 +39,7 @@ class MQTTPublisher:
 
         self.running = False
         self.connected = False
+        self._ever_connected = False
         self.thread = None
         self.lock = threading.Lock()
 
@@ -46,6 +47,7 @@ class MQTTPublisher:
         self.client.on_disconnect = self._on_disconnect
 
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        was_connected = self.connected
         self.connected = reason_code == 0
         if self.connected:
             logger.info(
@@ -53,6 +55,13 @@ class MQTTPublisher:
                 self.broker_host,
                 self.broker_port,
             )
+            if self.running and self._ever_connected and not was_connected:
+                logger.info("MQTT reconnected after network loss; restarting streams")
+                try:
+                    self.stream_manager.restart_all(reason="MQTT reconnected after network loss")
+                except Exception:
+                    logger.exception("Failed to restart streams after MQTT reconnect")
+            self._ever_connected = True
         else:
             logger.warning(
                 "MQTT connection failed to %s:%s with reason code %s",
@@ -61,12 +70,21 @@ class MQTTPublisher:
                 reason_code,
             )
 
-    def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None):
+    def _on_disconnect(self, client, userdata, *args):
+        reason_code = self._extract_disconnect_reason(args)
         self.connected = False
         if self.running:
             logger.warning("Disconnected from MQTT broker with reason code %s", reason_code)
         else:
             logger.info("MQTT client disconnected")
+
+    @staticmethod
+    def _extract_disconnect_reason(args):
+        if not args:
+            return "unknown"
+        if len(args) == 1:
+            return args[0]
+        return args[1]
 
     def start(self):
         with self.lock:
