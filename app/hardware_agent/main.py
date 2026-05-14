@@ -724,12 +724,23 @@ class WifiUploadAgent:
         payload = self._build_wifi_scan_payload(networks, connected)
         self.mqtt.publish(self.config.mqtt_scan_topic, payload)
 
-    def _ensure_mqtt_connected_after_wifi_online(self, *, source: str, ssid: str) -> None:
-        if self.mqtt.is_connected():
+    def _ensure_mqtt_connected_after_wifi_online(
+        self,
+        *,
+        source: str,
+        ssid: str,
+        force_refresh: bool = False,
+    ) -> None:
+        if self.mqtt.is_connected() and not force_refresh:
             return
-        logger.info("WiFi %s is online via %s; ensuring MQTT is connected", ssid, source)
-        if self.mqtt.ensure_connected(timeout_seconds=5.0):
-            logger.info("MQTT connected after WiFi online via %s", source)
+        logger.info(
+            "WiFi %s is online via %s; ensuring MQTT is %s",
+            ssid,
+            source,
+            "refreshed" if force_refresh else "connected",
+        )
+        if self.mqtt.ensure_connected(timeout_seconds=5.0, force_reconnect=force_refresh):
+            logger.info("MQTT ready after WiFi online via %s", source)
         else:
             logger.warning("MQTT still disconnected after WiFi online via %s; publishes will be queued", source)
 
@@ -897,6 +908,11 @@ class WifiUploadAgent:
                 status = get_connected_wifi_details()
             if status.get("connected_ssid") and self._internet_is_available(force=True):
                 logger.info("Selected saved WiFi %s connected successfully and passed internet check", ssid)
+                self._ensure_mqtt_connected_after_wifi_online(
+                    source=source,
+                    ssid=ssid,
+                    force_refresh=source in {"priority", "recovery", "recovery-retry", "saved-retry"},
+                )
                 self.saved_networks.mark_success(ssid)
                 self._handle_wifi_observation(status, source=source)
                 return True
