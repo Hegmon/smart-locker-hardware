@@ -8,12 +8,23 @@ logger = LoggingManager.get_logger(__name__)
 
 
 def detect_usb_cameras():
-    result = subprocess.run(
-        ["v4l2-ctl", "--list-devices"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["v4l2-ctl", "--list-devices"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except FileNotFoundError:
+        logger.warning("v4l2-ctl not found; no USB cameras detected")
+        return []
+    except subprocess.TimeoutExpired:
+        logger.warning("v4l2-ctl timed out; no USB cameras detected")
+        return []
+    except Exception:
+        logger.exception("USB camera detection failed")
+        return []
 
     output = result.stdout
     cameras = []
