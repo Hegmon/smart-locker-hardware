@@ -199,6 +199,8 @@ class MqttClient:
             if response is None:
                 return
 
+            if service in {"wifi.connect", "wifi_connect"}:
+                self.ensure_connected(timeout_seconds=5.0)
             if msg.topic.startswith("hardware_agent/request/"):
                 self.publish(response_topic, response)
             else:
