@@ -64,8 +64,15 @@ class CommandCharacteristic(dbus.service.Object):
                 "hint": 'Use JSON like {"action":"scan_wifi"} or {"action":"connect_wifi","ssid":"MyWiFi","password":"********"}',
             }
 
+        response_notified = False
         if self.response_char:
-            self.response_char.notify(response)
+            response_notified = self.response_char.notify(response)
+        try:
+            after_response_sent = getattr(self.handler, "after_response_sent", None)
+            if response_notified and callable(after_response_sent):
+                after_response_sent()
+        except Exception:
+            logger.exception("BLE post-response handler failed")
 
     @staticmethod
     def _decode_payload(raw_value: bytes) -> dict[str, object]:
@@ -154,6 +161,8 @@ class ResponseCharacteristic(dbus.service.Object):
                     time.sleep(BLE_RESPONSE_CHUNK_DELAY_SECONDS)
         else:
             logger.info("BLE response stored for read because notifications are not enabled")
+            return False
+        return True
 
     @dbus.service.method(GATT_CHARACTERISTIC_IFACE, in_signature="a{sv}", out_signature="ay")
     def ReadValue(self, options):
