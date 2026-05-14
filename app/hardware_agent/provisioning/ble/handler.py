@@ -1,8 +1,11 @@
+import time
 from typing import Any, Callable, Dict
 
 from app.services.wifi_manager import connect_wifi, get_connected_wifi_details
 from app.hardware_agent.scanner import WifiScanner
 from app.hardware_agent.provisioning.ble.protocol import parse_ble_request
+
+BLE_CONNECT_RESPONSE_GRACE_SECONDS = 2.0
 
 
 class BLEHandler:
@@ -13,6 +16,7 @@ class BLEHandler:
     ):
         self.scanner = WifiScanner(interface)
         self._on_wifi_connected = on_wifi_connected
+        self._pending_connected_ssid: str | None = None
 
     # ===================== ENTRY =====================
     def handle(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -28,7 +32,16 @@ class BLEHandler:
             return {"error": "unsupported_action"}
 
         except Exception as e:
-            return {"error": f"internal_error: {str(e)}"}
+            return {"status": False, "error": f"internal_error: {str(e)}"}
+
+    def after_response_sent(self) -> None:
+        if not self._pending_connected_ssid or not self._on_wifi_connected:
+            return
+
+        ssid = self._pending_connected_ssid
+        self._pending_connected_ssid = None
+        time.sleep(BLE_CONNECT_RESPONSE_GRACE_SECONDS)
+        self._on_wifi_connected(ssid)
 
     # ===================== SCAN =====================
     def _scan_wifi(self) -> Dict[str, Any]:
@@ -50,35 +63,38 @@ class BLEHandler:
     # ===================== CONNECT =====================
     def _connect_wifi(self, ssid: str, password: str) -> Dict[str, Any]:
         if not ssid:
-            return {"status": "failed", "error": "ssid_required"}
+            return {"action": "connect_wifi", "status": False, "error": "ssid_required"}
 
         try:
             result = connect_wifi(ssid, password)
-            internet_confirmed = True
-            if self._on_wifi_connected:
-                try:
-                    callback_result = self._on_wifi_connected(ssid)
-                    if callback_result is False:
-                        internet_confirmed = False
-                except Exception:
-                    internet_confirmed = False
-
-            if not internet_confirmed:
+            connection = result.get("connection") if isinstance(result, dict) else {}
+            connection = connection or get_connected_wifi_details()
+            if not connection.get("connected_ssid"):
                 return {
-                    "status": "failed",
+                    "action": "connect_wifi",
+                    "status": False,
                     "ssid": ssid,
-                    "error": "internet_validation_failed",
+                    "error": "connection_failed",
+                    "connection": connection,
                 }
 
+            scan_response = self._scan_wifi()
+            self._pending_connected_ssid = ssid
             return {
-                "status": "success",
+                "action": "connect_wifi",
+                "status": True,
                 "ssid": ssid,
+                "message": "connected",
                 "connection": result,
+                "scan_wifi": scan_response,
+                "networks": scan_response.get("networks", []),
             }
 
         except Exception as e:
             return {
-                "status": "failed",
+                "action": "connect_wifi",
+                "status": False,
+                "ssid": ssid,
                 "error": str(e),
             }
 
