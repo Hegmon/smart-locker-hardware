@@ -38,9 +38,11 @@ class MqttClient:
         self._running = True
         self._connected = False
         self._connection_lock = threading.Lock()
+        self._reconnect_lock = threading.Lock()
         self._handler_lock = threading.RLock()
         self._pending_lock = threading.Lock()
         self._processed_lock = threading.Lock()
+        self._watchdog_wake = threading.Event()
         self._processed_commands: list[str] = []
         self._processed_command_set: set[str] = set()
         self._fallback_notified = False
@@ -84,6 +86,25 @@ class MqttClient:
         with self._connection_lock:
             return self._connected
 
+    def ensure_connected(self, timeout_seconds: float = 5.0) -> bool:
+        if self.is_connected():
+            return True
+
+        with self._reconnect_lock:
+            if self.is_connected():
+                return True
+            logger.info("MQTT reconnect requested for %s:%s", self.host, self.port)
+            try:
+                self.client.reconnect()
+            except Exception:
+                try:
+                    self.client.connect_async(self.host, self.port, self.keepalive)
+                except Exception as exc:
+                    logger.warning("MQTT immediate reconnect failed: %s", exc)
+
+        self._watchdog_wake.set()
+        return self.wait_until_connected(timeout_seconds=timeout_seconds)
+
     def publish(self, topic: str, payload: dict[str, Any]) -> bool:
         if not self.is_connected():
             self._queue_publish(topic, payload)
@@ -125,6 +146,7 @@ class MqttClient:
 
         if was_connected:
             logger.warning("MQTT disconnected with rc=%s", rc)
+        self._watchdog_wake.set()
 
     def _on_message(self, client, userdata, msg):
         payload = self._decode_payload(msg.topic, msg.payload)
@@ -220,7 +242,8 @@ class MqttClient:
                         except Exception:
                             logger.exception("MQTT fallback handler failed")
 
-            time.sleep(5)
+            self._watchdog_wake.wait(timeout=5)
+            self._watchdog_wake.clear()
 
     def _is_duplicate_command(self, command_id: str) -> bool:
         with self._processed_lock:
