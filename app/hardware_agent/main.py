@@ -254,6 +254,9 @@ class WifiUploadAgent:
             return
 
         if connected_ssid:
+            with self._state_lock:
+                current_state_before_online = self.network_state
+                previous_connected_ssid = self._last_connected_ssid
             if not self._internet_is_available(force=source in {"startup-online", "ble", "mqtt", "recovery", "startup"}):
                 with self._state_lock:
                     current_state = self.network_state
@@ -298,7 +301,30 @@ class WifiUploadAgent:
                 self.last_good_ssid = connected_ssid
                 self._last_connected_ssid = connected_ssid
                 self._hotspot_active = False
-            self._ensure_mqtt_connected_after_wifi_online(source=source, ssid=connected_ssid)
+            force_mqtt_refresh = (
+                previous_connected_ssid != connected_ssid
+                or current_state_before_online
+                in {
+                    NetworkState.DISCONNECTED,
+                    NetworkState.RECONNECTING,
+                    NetworkState.CONNECTING,
+                    NetworkState.SCANNING_SAVED_NETWORKS,
+                    NetworkState.BLE_PROVISIONING,
+                }
+                or source in {
+                    "priority",
+                    "recovery",
+                    "recovery-retry",
+                    "saved-retry",
+                    "mqtt",
+                    "mqtt-late-success",
+                }
+            )
+            self._ensure_mqtt_connected_after_wifi_online(
+                source=source,
+                ssid=connected_ssid,
+                force_refresh=force_mqtt_refresh,
+            )
             self.saved_networks.mark_success(connected_ssid)
             transitioned = self._transition_to(
                 NetworkState.CONNECTED,
@@ -559,7 +585,11 @@ class WifiUploadAgent:
                     if not connected.get("connected_ssid") or not self._internet_is_available(force=True):
                         raise WifiCommandError(f"Connected to {ssid} but internet validation failed")
                     self._handle_wifi_observation(connected, source="mqtt")
-                    self._ensure_mqtt_connected_after_wifi_online(source="mqtt-connect-success", ssid=ssid)
+                    self._ensure_mqtt_connected_after_wifi_online(
+                        source="mqtt-connect-success",
+                        ssid=ssid,
+                        force_refresh=True,
+                    )
                     self._activate_post_connect_roam_hold(ssid, source="MQTT wifi.connect")
                     self._schedule_best_network_check(reason=f"post remote connect {ssid}")
 
@@ -581,7 +611,11 @@ class WifiUploadAgent:
                 current_status = get_connected_wifi_details()
                 if current_status.get("connected_ssid") == ssid and self._internet_is_available(force=True):
                     self._handle_wifi_observation(current_status, source="mqtt-late-success")
-                    self._ensure_mqtt_connected_after_wifi_online(source="mqtt-connect-late-success", ssid=ssid)
+                    self._ensure_mqtt_connected_after_wifi_online(
+                        source="mqtt-connect-late-success",
+                        ssid=ssid,
+                        force_refresh=True,
+                    )
                     self._activate_post_connect_roam_hold(ssid, source="MQTT wifi.connect late success")
                     self._schedule_best_network_check(reason=f"post late remote connect {ssid}")
                     response = build_wifi_connect_success(ssid, current_status)
@@ -739,7 +773,7 @@ class WifiUploadAgent:
             source,
             "refreshed" if force_refresh else "connected",
         )
-        if self.mqtt.ensure_connected(timeout_seconds=5.0, force_reconnect=force_refresh):
+        if self.mqtt.ensure_connected(timeout_seconds=10.0, force_reconnect=force_refresh):
             logger.info("MQTT ready after WiFi online via %s", source)
         else:
             logger.warning("MQTT still disconnected after WiFi online via %s; publishes will be queued", source)
