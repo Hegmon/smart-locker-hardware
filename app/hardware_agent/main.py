@@ -559,6 +559,7 @@ class WifiUploadAgent:
                     if not connected.get("connected_ssid") or not self._internet_is_available(force=True):
                         raise WifiCommandError(f"Connected to {ssid} but internet validation failed")
                     self._handle_wifi_observation(connected, source="mqtt")
+                    self._ensure_mqtt_connected_after_wifi_online(source="mqtt-connect-success", ssid=ssid)
                     self._activate_post_connect_roam_hold(ssid, source="MQTT wifi.connect")
                     self._schedule_best_network_check(reason=f"post remote connect {ssid}")
 
@@ -580,6 +581,7 @@ class WifiUploadAgent:
                 current_status = get_connected_wifi_details()
                 if current_status.get("connected_ssid") == ssid and self._internet_is_available(force=True):
                     self._handle_wifi_observation(current_status, source="mqtt-late-success")
+                    self._ensure_mqtt_connected_after_wifi_online(source="mqtt-connect-late-success", ssid=ssid)
                     self._activate_post_connect_roam_hold(ssid, source="MQTT wifi.connect late success")
                     self._schedule_best_network_check(reason=f"post late remote connect {ssid}")
                     response = build_wifi_connect_success(ssid, current_status)
@@ -748,6 +750,8 @@ class WifiUploadAgent:
             "details": details,
             "timestamp": utc_now(),
         }
+        if status == "SUCCESS" and ssid:
+            self._ensure_mqtt_connected_after_wifi_online(source="command-result", ssid=ssid)
         self.mqtt.publish(self.config.mqtt_command_result_topic, payload)
 
     def _extract_service(self, payload: dict[str, Any], topic: str) -> str:
