@@ -135,6 +135,8 @@ class WifiUploadAgent:
         self._manual_connect_active = False
         self._manual_connect_ssid: str | None = None
         self._auto_reconnect_deferred = False
+        self._post_connect_roam_hold_until = 0.0
+        self._post_connect_roam_hold_ssid: str | None = None
 
         self.mqtt.register_command_handler(self.handle_command)
         self.mqtt.register_ble_fallback_handler(self._handle_mqtt_reconnect_pressure)
@@ -320,6 +322,8 @@ class WifiUploadAgent:
         status = get_connected_wifi_details()
         if status.get("connected_ssid") and self._internet_is_available(force=True):
             self._handle_wifi_observation(status, source="ble")
+            self._activate_post_connect_roam_hold(ssid, source="BLE provisioning")
+            self._schedule_best_network_check(reason=f"post BLE connect {ssid}")
             self.publish_status(connected=status, force=False)
             return True
 
@@ -539,6 +543,7 @@ class WifiUploadAgent:
                     if not connected.get("connected_ssid") or not self._internet_is_available(force=True):
                         raise WifiCommandError(f"Connected to {ssid} but internet validation failed")
                     self._handle_wifi_observation(connected, source="mqtt")
+                    self._activate_post_connect_roam_hold(ssid, source="MQTT wifi.connect")
                     self._schedule_best_network_check(reason=f"post remote connect {ssid}")
 
                     response = build_wifi_connect_success(ssid, connected)
@@ -559,6 +564,7 @@ class WifiUploadAgent:
                 current_status = get_connected_wifi_details()
                 if current_status.get("connected_ssid") == ssid and self._internet_is_available(force=True):
                     self._handle_wifi_observation(current_status, source="mqtt-late-success")
+                    self._activate_post_connect_roam_hold(ssid, source="MQTT wifi.connect late success")
                     self._schedule_best_network_check(reason=f"post late remote connect {ssid}")
                     response = build_wifi_connect_success(ssid, current_status)
                     if command_id:
@@ -775,6 +781,9 @@ class WifiUploadAgent:
             return
 
         current_ssid = str(connected.get("connected_ssid") or "").strip() or None
+        if self._post_connect_roam_hold_active(current_ssid):
+            return
+
         current_rssi = self._network_rssi(networks, current_ssid)
         policy_candidate = self._select_best_saved_candidate(networks)
         should_reconnect, reason = self.policy.should_switch(
@@ -885,7 +894,8 @@ class WifiUploadAgent:
 
     def _schedule_best_network_check(self, *, reason: str) -> None:
         def _run_check() -> None:
-            time.sleep(3)
+            delay_seconds = max(3, self.config.post_connect_roam_hold_seconds)
+            time.sleep(delay_seconds)
             try:
                 networks = self.scanner.scan()
                 connected = get_connected_wifi_details()
@@ -893,8 +903,47 @@ class WifiUploadAgent:
             except Exception:
                 logger.exception("Post-connect best saved WiFi check failed")
 
-        logger.info("Scheduling best saved WiFi check: %s", reason)
+        logger.info(
+            "Scheduling best saved WiFi check in %s seconds: %s",
+            max(3, self.config.post_connect_roam_hold_seconds),
+            reason,
+        )
         threading.Thread(target=_run_check, daemon=True, name="wifi-post-connect-roam").start()
+
+    def _activate_post_connect_roam_hold(self, ssid: str, *, source: str) -> None:
+        hold_seconds = max(0, self.config.post_connect_roam_hold_seconds)
+        if hold_seconds <= 0:
+            return
+        deadline = time.monotonic() + hold_seconds
+        with self._state_lock:
+            self._post_connect_roam_hold_until = deadline
+            self._post_connect_roam_hold_ssid = ssid
+            self._last_priority_reconnect_at = deadline - self.config.switch_cooldown_seconds
+        logger.info(
+            "Holding requested WiFi %s for %s seconds after %s before stronger saved WiFi roaming",
+            ssid,
+            hold_seconds,
+            source,
+        )
+
+    def _post_connect_roam_hold_active(self, current_ssid: str | None) -> bool:
+        now = time.monotonic()
+        with self._state_lock:
+            hold_until = self._post_connect_roam_hold_until
+            hold_ssid = self._post_connect_roam_hold_ssid
+
+        if not hold_until or now >= hold_until:
+            return False
+        if hold_ssid and current_ssid and hold_ssid != current_ssid:
+            return False
+
+        remaining = int(hold_until - now)
+        logger.info(
+            "Skipping saved WiFi switch because post-connect hold is active for %s seconds on %s",
+            remaining,
+            hold_ssid or current_ssid or "requested WiFi",
+        )
+        return True
 
     def _should_pause_automatic_wifi(self) -> bool:
         with self._state_lock:
