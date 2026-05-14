@@ -24,10 +24,17 @@ class BLEHandler:
             request = parse_ble_request(payload)
 
             if request.action == "scan_wifi":
-                return self._scan_wifi()
+                return self._scan_wifi(max_networks=request.max_networks)
 
             if request.action == "connect_wifi":
-                return self._connect_wifi(request.ssid, request.password)
+                return self._connect_wifi(
+                    request.ssid,
+                    request.password,
+                    response=request.response,
+                    include_scan_wifi=request.include_scan_wifi,
+                    include_networks=request.include_networks,
+                    max_networks=request.max_networks,
+                )
 
             return {"error": "unsupported_action"}
 
@@ -44,8 +51,10 @@ class BLEHandler:
         self._on_wifi_connected(ssid)
 
     # ===================== SCAN =====================
-    def _scan_wifi(self) -> Dict[str, Any]:
+    def _scan_wifi(self, max_networks: int | None = None) -> Dict[str, Any]:
         networks = self.scanner.scan()
+        if max_networks is not None and max_networks > 0:
+            networks = networks[:max_networks]
 
         return {
             "status": "success",
@@ -61,7 +70,16 @@ class BLEHandler:
         }
 
     # ===================== CONNECT =====================
-    def _connect_wifi(self, ssid: str, password: str) -> Dict[str, Any]:
+    def _connect_wifi(
+        self,
+        ssid: str,
+        password: str,
+        *,
+        response: str = "full",
+        include_scan_wifi: bool = True,
+        include_networks: bool = True,
+        max_networks: int | None = None,
+    ) -> Dict[str, Any]:
         if not ssid:
             return {"action": "connect_wifi", "status": False, "error": "ssid_required"}
 
@@ -78,17 +96,21 @@ class BLEHandler:
                     "connection": connection,
                 }
 
-            scan_response = self._scan_wifi()
             self._pending_connected_ssid = ssid
-            return {
+            payload = {
                 "action": "connect_wifi",
                 "status": True,
                 "ssid": ssid,
                 "message": "connected",
                 "connection": result,
-                "scan_wifi": scan_response,
-                "networks": scan_response.get("networks", []),
             }
+            if response != "minimal" and (include_scan_wifi or include_networks):
+                scan_response = self._scan_wifi(max_networks=max_networks)
+                if include_scan_wifi:
+                    payload["scan_wifi"] = scan_response
+                if include_networks:
+                    payload["networks"] = scan_response.get("networks", [])
+            return payload
 
         except Exception as e:
             return {
