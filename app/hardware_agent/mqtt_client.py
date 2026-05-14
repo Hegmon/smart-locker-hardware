@@ -43,6 +43,7 @@ class MqttClient:
         self._pending_lock = threading.Lock()
         self._processed_lock = threading.Lock()
         self._watchdog_wake = threading.Event()
+        self._connect_attempt_deadline = 0.0
         self._processed_commands: list[str] = []
         self._processed_command_set: set[str] = set()
         self._fallback_notified = False
@@ -90,28 +91,50 @@ class MqttClient:
         if self.is_connected() and not force_reconnect:
             return True
 
+        timeout_seconds = max(0.5, timeout_seconds)
         with self._reconnect_lock:
             if self.is_connected() and not force_reconnect:
                 return True
-            if force_reconnect:
-                with self._connection_lock:
-                    self._connected = False
-            logger.info(
-                "MQTT %s requested for %s:%s",
-                "refresh" if force_reconnect else "reconnect",
-                self.host,
-                self.port,
-            )
-            try:
-                self.client.reconnect()
-            except Exception:
-                try:
-                    self.client.connect_async(self.host, self.port, self.keepalive)
-                except Exception as exc:
-                    logger.warning("MQTT immediate reconnect failed: %s", exc)
+            now = time.monotonic()
+            attempt_active = now < self._connect_attempt_deadline
+            if attempt_active:
+                logger.info("MQTT connect attempt already in progress for %s:%s", self.host, self.port)
+            else:
+                self._connect_attempt_deadline = now + max(timeout_seconds, 15.0)
+                self._start_connect_attempt(force_reconnect=force_reconnect)
 
         self._watchdog_wake.set()
-        return self.wait_until_connected(timeout_seconds=timeout_seconds)
+        connected = self.wait_until_connected(timeout_seconds=timeout_seconds)
+        if connected:
+            return True
+
+        if time.monotonic() >= self._connect_attempt_deadline:
+            with self._reconnect_lock:
+                if not self.is_connected() and time.monotonic() >= self._connect_attempt_deadline:
+                    self._connect_attempt_deadline = 0.0
+        return self.is_connected()
+
+    def _start_connect_attempt(self, *, force_reconnect: bool = False) -> None:
+        if force_reconnect:
+            with self._connection_lock:
+                self._connected = False
+            try:
+                self.client.disconnect()
+            except Exception:
+                logger.debug("MQTT disconnect before refresh failed", exc_info=True)
+        logger.info(
+            "MQTT %s requested for %s:%s",
+            "refresh" if force_reconnect else "reconnect",
+            self.host,
+            self.port,
+        )
+        try:
+            self.client.connect_async(self.host, self.port, self.keepalive)
+        except Exception:
+            try:
+                self.client.reconnect()
+            except Exception as exc:
+                logger.warning("MQTT immediate reconnect failed: %s", exc)
 
     def publish(self, topic: str, payload: dict[str, Any]) -> bool:
         if not self.is_connected():
@@ -139,6 +162,8 @@ class MqttClient:
         with self._connection_lock:
             self._connected = True
             self._fallback_notified = False
+        with self._reconnect_lock:
+            self._connect_attempt_deadline = 0.0
 
         if self.device_uuid:
             client.subscribe(f"devices/{self.device_uuid}/services/+/request", qos=1)
@@ -208,7 +233,7 @@ class MqttClient:
                 return
 
             if service in {"wifi.connect", "wifi_connect"}:
-                self.ensure_connected(timeout_seconds=5.0)
+                self.ensure_connected(timeout_seconds=20.0)
             if msg.topic.startswith("hardware_agent/request/"):
                 self.publish(response_topic, response)
             else:
