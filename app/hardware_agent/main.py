@@ -256,6 +256,8 @@ class WifiUploadAgent:
         if connected_ssid:
             if not self._internet_is_available(force=source in {"startup-online", "ble", "mqtt", "recovery", "startup"}):
                 with self._state_lock:
+                    current_state = self.network_state
+                    recovery_in_progress = self._recovery_in_progress
                     manual_connect_active = self._manual_connect_active
                     manual_connect_ssid = self._manual_connect_ssid
                 if (
@@ -278,8 +280,18 @@ class WifiUploadAgent:
                 )
                 with self._state_lock:
                     self._last_connected_ssid = connected_ssid
-                self._transition_to(NetworkState.DISCONNECTED, reason=f"internet unavailable via {source}")
-                self._ensure_recovery_running(reason=f"internet unavailable via {source}")
+                if (
+                    recovery_in_progress
+                    or source.startswith("recovery")
+                    or current_state == NetworkState.BLE_PROVISIONING
+                ):
+                    self._transition_to(
+                        NetworkState.BLE_PROVISIONING,
+                        reason=f"internet unavailable via {source}; keeping BLE provisioning active",
+                    )
+                else:
+                    self._transition_to(NetworkState.DISCONNECTED, reason=f"internet unavailable via {source}")
+                    self._ensure_recovery_running(reason=f"internet unavailable via {source}")
                 return
 
             with self._state_lock:
@@ -382,6 +394,10 @@ class WifiUploadAgent:
                         continue
                     if self._attempt_best_saved_reconnect(source="recovery-retry", allow_roam=True):
                         return
+                    self._transition_to(
+                        NetworkState.BLE_PROVISIONING,
+                        reason="saved WiFi retry unavailable; keeping BLE provisioning active",
+                    )
                     next_saved_retry_at = now + self.config.reconnect_interval_seconds
 
                 if (
@@ -415,20 +431,34 @@ class WifiUploadAgent:
         reason: str,
         connected_ssid: str | None = None,
     ) -> bool:
+        restart_ble = False
+        same_state = False
         with self._state_lock:
             previous_state = self.network_state
             if previous_state == new_state:
+                same_state = True
                 if new_state == NetworkState.CONNECTED and connected_ssid:
                     self.last_good_ssid = connected_ssid
                     self._last_connected_ssid = connected_ssid
-                return False
+                if (
+                    new_state == NetworkState.BLE_PROVISIONING
+                    and (not self._ble_active or not self.ble.is_running())
+                ):
+                    restart_ble = True
+                if restart_ble:
+                    logger.info("BLE provisioning state is active but server is not running; restarting BLE")
+            else:
+                self.network_state = new_state
+                if new_state == NetworkState.CONNECTED and connected_ssid:
+                    self.last_good_ssid = connected_ssid
+                    self._last_connected_ssid = connected_ssid
+                if new_state != NetworkState.HOTSPOT:
+                    self._hotspot_active = False
 
-            self.network_state = new_state
-            if new_state == NetworkState.CONNECTED and connected_ssid:
-                self.last_good_ssid = connected_ssid
-                self._last_connected_ssid = connected_ssid
-            if new_state != NetworkState.HOTSPOT:
-                self._hotspot_active = False
+        if same_state:
+            if restart_ble:
+                self._restart_ble_provisioning()
+            return False
 
         logger.info("State transition %s -> %s (%s)", previous_state, new_state, reason)
         self._on_state_enter(new_state)
