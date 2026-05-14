@@ -54,6 +54,10 @@ class MqttClient:
         self._ble_fallback_handler: Callable[[], None] | None = None
 
         self.client = mqtt.Client(client_id=self.client_id, clean_session=True)
+        try:
+            self.client.reconnect_delay_set(min_delay=1, max_delay=2)
+        except Exception:
+            logger.debug("MQTT reconnect delay configuration skipped", exc_info=True)
         if self.username and self.password:
             self.client.username_pw_set(self.username, self.password)
 
@@ -64,9 +68,9 @@ class MqttClient:
     def connect(self):
         try:
             self.client.loop_start()
-            self.client.connect_async(self.host, self.port, self.keepalive)
+            self.client.connect(self.host, self.port, self.keepalive)
         except Exception as exc:
-            logger.warning("MQTT async connect failed, falling back to background connect: %s", exc)
+            logger.warning("MQTT initial connect failed, falling back to background connect: %s", exc)
 
             def _blocking_connect():
                 try:
@@ -96,11 +100,11 @@ class MqttClient:
             if self.is_connected() and not force_reconnect:
                 return True
             now = time.monotonic()
-            attempt_active = now < self._connect_attempt_deadline
+            attempt_active = now < self._connect_attempt_deadline and not force_reconnect
             if attempt_active:
                 logger.info("MQTT connect attempt already in progress for %s:%s", self.host, self.port)
             else:
-                self._connect_attempt_deadline = now + max(timeout_seconds, 15.0)
+                self._connect_attempt_deadline = now + timeout_seconds
                 self._start_connect_attempt(force_reconnect=force_reconnect)
 
         self._watchdog_wake.set()
@@ -129,10 +133,11 @@ class MqttClient:
             self.port,
         )
         try:
-            self.client.connect_async(self.host, self.port, self.keepalive)
-        except Exception:
+            self.client.reconnect()
+        except Exception as reconnect_exc:
+            logger.debug("MQTT reconnect failed, trying fresh connect: %s", reconnect_exc)
             try:
-                self.client.reconnect()
+                self.client.connect(self.host, self.port, self.keepalive)
             except Exception as exc:
                 logger.warning("MQTT immediate reconnect failed: %s", exc)
 
