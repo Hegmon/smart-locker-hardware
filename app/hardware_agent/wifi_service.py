@@ -18,32 +18,31 @@ def wifi_scan():
 
 @service("wifi.connect")
 def wifi_connect(payload):
-    ssid=payload.get("ssid")
-    password=payload.get("password")
-    return connect_wifi(ssid,password)
-    previous=get_connected_wifi_details().get("connected_ssid")
+    ssid = payload.get("ssid")
+    password = payload.get("password")
+    previous = get_connected_wifi_details().get("connected_ssid")
     
     try:
-        return connect_wifi(ssid,password)
+        return connect_wifi(ssid, password)
     except Exception as e:
         if previous:
             try:
                 reconnect_saved_wifi(previous)
                 return {
-                    "status":"fallback_reconnected",
-                    "ssid":previous,
-                     "error":str(e)
+                    "status": "fallback_reconnected",
+                    "ssid": previous,
+                    "error": str(e)
                 }
-            except Exception as e:
+            except Exception as fallback_error:
                 return {
-                    "status":"fallback_failed",
-                    "ssid":previous,
-                    "error":str(e)
+                    "status": "fallback_failed",
+                    "ssid": previous,
+                    "error": str(fallback_error),
+                    "connect_error": str(e),
                 }
-            hotspot=start_hotspot()
-            
-            return {
-                "status":"hotspot_mode",
-                "hotspot":hotspot,
-                "error":str(e)
-            }
+        hotspot = start_hotspot()
+        return {
+            "status": "hotspot_mode",
+            "hotspot": hotspot,
+            "error": str(e)
+        }
