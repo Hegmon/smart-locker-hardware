@@ -193,18 +193,11 @@ class WifiUploadAgent:
             self._transition_to(NetworkState.DISCONNECTED, reason="startup paused for remote WiFi command")
             return get_connected_wifi_details()
 
-        if self._has_saved_wifi_profiles():
-            self._transition_to(
-                NetworkState.ERROR_BACKOFF,
-                reason="startup saved WiFi profiles exist; BLE provisioning suppressed",
-            )
-            self._ensure_recovery_running(reason="startup saved WiFi retry backoff")
-            return get_connected_wifi_details()
-
         self._transition_to(
             NetworkState.BLE_PROVISIONING,
             reason="startup requires provisioning; no saved network restored internet",
         )
+        self._ensure_recovery_running(reason="startup saved WiFi unavailable; BLE provisioning active")
         return get_connected_wifi_details()
 
     def _watchdog_loop(self):
@@ -367,17 +360,9 @@ class WifiUploadAgent:
             if self._should_pause_automatic_wifi():
                 logger.info("Recovery will not enter BLE while a remote WiFi command is active")
                 return
-            if self._has_saved_wifi_profiles():
-                self._transition_to(
-                    NetworkState.ERROR_BACKOFF,
-                    reason="saved WiFi profiles exist; BLE provisioning suppressed",
-                )
-                self._retry_saved_networks_without_ble()
-                return
-
             self._transition_to(
                 NetworkState.BLE_PROVISIONING,
-                reason="Recovery entering BLE provisioning",
+                reason="saved WiFi unavailable; recovery entering BLE provisioning",
             )
 
             next_ble_restart_at = time.monotonic() + self.BLE_RESTART_SECONDS
