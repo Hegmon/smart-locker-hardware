@@ -148,13 +148,13 @@ class MqttClient:
         self._flush_pending_messages()
 
     def _on_disconnect(self, client, userdata, rc):
-        with self._connection_lock:
-            was_connected = self._connected
-            self._connected = False
-
-        if was_connected:
-            logger.warning("MQTT disconnected with rc=%s", rc)
+        self._mark_disconnected()
+        logger.warning("MQTT disconnected with rc=%s", rc)
         self._watchdog_wake.set()
+
+    def _mark_disconnected(self):
+        with self._connection_lock:
+            self._connected = False
 
     def _on_message(self, client, userdata, msg):
         payload = self._decode_payload(msg.topic, msg.payload)
@@ -282,6 +282,8 @@ class MqttClient:
         result = self.client.publish(topic, json.dumps(payload), qos=1)
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             logger.warning("MQTT publish returned rc=%s for topic %s", result.rc, topic)
+            self._mark_disconnected()
+            self._watchdog_wake.set()
             return False
         return True
 
