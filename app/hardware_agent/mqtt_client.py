@@ -86,14 +86,22 @@ class MqttClient:
         with self._connection_lock:
             return self._connected
 
-    def ensure_connected(self, timeout_seconds: float = 5.0) -> bool:
-        if self.is_connected():
+    def ensure_connected(self, timeout_seconds: float = 5.0, *, force_reconnect: bool = False) -> bool:
+        if self.is_connected() and not force_reconnect:
             return True
 
         with self._reconnect_lock:
-            if self.is_connected():
+            if self.is_connected() and not force_reconnect:
                 return True
-            logger.info("MQTT reconnect requested for %s:%s", self.host, self.port)
+            if force_reconnect:
+                with self._connection_lock:
+                    self._connected = False
+            logger.info(
+                "MQTT %s requested for %s:%s",
+                "refresh" if force_reconnect else "reconnect",
+                self.host,
+                self.port,
+            )
             try:
                 self.client.reconnect()
             except Exception:
