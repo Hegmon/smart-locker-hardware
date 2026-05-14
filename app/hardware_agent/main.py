@@ -257,12 +257,12 @@ class WifiUploadAgent:
             with self._state_lock:
                 current_state_before_online = self.network_state
                 previous_connected_ssid = self._last_connected_ssid
+                manual_connect_active = self._manual_connect_active
+                manual_connect_ssid = self._manual_connect_ssid
             if not self._internet_is_available(force=source in {"startup-online", "ble", "mqtt", "recovery", "startup"}):
                 with self._state_lock:
                     current_state = self.network_state
                     recovery_in_progress = self._recovery_in_progress
-                    manual_connect_active = self._manual_connect_active
-                    manual_connect_ssid = self._manual_connect_ssid
                 if (
                     source == "watchdog"
                     and manual_connect_active
@@ -295,6 +295,20 @@ class WifiUploadAgent:
                 else:
                     self._transition_to(NetworkState.DISCONNECTED, reason=f"internet unavailable via {source}")
                     self._ensure_recovery_running(reason=f"internet unavailable via {source}")
+                return
+
+            if (
+                source == "watchdog"
+                and manual_connect_active
+                and manual_connect_ssid
+                and connected_ssid == manual_connect_ssid
+            ):
+                logger.info(
+                    "WiFi %s is online via watchdog while remote connect is active; deferring MQTT refresh to command handler",
+                    connected_ssid,
+                )
+                with self._state_lock:
+                    self._last_connected_ssid = connected_ssid
                 return
 
             with self._state_lock:
@@ -773,7 +787,7 @@ class WifiUploadAgent:
             source,
             "refreshed" if force_refresh else "connected",
         )
-        if self.mqtt.ensure_connected(timeout_seconds=10.0, force_reconnect=force_refresh):
+        if self.mqtt.ensure_connected(timeout_seconds=20.0, force_reconnect=force_refresh):
             logger.info("MQTT ready after WiFi online via %s", source)
         else:
             logger.warning("MQTT still disconnected after WiFi online via %s; publishes will be queued", source)
