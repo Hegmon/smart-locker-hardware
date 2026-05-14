@@ -298,6 +298,7 @@ class WifiUploadAgent:
                 self.last_good_ssid = connected_ssid
                 self._last_connected_ssid = connected_ssid
                 self._hotspot_active = False
+            self._ensure_mqtt_connected_after_wifi_online(source=source, ssid=connected_ssid)
             self.saved_networks.mark_success(connected_ssid)
             transitioned = self._transition_to(
                 NetworkState.CONNECTED,
@@ -657,8 +658,7 @@ class WifiUploadAgent:
                 self._last_status_signature = signature
 
         if should_publish:
-            if self.mqtt.is_connected():
-                self.mqtt.publish(self.config.mqtt_state_topic, payload)
+            self.mqtt.publish(self.config.mqtt_state_topic, payload)
 
     def _initial_publish(self):
         try:
@@ -719,10 +719,17 @@ class WifiUploadAgent:
         self._publish_wifi_scan_payload(networks, connected)
 
     def _publish_wifi_scan_payload(self, networks: list[object], connected: dict[str, Any]):
-        if not self.mqtt.is_connected():
-            return
         payload = self._build_wifi_scan_payload(networks, connected)
         self.mqtt.publish(self.config.mqtt_scan_topic, payload)
+
+    def _ensure_mqtt_connected_after_wifi_online(self, *, source: str, ssid: str) -> None:
+        if self.mqtt.is_connected():
+            return
+        logger.info("WiFi %s is online via %s; ensuring MQTT is connected", ssid, source)
+        if self.mqtt.ensure_connected(timeout_seconds=5.0):
+            logger.info("MQTT connected after WiFi online via %s", source)
+        else:
+            logger.warning("MQTT still disconnected after WiFi online via %s; publishes will be queued", source)
 
     def publish_command_result(
         self,
