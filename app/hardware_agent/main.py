@@ -830,15 +830,24 @@ class WifiUploadAgent:
                 logger.info("Saved WiFi reconnect throttled for %s", source)
                 return False
             self._last_saved_retry_at = now
+            current_state = self.network_state
+            keep_ble_active = current_state == NetworkState.BLE_PROVISIONING and source.startswith("recovery")
 
         networks = self.scanner.scan()
         connected = get_connected_wifi_details()
         current_ssid = str(connected.get("connected_ssid") or "").strip() or None
         current_rssi = self._network_rssi(networks, current_ssid)
-        self._transition_to(NetworkState.SCANNING_SAVED_NETWORKS, reason=f"{source} scan saved WiFi")
+        if keep_ble_active:
+            logger.info("Scanning saved WiFi in background while BLE provisioning remains active")
+        else:
+            self._transition_to(NetworkState.SCANNING_SAVED_NETWORKS, reason=f"{source} scan saved WiFi")
         candidates = self._build_saved_wifi_candidates(networks)
         if not candidates:
             logger.info("No saved WiFi reconnect candidates are available")
+            return False
+
+        if keep_ble_active:
+            logger.info("Saved WiFi candidates are available, but BLE provisioning is active; waiting for app command")
             return False
 
         if current_ssid and current_rssi is not None:
