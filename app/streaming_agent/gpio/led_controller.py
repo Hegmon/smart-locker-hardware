@@ -12,8 +12,11 @@ class LedController:
         self._gpio = None
         self._enabled = False
         self._on = False
+        self._active_sources = set()
 
     def start(self):
+        if self._enabled:
+            return
         try:
             import RPi.GPIO as GPIO
         except Exception as exc:
@@ -26,9 +29,23 @@ class LedController:
             GPIO.setup(pin, GPIO.OUT)
             GPIO.output(pin, GPIO.LOW)
         self._enabled = True
-        logger.info("Person detection LEDs initialized on BCM pins %s", self.pins)
+        logger.info("Detection LEDs initialized on BCM pins %s", self.pins)
+
+    def set_active(self, source, active):
+        source = str(source or "detection")
+        if active:
+            self._active_sources.add(source)
+        else:
+            self._active_sources.discard(source)
+        self._set_output(bool(self._active_sources))
 
     def set_person_visible(self, visible):
+        self.set_active("person", visible)
+
+    def set_tamper_active(self, camera_role, active):
+        self.set_active(f"tamper:{camera_role}", active)
+
+    def _set_output(self, visible):
         if not self._enabled or self._gpio is None or self._on == visible:
             return
 
@@ -42,7 +59,8 @@ class LedController:
             return
 
         try:
-            self.set_person_visible(False)
+            self._active_sources.clear()
+            self._set_output(False)
             self._gpio.cleanup(self.pins)
         except Exception:
             logger.exception("GPIO cleanup failed")
