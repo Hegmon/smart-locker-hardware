@@ -265,12 +265,7 @@ class WifiUploadAgent:
                 with self._state_lock:
                     current_state = self.network_state
                     recovery_in_progress = self._recovery_in_progress
-                if (
-                    source == "watchdog"
-                    and manual_connect_active
-                    and manual_connect_ssid
-                    and connected_ssid == manual_connect_ssid
-                ):
+                if source == "watchdog" and manual_connect_active:
                     logger.info(
                         "WiFi associated to %s via watchdog while remote connect is active; deferring recovery until command validation finishes",
                         connected_ssid,
@@ -299,12 +294,7 @@ class WifiUploadAgent:
                     self._ensure_recovery_running(reason=f"internet unavailable via {source}")
                 return
 
-            if (
-                source == "watchdog"
-                and manual_connect_active
-                and manual_connect_ssid
-                and connected_ssid == manual_connect_ssid
-            ):
+            if source == "watchdog" and manual_connect_active:
                 logger.info(
                     "WiFi %s is online via watchdog while remote connect is active; deferring MQTT refresh to command handler",
                     connected_ssid,
