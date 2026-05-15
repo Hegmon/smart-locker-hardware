@@ -3,6 +3,7 @@ import sys
 import time
 
 from app.core.config import MQTT_HOST, MQTT_PASSWORD, MQTT_PORT, MQTT_USERNAME
+from app.streaming_agent.detection.person_detector import PersonDetector
 from app.streaming_agent.health_monitor import HealthMonitor
 from app.streaming_agent.hot_plug_monitor import HotPlugMonitor
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
@@ -19,12 +20,14 @@ class StreamingAgent:
         self.health_monitor = None
         self.hot_plug_monitor = None
         self.mqtt_publisher = None
+        self.person_detector = None
         self.running = False
 
     def initialize(self):
         logger.info("Initializing streaming agent")
         self.stream_manager = StreamingManager()
         self.stream_manager.initialize()
+        self.person_detector = PersonDetector(self.stream_manager.get_frame_buffer("internal"))
         self.health_monitor = HealthMonitor(stream_registry=self.stream_manager.streams)
         self.hot_plug_monitor = HotPlugMonitor(stream_manager=self.stream_manager)
         self.mqtt_publisher = MQTTPublisher(
@@ -41,6 +44,8 @@ class StreamingAgent:
         logger.info("Starting streaming agent")
         self.running = True
         self.stream_manager.start_all()
+        if self.person_detector:
+            self.person_detector.start()
         self.health_monitor.start()
         self.mqtt_publisher.start()
         self.hot_plug_monitor.start()
@@ -55,6 +60,8 @@ class StreamingAgent:
             self.mqtt_publisher.stop()
         if self.health_monitor:
             self.health_monitor.stop()
+        if self.person_detector:
+            self.person_detector.stop()
         if self.stream_manager:
             self.stream_manager.stop_all()
         logger.info("Streaming agent stopped successfully")
