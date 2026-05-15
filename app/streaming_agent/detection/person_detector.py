@@ -37,6 +37,7 @@ class PersonDetector:
         confidence_threshold=0.5,
         process_every_n_frames=3,
         led_off_delay_seconds=3.0,
+        led_controller=None,
     ):
         self.frame_buffer = frame_buffer
         self.model_path = self._resolve_model_path(model_path)
@@ -44,7 +45,8 @@ class PersonDetector:
         self.confidence_threshold = confidence_threshold
         self.process_every_n_frames = max(1, int(process_every_n_frames))
         self.led_off_delay_seconds = led_off_delay_seconds
-        self.led_controller = LedController()
+        self._owns_led_controller = led_controller is None
+        self.led_controller = led_controller or LedController()
 
         self._running = False
         self._thread = None
@@ -100,19 +102,24 @@ class PersonDetector:
         if self._thread:
             self._thread.join(timeout=2)
             self._thread = None
-        self.led_controller.cleanup()
+        if self._owns_led_controller:
+            self.led_controller.cleanup()
         logger.info("Person detector stopped")
 
     def _load_model(self):
         runtime_name = "tflite-runtime"
         try:
             from tflite_runtime.interpreter import Interpreter
-        except Exception as exc:
+        except Exception as tflite_exc:
             try:
                 from ai_edge_litert.interpreter import Interpreter
                 runtime_name = "ai-edge-litert"
             except Exception as litert_exc:
-                raise RuntimeError("tflite-runtime or ai-edge-litert is required for person detection") from litert_exc
+                raise RuntimeError(
+                    "tflite-runtime or ai-edge-litert is required for person detection "
+                    f"(tflite-runtime import failed: {tflite_exc}; "
+                    f"ai-edge-litert import failed: {litert_exc})"
+                ) from litert_exc
 
         self._labels = self._load_labels()
         self._person_class_ids = self._label_ids_for_person(self._labels)
