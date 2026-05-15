@@ -72,13 +72,25 @@ class WifiManagerTests(unittest.TestCase):
         with patch(
             "app.services.wifi_manager.get_connected_wifi_details",
             return_value={
-                "connected": True,
-                "connected_ssid": "Amk",
+                "connected": False,
+                "connected_ssid": "",
                 "connection_profile": "Amk",
                 "device_state": "70 (getting IP configuration)",
             },
         ):
             self.assertFalse(wifi_manager._wait_for_connection("Amk", timeout=0.01))
+
+    def test_wait_for_connection_accepts_active_connected_ssid_before_state_100(self) -> None:
+        with patch(
+            "app.services.wifi_manager.get_connected_wifi_details",
+            return_value={
+                "connected": True,
+                "connected_ssid": "Amk",
+                "connection_profile": "",
+                "device_state": "70 (getting IP configuration)",
+            },
+        ):
+            self.assertTrue(wifi_manager._wait_for_connection("Amk", timeout=0.01))
 
     def test_connect_wifi_accepts_success_after_nmcli_timeout_grace(self) -> None:
         nmcli_calls: list[list[str]] = []
@@ -146,6 +158,46 @@ class WifiManagerTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "connected")
+        cancel_wifi.assert_not_called()
+        delete_profile.assert_not_called()
+
+    def test_connect_wifi_keeps_active_connection_after_timeout_wait_failure(self) -> None:
+        def fake_nmcli(args, **kwargs):
+            if args[:2] == ["-g", "802-11-wireless-security.psk-flags"]:
+                return _Result(stdout="0")
+            if args[:4] == ["connection", "up", "id", "Amk"]:
+                raise wifi_manager.WifiCommandError(
+                    "nmcli --wait 5 connection up id Amk ifname wlan0: Error: Timeout expired (5 seconds)"
+                )
+            return _Result(stdout="ok")
+
+        with (
+            patch("app.services.wifi_manager.ensure_wifi_radio"),
+            patch("app.services.wifi_manager.stop_hotspot"),
+            patch("app.services.wifi_manager._create_wifi_profile"),
+            patch("app.services.wifi_manager._nmcli", side_effect=fake_nmcli),
+            patch("app.services.wifi_manager._wait_for_connection", return_value=False),
+            patch(
+                "app.services.wifi_manager.get_connected_wifi_details",
+                return_value={
+                    "connected": True,
+                    "connected_ssid": "Amk",
+                    "connection_profile": "",
+                    "device_state": "70 (getting IP configuration)",
+                },
+            ),
+            patch("app.services.wifi_manager._cancel_wifi_activation") as cancel_wifi,
+            patch("app.services.wifi_manager._delete_saved_profile") as delete_profile,
+        ):
+            result = wifi_manager.connect_wifi(
+                "Amk",
+                "secret",
+                activation_timeout=5,
+                connection_wait_timeout=8,
+            )
+
+        self.assertEqual(result["status"], "connected")
+        self.assertEqual(result["connection"]["connected_ssid"], "Amk")
         cancel_wifi.assert_not_called()
         delete_profile.assert_not_called()
 
