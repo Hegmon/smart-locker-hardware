@@ -24,6 +24,8 @@ class StreamingAgent:
         self.person_detector = None
         self.keyboard_thread = None
         self.running = False
+        self._stopping = False
+        self._stop_lock = threading.Lock()
 
     def initialize(self):
         logger.info("Initializing streaming agent")
@@ -56,19 +58,27 @@ class StreamingAgent:
         logger.info("Press Ctrl+C or type q then Enter to stop the streaming agent")
 
     def stop(self):
+        with self._stop_lock:
+            if self._stopping:
+                logger.info("Streaming agent stop already in progress")
+                return
+            self._stopping = True
+            self.running = False
+
         logger.info("Stopping streaming agent")
-        self.running = False
-        if self.hot_plug_monitor:
-            self.hot_plug_monitor.stop()
-        if self.mqtt_publisher:
-            self.mqtt_publisher.stop()
-        if self.health_monitor:
-            self.health_monitor.stop()
-        if self.person_detector:
-            self.person_detector.stop()
-        if self.stream_manager:
-            self.stream_manager.stop_all()
-        logger.info("Streaming agent stopped successfully")
+        try:
+            if self.hot_plug_monitor:
+                self.hot_plug_monitor.stop()
+            if self.mqtt_publisher:
+                self.mqtt_publisher.stop()
+            if self.health_monitor:
+                self.health_monitor.stop()
+            if self.person_detector:
+                self.person_detector.stop()
+            if self.stream_manager:
+                self.stream_manager.stop_all()
+        finally:
+            logger.info("Streaming agent stopped successfully")
 
     def run_forever(self):
         self.initialize()
