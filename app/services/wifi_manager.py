@@ -19,8 +19,8 @@ DEFAULT_HOTSPOT_SSID = get_str_setting("HOTSPOT_SSID", "SmartLocker-Setup")
 DEFAULT_HOTSPOT_PASSWORD = get_str_setting("HOTSPOT_PASSWORD", "SmartLocker123")
 DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS = get_int_setting("QBOX_WIFI_AGENT_WIFI_CONNECT_TIMEOUT_SECONDS", 45)
 DEFAULT_WIFI_CONNECT_GRACE_SECONDS = get_int_setting("QBOX_WIFI_AGENT_WIFI_CONNECT_GRACE_SECONDS", 20)
-DEFAULT_WIFI_REMOTE_CONNECT_ACTIVATION_SECONDS = get_int_setting("QBOX_WIFI_AGENT_REMOTE_CONNECT_ACTIVATION_SECONDS", 5)
-DEFAULT_WIFI_REMOTE_CONNECT_WAIT_SECONDS = get_int_setting("QBOX_WIFI_AGENT_REMOTE_CONNECT_WAIT_SECONDS", 8)
+DEFAULT_WIFI_REMOTE_CONNECT_ACTIVATION_SECONDS = get_int_setting("QBOX_WIFI_AGENT_REMOTE_CONNECT_ACTIVATION_SECONDS", 12)
+DEFAULT_WIFI_REMOTE_CONNECT_WAIT_SECONDS = get_int_setting("QBOX_WIFI_AGENT_REMOTE_CONNECT_WAIT_SECONDS", 15)
 ALLOW_NON_ROOT_NMCLI = get_bool_setting("ALLOW_NON_ROOT_NMCLI", False)
 _WIFI_LOCK = threading.RLock()
 logger = get_logger(__name__)
@@ -171,6 +171,8 @@ def _wait_for_connection(ssid: str, timeout: int = 15) -> bool:
         try:
             details = get_connected_wifi_details()
             device_state = str(details.get("device_state") or "")
+            if _details_match_connected_ssid(details, ssid):
+                return True
             if details.get("connected_ssid") == ssid and _is_connected_state(device_state):
                 return True
             if details.get("connection_profile") == ssid and _is_connected_state(device_state):
@@ -197,6 +199,14 @@ def _is_activating_state(state: str) -> bool:
 def _is_nmcli_timeout_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return "timeout:" in message or "timeout expired" in message or "timed out" in message
+
+
+def _details_match_connected_ssid(details: dict[str, Any], ssid: str) -> bool:
+    if not ssid:
+        return False
+    return bool(details.get("connected")) and (
+        details.get("connected_ssid") == ssid or details.get("connection_profile") == ssid
+    )
 
 
 def _active_wifi_details() -> dict[str, Any]:
@@ -670,8 +680,18 @@ def connect_wifi(
             _delete_saved_profile(ssid)
             raise
         except Exception as exc:
+            if _is_nmcli_timeout_error(exc):
+                details = get_connected_wifi_details()
+                if _details_match_connected_ssid(details, ssid):
+                    logger.info("WiFi %s connected after nmcli timeout; keeping active connection", ssid)
+                    return {
+                        "status": "connected",
+                        "ssid": ssid,
+                        "details": "connected after nmcli timeout",
+                        "connection": details,
+                    }
             _cancel_wifi_activation()
-            if password:
+            if password and not _is_nmcli_timeout_error(exc):
                 _delete_saved_profile(ssid)
             _raise_classified_wifi_error(ssid, exc)
 
