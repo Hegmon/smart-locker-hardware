@@ -12,10 +12,15 @@ logger = LoggingManager.get_logger(__name__)
 class StreamProcess:
     """Manage the lifecycle of one ffmpeg streaming process."""
 
-    def __init__(self, name, ffmpeg_command):
+    def __init__(self, name, ffmpeg_command, frame_buffer=None):
         self.name = name
         self.ffmpeg_command = ffmpeg_command
         self.rtsp_url = ffmpeg_command[-1] if ffmpeg_command else None
+        if ffmpeg_command and "rtsp" in ffmpeg_command:
+            rtsp_index = len(ffmpeg_command) - 1 - ffmpeg_command[::-1].index("rtsp")
+            if rtsp_index + 1 < len(ffmpeg_command):
+                self.rtsp_url = ffmpeg_command[rtsp_index + 1]
+        self.frame_buffer = frame_buffer
         self.process = None
         self.running = False
         self.restart_attempts = 0
@@ -34,11 +39,14 @@ class StreamProcess:
                 logger.info("Starting %s with command: %s", self.name, " ".join(self.ffmpeg_command))
                 self.process = subprocess.Popen(
                     self.ffmpeg_command,
-                    stdout=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE if self.frame_buffer else subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     text=True,
                 )
                 self.running = True
+                if self.frame_buffer:
+                    threading.Thread(target=self._read_frames, daemon=True, name=f"{self.name}-frames").start()
+                threading.Thread(target=self._drain_stderr, daemon=True, name=f"{self.name}-stderr").start()
                 threading.Thread(target=self._monitor, daemon=True, name=f"{self.name}-monitor").start()
             except Exception:
                 logger.exception("Failed to start %s", self.name)
@@ -107,6 +115,34 @@ class StreamProcess:
                 break
 
             time.sleep(5)
+
+    def _read_frames(self):
+        if not self.frame_buffer or not self.process or not self.process.stdout:
+            return
+
+        frame_size = self.frame_buffer.frame_size
+        while self.running and self.process is not None:
+            try:
+                frame = self.process.stdout.buffer.read(frame_size)
+            except Exception:
+                logger.exception("Frame reader failed for %s", self.name)
+                return
+
+            if len(frame) != frame_size:
+                return
+            self.frame_buffer.update(frame)
+
+    def _drain_stderr(self):
+        if not self.process or not self.process.stderr:
+            return
+        while self.running and self.process is not None:
+            try:
+                line = self.process.stderr.readline()
+            except Exception:
+                return
+            if not line:
+                return
+            logger.warning("%s ffmpeg: %s", self.name, line.strip())
 
     def is_running(self):
         return self.running and self.process is not None and self.process.poll() is None
