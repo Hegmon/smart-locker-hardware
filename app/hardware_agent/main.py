@@ -24,6 +24,8 @@ from app.hardware_agent.scanner import WifiScanner
 from app.services.wifi_manager import (
     DEFAULT_HOTSPOT_CONNECTION,
     DEFAULT_HOTSPOT_SSID,
+    DEFAULT_WIFI_REMOTE_CONNECT_ACTIVATION_SECONDS,
+    DEFAULT_WIFI_REMOTE_CONNECT_WAIT_SECONDS,
     WifiCommandError,
     connect_wifi,
     get_connected_wifi_details,
@@ -603,7 +605,12 @@ class WifiUploadAgent:
             with self._command_lock:
                 self._transition_to(NetworkState.CONNECTING, reason=f"Remote WiFi connect for {ssid}")
                 try:
-                    result = connect_wifi(ssid, password)
+                    result = connect_wifi(
+                        ssid,
+                        password,
+                        activation_timeout=DEFAULT_WIFI_REMOTE_CONNECT_ACTIVATION_SECONDS,
+                        connection_wait_timeout=DEFAULT_WIFI_REMOTE_CONNECT_WAIT_SECONDS,
+                    )
                     connected = result.get("connection") if isinstance(result, dict) else {}
                     connected = connected or get_connected_wifi_details()
                     if not connected.get("connected_ssid") or not self._internet_is_available(force=True):
