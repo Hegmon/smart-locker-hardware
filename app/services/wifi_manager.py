@@ -454,6 +454,26 @@ def _disable_profile_autoconnect(ssid: str) -> None:
         )
 
 
+def set_wifi_autoconnect_priority(ssid: str, priority: int) -> None:
+    if not _saved_profile_exists(ssid):
+        return
+    _nmcli(
+        [
+            "connection",
+            "modify",
+            "id",
+            ssid,
+            "connection.autoconnect",
+            "yes",
+            "connection.autoconnect-priority",
+            str(priority),
+        ],
+        check=False,
+        timeout=5,
+        require_root=True,
+    )
+
+
 def _create_wifi_profile(ssid: str, password: str) -> None:
     _delete_saved_profile(ssid)
     _nmcli([
