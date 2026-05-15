@@ -133,6 +133,31 @@ class MqttServiceRoutingTests(unittest.TestCase):
             },
         )
 
+    def test_wifi_connect_response_uses_short_connect_attempt_before_publish(self) -> None:
+        mqtt_client = MqttClient("broker", 1883, "device-1", device_uuid="pi-uuid")
+        mqtt_client.register_command_handler(Mock(return_value={"status": "FAILED"}))
+        mqtt_client.ensure_connected = Mock(return_value=True)
+        mqtt_client.publish = Mock(return_value=True)
+
+        mqtt_client._on_message(
+            None,
+            None,
+            _message(
+                "devices/pi-uuid/services/wifi.connect/request",
+                {"command_id": "cmd-connect", "service": "wifi.connect"},
+            ),
+        )
+
+        mqtt_client.ensure_connected.assert_called_once_with(timeout_seconds=5.0)
+        mqtt_client.publish.assert_called_once_with(
+            "devices/pi-uuid/services/wifi.connect/response",
+            {
+                "command_id": "cmd-connect",
+                "service": "wifi.connect",
+                "result": {"status": "FAILED"},
+            },
+        )
+
     def test_connect_response_helpers_do_not_return_password(self) -> None:
         success = build_wifi_connect_success(
             "Office",
