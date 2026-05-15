@@ -53,6 +53,35 @@ class WifiManagerTests(unittest.TestCase):
             nmcli_calls,
         )
 
+    def test_set_wifi_autoconnect_priority_marks_profile_preferred(self) -> None:
+        nmcli_calls: list[list[str]] = []
+
+        def fake_nmcli(args, **kwargs):
+            nmcli_calls.append(args)
+            if args[:3] == ["-t", "-f", "NAME,TYPE"]:
+                return _Result(stdout="Amk:802-11-wireless\n")
+            return _Result(stdout="ok")
+
+        with (
+            patch("app.services.wifi_manager.ensure_wifi_radio"),
+            patch("app.services.wifi_manager._nmcli", side_effect=fake_nmcli),
+        ):
+            wifi_manager.set_wifi_autoconnect_priority("Amk", 100)
+
+        self.assertIn(
+            [
+                "connection",
+                "modify",
+                "id",
+                "Amk",
+                "connection.autoconnect",
+                "yes",
+                "connection.autoconnect-priority",
+                "100",
+            ],
+            nmcli_calls,
+        )
+
     def test_failed_saved_reconnect_only_cancels_target_profile(self) -> None:
         with (
             patch("app.services.wifi_manager.ensure_wifi_radio"),
