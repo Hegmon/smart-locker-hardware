@@ -1,5 +1,6 @@
 import signal
 import sys
+import threading
 import time
 
 from app.core.config import MQTT_HOST, MQTT_PASSWORD, MQTT_PORT, MQTT_USERNAME
@@ -21,6 +22,7 @@ class StreamingAgent:
         self.hot_plug_monitor = None
         self.mqtt_publisher = None
         self.person_detector = None
+        self.keyboard_thread = None
         self.running = False
 
     def initialize(self):
@@ -49,7 +51,9 @@ class StreamingAgent:
         self.health_monitor.start()
         self.mqtt_publisher.start()
         self.hot_plug_monitor.start()
+        self._start_keyboard_listener()
         logger.info("Streaming agent started successfully")
+        logger.info("Press Ctrl+C or type q then Enter to stop the streaming agent")
 
     def stop(self):
         logger.info("Stopping streaming agent")
@@ -72,6 +76,30 @@ class StreamingAgent:
 
         while self.running:
             time.sleep(1)
+
+    def _start_keyboard_listener(self):
+        if not sys.stdin or not sys.stdin.isatty() or self.keyboard_thread:
+            return
+
+        self.keyboard_thread = threading.Thread(
+            target=self._keyboard_loop,
+            daemon=True,
+            name="streaming-keyboard-listener",
+        )
+        self.keyboard_thread.start()
+
+    def _keyboard_loop(self):
+        while self.running:
+            try:
+                command = sys.stdin.readline()
+            except Exception:
+                return
+            if not command:
+                return
+            if command.strip().lower() in {"q", "quit", "exit", "stop"}:
+                logger.info("Keyboard stop requested")
+                self.stop()
+                return
 
 
 agent = StreamingAgent()
