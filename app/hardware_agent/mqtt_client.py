@@ -237,18 +237,17 @@ class MqttClient:
             if response is None:
                 return
 
-            if service in {"wifi.connect", "wifi_connect"}:
-                self.ensure_connected(timeout_seconds=20.0)
             if msg.topic.startswith("hardware_agent/request/"):
-                self.publish(response_topic, response)
+                self._publish_service_response(response_topic, response, service=service)
             else:
-                published = self.publish(
+                published = self._publish_service_response(
                     response_topic,
                     {
                         "command_id": command_id,
                         "service": service,
                         "result": response,
                     },
+                    service=service,
                 )
                 logger.info(
                     "MQTT service response %s for service=%s command_id=%s response_topic=%s",
@@ -316,6 +315,18 @@ class MqttClient:
             self._watchdog_wake.set()
             return False
         return True
+
+    def _publish_service_response(self, topic: str, payload: dict[str, Any], *, service: str) -> bool:
+        if service in {"wifi.connect", "wifi_connect"} and not self.is_connected():
+            self.ensure_connected(timeout_seconds=5.0)
+
+        published = self.publish(topic, payload)
+        if published or service not in {"wifi.connect", "wifi_connect"}:
+            return published
+
+        if self.ensure_connected(timeout_seconds=3.0, force_reconnect=True):
+            published = self.publish(topic, payload)
+        return published
 
     def _queue_publish(self, topic: str, payload: dict[str, Any]):
         with self._pending_lock:
