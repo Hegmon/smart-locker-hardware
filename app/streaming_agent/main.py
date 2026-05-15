@@ -5,6 +5,8 @@ import time
 
 from app.core.config import MQTT_HOST, MQTT_PASSWORD, MQTT_PORT, MQTT_USERNAME
 from app.streaming_agent.detection.person_detector import PersonDetector
+from app.streaming_agent.detection.tamper_detection import TamperDetection
+from app.streaming_agent.gpio.led_controller import LedController
 from app.streaming_agent.health_monitor import HealthMonitor
 from app.streaming_agent.hot_plug_monitor import HotPlugMonitor
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
@@ -22,6 +24,8 @@ class StreamingAgent:
         self.hot_plug_monitor = None
         self.mqtt_publisher = None
         self.person_detector = None
+        self.tamper_detectors = []
+        self.led_controller = LedController()
         self.keyboard_thread = None
         self.running = False
         self._stopping = False
@@ -31,7 +35,18 @@ class StreamingAgent:
         logger.info("Initializing streaming agent")
         self.stream_manager = StreamingManager()
         self.stream_manager.initialize()
-        self.person_detector = PersonDetector(self.stream_manager.get_frame_buffer("internal"))
+        self.person_detector = PersonDetector(
+            self.stream_manager.get_frame_buffer("internal"),
+            led_controller=self.led_controller,
+        )
+        self.tamper_detectors = [
+            TamperDetection(
+                frame_buffer,
+                camera_role=role,
+                led_controller=self.led_controller,
+            )
+            for role, frame_buffer in self.stream_manager.frame_buffers.items()
+        ]
         self.health_monitor = HealthMonitor(stream_registry=self.stream_manager.streams)
         self.hot_plug_monitor = HotPlugMonitor(stream_manager=self.stream_manager)
         self.mqtt_publisher = MQTTPublisher(
@@ -48,8 +63,11 @@ class StreamingAgent:
         logger.info("Starting streaming agent")
         self.running = True
         self.stream_manager.start_all()
+        self.led_controller.start()
         if self.person_detector:
             self.person_detector.start()
+        for tamper_detector in self.tamper_detectors:
+            tamper_detector.start()
         self.health_monitor.start()
         self.mqtt_publisher.start()
         self.hot_plug_monitor.start()
@@ -75,6 +93,9 @@ class StreamingAgent:
                 self.health_monitor.stop()
             if self.person_detector:
                 self.person_detector.stop()
+            for tamper_detector in self.tamper_detectors:
+                tamper_detector.stop()
+            self.led_controller.cleanup()
             if self.stream_manager:
                 self.stream_manager.stop_all()
         finally:
