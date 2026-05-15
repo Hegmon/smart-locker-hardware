@@ -30,6 +30,7 @@ from app.services.wifi_manager import (
     connect_wifi,
     get_connected_wifi_details,
     reconnect_saved_wifi,
+    set_wifi_autoconnect_priority,
 )
 from app.utils.logger import get_logger
 
@@ -776,7 +777,13 @@ class WifiUploadAgent:
         ssid: str,
         force_refresh: bool = False,
     ) -> None:
-        if self.mqtt.is_connected() and not force_refresh:
+        if self.mqtt.is_connected():
+            if force_refresh:
+                logger.info(
+                    "WiFi %s is online via %s; MQTT already connected, skipping disruptive refresh",
+                    ssid,
+                    source,
+                )
             return
         logger.info(
             "WiFi %s is online via %s; ensuring MQTT is %s",
@@ -1017,12 +1024,22 @@ class WifiUploadAgent:
             self._post_connect_roam_hold_until = deadline
             self._post_connect_roam_hold_ssid = ssid
             self._last_priority_reconnect_at = deadline - self.config.switch_cooldown_seconds
+        self._prefer_requested_wifi_profile(ssid)
         logger.info(
             "Holding requested WiFi %s for %s seconds after %s before stronger saved WiFi roaming",
             ssid,
             hold_seconds,
             source,
         )
+
+    def _prefer_requested_wifi_profile(self, ssid: str) -> None:
+        try:
+            set_wifi_autoconnect_priority(ssid, 100)
+            for record in self.saved_networks.list():
+                if record.ssid != ssid:
+                    set_wifi_autoconnect_priority(record.ssid, 0)
+        except Exception:
+            logger.exception("Failed to update WiFi autoconnect priority for requested SSID %s", ssid)
 
     def _post_connect_roam_hold_active(self, current_ssid: str | None) -> bool:
         now = time.monotonic()
