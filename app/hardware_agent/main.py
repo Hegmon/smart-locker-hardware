@@ -334,11 +334,18 @@ class WifiUploadAgent:
                     "mqtt-late-success",
                 }
             )
-            self._ensure_mqtt_connected_after_wifi_online(
-                source=source,
-                ssid=connected_ssid,
-                force_refresh=force_mqtt_refresh,
-            )
+            if manual_connect_active and source.startswith("mqtt"):
+                logger.info(
+                    "Deferring MQTT reconnect for %s via %s to remote WiFi response publisher",
+                    connected_ssid,
+                    source,
+                )
+            else:
+                self._ensure_mqtt_connected_after_wifi_online(
+                    source=source,
+                    ssid=connected_ssid,
+                    force_refresh=force_mqtt_refresh,
+                )
             self.saved_networks.mark_success(connected_ssid)
             transitioned = self._transition_to(
                 NetworkState.CONNECTED,
@@ -602,11 +609,6 @@ class WifiUploadAgent:
                     if not connected.get("connected_ssid") or not self._internet_is_available(force=True):
                         raise WifiCommandError(f"Connected to {ssid} but internet validation failed")
                     self._handle_wifi_observation(connected, source="mqtt")
-                    self._ensure_mqtt_connected_after_wifi_online(
-                        source="mqtt-connect-success",
-                        ssid=ssid,
-                        force_refresh=True,
-                    )
                     self._activate_post_connect_roam_hold(ssid, source="MQTT wifi.connect")
                     self._schedule_best_network_check(reason=f"post remote connect {ssid}")
 
@@ -628,11 +630,6 @@ class WifiUploadAgent:
                 current_status = get_connected_wifi_details()
                 if current_status.get("connected_ssid") == ssid and self._internet_is_available(force=True):
                     self._handle_wifi_observation(current_status, source="mqtt-late-success")
-                    self._ensure_mqtt_connected_after_wifi_online(
-                        source="mqtt-connect-late-success",
-                        ssid=ssid,
-                        force_refresh=True,
-                    )
                     self._activate_post_connect_roam_hold(ssid, source="MQTT wifi.connect late success")
                     self._schedule_best_network_check(reason=f"post late remote connect {ssid}")
                     response = build_wifi_connect_success(ssid, current_status)
@@ -812,7 +809,9 @@ class WifiUploadAgent:
             "details": details,
             "timestamp": utc_now(),
         }
-        if status == "SUCCESS" and ssid:
+        with self._state_lock:
+            manual_connect_active = self._manual_connect_active
+        if status == "SUCCESS" and ssid and not manual_connect_active:
             self._ensure_mqtt_connected_after_wifi_online(source="command-result", ssid=ssid)
         self.mqtt.publish(self.config.mqtt_command_result_topic, payload)
 
