@@ -194,6 +194,11 @@ def _is_activating_state(state: str) -> bool:
     return state == "connecting" or state.startswith(("40", "50", "60", "70", "80", "90"))
 
 
+def _is_nmcli_timeout_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "timeout:" in message or "timeout expired" in message or "timed out" in message
+
+
 def _active_wifi_details() -> dict[str, Any]:
     result = _nmcli([
         "-t",
@@ -640,7 +645,7 @@ def connect_wifi(
                     require_root=True,
                 )
             except WifiCommandError as exc:
-                if "Timeout:" not in str(exc):
+                if not _is_nmcli_timeout_error(exc):
                     raise
                 logger.warning(
                     "WiFi activation command timed out for %s; waiting for NetworkManager to finish association",
