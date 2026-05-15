@@ -1,5 +1,6 @@
 from app.streaming_agent.camera_roles import assign_camera_roles
 from app.streaming_agent.ffmpeg_builder import build_ffmpeg_command
+from app.streaming_agent.frame_buffer import SharedFrameBuffer
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 from app.streaming_agent.stream_process import StreamProcess
 from app.streaming_agent.watchdog import StreamWatchdog
@@ -14,10 +15,12 @@ class StreamingManager:
     def __init__(self):
         self.streams = {}
         self.watchdog = None
+        self.frame_buffers = {}
 
     def initialize(self):
         logger.info("Initializing streams")
         self.streams.clear()
+        self.frame_buffers.clear()
 
         camera_roles = assign_camera_roles()
         for role, camera in camera_roles.items():
@@ -27,15 +30,26 @@ class StreamingManager:
 
             video_device = camera["video_device"]
             logger.info("Building ffmpeg command for %s camera at %s", role, video_device)
-            ffmpeg_command = build_ffmpeg_command(video_device, camera_role=role)
+            frame_buffer = SharedFrameBuffer() if role == "internal" else None
+            ffmpeg_command = build_ffmpeg_command(
+                video_device,
+                camera_role=role,
+                frame_pipe=frame_buffer is not None,
+            )
             self.streams[role] = StreamProcess(
                 name=f"{role.capitalize()} Camera Stream",
                 ffmpeg_command=ffmpeg_command,
+                frame_buffer=frame_buffer,
             )
+            if frame_buffer:
+                self.frame_buffers[role] = frame_buffer
             logger.info("Stream for %s camera initialized", role)
 
         if not self.streams:
             logger.warning("No streaming cameras were initialized")
+
+    def get_frame_buffer(self, role="internal"):
+        return self.frame_buffers.get(role)
 
     def start_all(self):
         logger.info("Starting all streams")
