@@ -30,7 +30,7 @@ class StreamingManager:
 
             video_device = camera["video_device"]
             logger.info("Building ffmpeg command for %s camera at %s", role, video_device)
-            frame_buffer = SharedFrameBuffer() if role == "internal" else None
+            frame_buffer = SharedFrameBuffer()
             ffmpeg_command = build_ffmpeg_command(
                 video_device,
                 camera_role=role,
