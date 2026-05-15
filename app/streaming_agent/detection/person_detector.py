@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import threading
 import time
 
@@ -17,6 +18,7 @@ logger = LoggingManager.get_logger(__name__)
 
 DETECTION_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL_PATH = DETECTION_DIR / "models" / "detect.tflite"
+ALT_MODEL_PATH = DETECTION_DIR / "models" / "model.tflite"
 DEFAULT_LABELS_PATH = DETECTION_DIR / "labels.txt"
 
 
@@ -34,7 +36,7 @@ class PersonDetector:
         led_off_delay_seconds=3.0,
     ):
         self.frame_buffer = frame_buffer
-        self.model_path = Path(model_path)
+        self.model_path = self._resolve_model_path(model_path)
         self.labels_path = Path(labels_path)
         self.confidence_threshold = confidence_threshold
         self.process_every_n_frames = max(1, int(process_every_n_frames))
@@ -55,6 +57,7 @@ class PersonDetector:
         self._last_sequence = -1
         self._processed_frames = 0
         self._fps_window_started_at = time.monotonic()
+        self._led_visible = False
 
     def start(self):
         if self._running:
@@ -63,7 +66,12 @@ class PersonDetector:
             logger.warning("Person detector disabled: no shared frame buffer available")
             return
         if not self.model_path.exists():
-            logger.warning("Person detector disabled: model not found at %s", self.model_path)
+            logger.warning(
+                "Person detector disabled: model not found at %s. "
+                "Place detect.tflite in app/streaming_agent/detection/models/ "
+                "or set PERSON_DETECTOR_MODEL_PATH.",
+                self.model_path,
+            )
             return
         if cv2 is None or np is None:
             logger.warning("Person detector disabled: opencv-python-headless and numpy are required")
@@ -105,6 +113,14 @@ class PersonDetector:
         self._input_height = int(input_shape[1])
         self._input_width = int(input_shape[2])
         self._input_dtype = self._input_details[0]["dtype"]
+        logger.info(
+            "Person detector model loaded: input=%sx%s dtype=%s person_class_ids=%s threshold=%.2f",
+            self._input_width,
+            self._input_height,
+            self._input_dtype,
+            sorted(self._person_class_ids),
+            self.confidence_threshold,
+        )
 
     def _run(self):
         while self._running:
@@ -198,11 +214,17 @@ class PersonDetector:
         now = time.monotonic()
         if person_detected:
             self._last_person_seen_at = now
+            if not self._led_visible:
+                logger.info("Person detected; GPIO LEDs ON")
             self.led_controller.set_person_visible(True)
+            self._led_visible = True
             return
 
         if self._last_person_seen_at and now - self._last_person_seen_at >= self.led_off_delay_seconds:
+            if self._led_visible:
+                logger.info("No person detected for %.1f seconds; GPIO LEDs OFF", self.led_off_delay_seconds)
             self.led_controller.set_person_visible(False)
+            self._led_visible = False
 
     def _log_fps(self):
         self._processed_frames += 1
@@ -225,3 +247,15 @@ class PersonDetector:
         # Some SSD MobileNet TFLite exports include a background label, while others return 0-based COCO ids.
         person_ids.update(index - 1 for index in list(person_ids) if index > 0)
         return person_ids or {0, 1}
+
+    @staticmethod
+    def _resolve_model_path(model_path):
+        env_path = os.environ.get("PERSON_DETECTOR_MODEL_PATH", "").strip()
+        if env_path:
+            return Path(env_path)
+        path = Path(model_path)
+        if path.exists():
+            return path
+        if ALT_MODEL_PATH.exists():
+            return ALT_MODEL_PATH
+        return path
