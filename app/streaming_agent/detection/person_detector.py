@@ -104,10 +104,15 @@ class PersonDetector:
         logger.info("Person detector stopped")
 
     def _load_model(self):
+        runtime_name = "tflite-runtime"
         try:
             from tflite_runtime.interpreter import Interpreter
         except Exception as exc:
-            raise RuntimeError("tflite-runtime is required for person detection") from exc
+            try:
+                from ai_edge_litert.interpreter import Interpreter
+                runtime_name = "ai-edge-litert"
+            except Exception as litert_exc:
+                raise RuntimeError("tflite-runtime or ai-edge-litert is required for person detection") from litert_exc
 
         self._labels = self._load_labels()
         self._person_class_ids = self._label_ids_for_person(self._labels)
@@ -128,6 +133,7 @@ class PersonDetector:
             sorted(self._person_class_ids),
             self.confidence_threshold,
         )
+        logger.info("Person detector inference runtime: %s", runtime_name)
 
     def _run(self):
         while self._running:
