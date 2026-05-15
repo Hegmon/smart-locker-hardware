@@ -37,6 +37,12 @@ class LedController:
             self._active_sources.add(source)
         else:
             self._active_sources.discard(source)
+        logger.info(
+            "Detection LED source %s -> %s; active_sources=%s",
+            source,
+            "ON" if active else "OFF",
+            sorted(self._active_sources),
+        )
         self._set_output(bool(self._active_sources))
 
     def set_person_visible(self, visible):
@@ -53,6 +59,7 @@ class LedController:
         for pin in self.pins:
             self._gpio.output(pin, state)
         self._on = visible
+        logger.info("Detection LEDs %s on BCM pins %s", "ON" if visible else "OFF", self.pins)
 
     def cleanup(self):
         if not self._enabled or self._gpio is None:
