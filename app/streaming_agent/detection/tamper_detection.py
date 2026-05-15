@@ -24,14 +24,14 @@ class TamperDetection:
         *,
         camera_role,
         led_controller=None,
-        process_every_n_frames=5,
-        tamper_confirm_seconds=2.0,
+        process_every_n_frames=3,
+        tamper_confirm_seconds=1.0,
         tamper_clear_seconds=3.0,
-        dark_brightness_threshold=18.0,
-        bright_brightness_threshold=245.0,
-        blur_threshold=8.0,
-        edge_density_threshold=0.002,
-        large_change_threshold=0.70,
+        dark_brightness_threshold=35.0,
+        bright_brightness_threshold=235.0,
+        blur_threshold=20.0,
+        edge_density_threshold=0.01,
+        large_change_threshold=0.55,
     ):
         self.frame_buffer = frame_buffer
         self.camera_role = camera_role
@@ -55,6 +55,7 @@ class TamperDetection:
         self._tamper_active = False
         self._processed_frames = 0
         self._fps_window_started_at = time.monotonic()
+        self._last_metrics_log_at = 0.0
 
     def start(self):
         if self._running:
@@ -121,7 +122,7 @@ class TamperDetection:
 
         dark_or_covered = brightness <= self.dark_brightness_threshold
         overexposed = brightness >= self.bright_brightness_threshold
-        texture_missing = blur_score <= self.blur_threshold and edge_density <= self.edge_density_threshold
+        texture_missing = blur_score <= self.blur_threshold or edge_density <= self.edge_density_threshold
 
         if self._baseline_gray is None and not dark_or_covered and not overexposed:
             self._baseline_gray = small.astype(np.float32)
@@ -134,9 +135,11 @@ class TamperDetection:
             if not dark_or_covered and not overexposed and not texture_missing:
                 cv2.accumulateWeighted(small.astype(np.float32), self._baseline_gray, 0.02)
 
-        if dark_or_covered and texture_missing:
+        self._maybe_log_metrics(brightness, blur_score, edge_density, scene_change)
+
+        if dark_or_covered:
             return True, f"covered/dark brightness={brightness:.1f} blur={blur_score:.1f} edges={edge_density:.4f}"
-        if overexposed and texture_missing:
+        if overexposed:
             return True, f"covered/bright brightness={brightness:.1f} blur={blur_score:.1f} edges={edge_density:.4f}"
         if scene_change >= self.large_change_threshold and texture_missing:
             return True, f"blocked scene_change={scene_change:.2f} blur={blur_score:.1f} edges={edge_density:.4f}"
@@ -170,3 +173,17 @@ class TamperDetection:
         logger.info("Tamper detection FPS %.2f for %s camera", self._processed_frames / elapsed, self.camera_role)
         self._processed_frames = 0
         self._fps_window_started_at = now
+
+    def _maybe_log_metrics(self, brightness, blur_score, edge_density, scene_change):
+        now = time.monotonic()
+        if now - self._last_metrics_log_at < 5:
+            return
+        self._last_metrics_log_at = now
+        logger.info(
+            "Tamper metrics for %s camera: brightness=%.1f blur=%.1f edges=%.4f scene_change=%.2f",
+            self.camera_role,
+            brightness,
+            blur_score,
+            edge_density,
+            scene_change,
+        )
