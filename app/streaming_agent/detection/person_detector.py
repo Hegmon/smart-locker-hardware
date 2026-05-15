@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import subprocess
 import threading
 import time
 
@@ -20,6 +21,8 @@ DETECTION_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL_PATH = DETECTION_DIR / "models" / "detect.tflite"
 ALT_MODEL_PATH = DETECTION_DIR / "models" / "model.tflite"
 DEFAULT_LABELS_PATH = DETECTION_DIR / "labels.txt"
+PROJECT_DIR = DETECTION_DIR.parents[2]
+MODEL_INSTALLER = PROJECT_DIR / "app" / "scripts" / "install_detection_model.sh"
 
 
 class PersonDetector:
@@ -66,10 +69,14 @@ class PersonDetector:
             logger.warning("Person detector disabled: no shared frame buffer available")
             return
         if not self.model_path.exists():
+            self._install_missing_model()
+            self.model_path = self._resolve_model_path(self.model_path)
+
+        if not self.model_path.exists():
             logger.warning(
                 "Person detector disabled: model not found at %s. "
                 "Place detect.tflite in app/streaming_agent/detection/models/ "
-                "or set PERSON_DETECTOR_MODEL_PATH.",
+                "set PERSON_DETECTOR_MODEL_PATH, or run app/scripts/install_detection_model.sh.",
                 self.model_path,
             )
             return
@@ -259,3 +266,31 @@ class PersonDetector:
         if ALT_MODEL_PATH.exists():
             return ALT_MODEL_PATH
         return path
+
+    def _install_missing_model(self):
+        if os.environ.get("PERSON_DETECTOR_AUTO_INSTALL_MODEL", "true").strip().lower() in {"0", "false", "no"}:
+            return
+        if not MODEL_INSTALLER.exists():
+            logger.warning("Person detector model installer not found: %s", MODEL_INSTALLER)
+            return
+
+        logger.info("Person detector model missing; running installer %s", MODEL_INSTALLER)
+        try:
+            result = subprocess.run(
+                [str(MODEL_INSTALLER)],
+                cwd=str(PROJECT_DIR),
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+            )
+        except Exception as exc:
+            logger.warning("Person detector model installer failed to run: %s", exc)
+            return
+
+        if result.stdout.strip():
+            logger.info("Model installer output: %s", result.stdout.strip().replace("\n", " | "))
+        if result.stderr.strip():
+            logger.warning("Model installer stderr: %s", result.stderr.strip().replace("\n", " | "))
+        if result.returncode != 0:
+            logger.warning("Person detector model installer exited with status %s", result.returncode)
