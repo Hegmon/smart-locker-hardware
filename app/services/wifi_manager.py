@@ -19,6 +19,8 @@ DEFAULT_HOTSPOT_SSID = get_str_setting("HOTSPOT_SSID", "SmartLocker-Setup")
 DEFAULT_HOTSPOT_PASSWORD = get_str_setting("HOTSPOT_PASSWORD", "SmartLocker123")
 DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS = get_int_setting("QBOX_WIFI_AGENT_WIFI_CONNECT_TIMEOUT_SECONDS", 45)
 DEFAULT_WIFI_CONNECT_GRACE_SECONDS = get_int_setting("QBOX_WIFI_AGENT_WIFI_CONNECT_GRACE_SECONDS", 20)
+DEFAULT_WIFI_REMOTE_CONNECT_ACTIVATION_SECONDS = get_int_setting("QBOX_WIFI_AGENT_REMOTE_CONNECT_ACTIVATION_SECONDS", 5)
+DEFAULT_WIFI_REMOTE_CONNECT_WAIT_SECONDS = get_int_setting("QBOX_WIFI_AGENT_REMOTE_CONNECT_WAIT_SECONDS", 8)
 ALLOW_NON_ROOT_NMCLI = get_bool_setting("ALLOW_NON_ROOT_NMCLI", False)
 _WIFI_LOCK = threading.RLock()
 logger = get_logger(__name__)
@@ -601,7 +603,13 @@ def reconnect_saved_wifi(ssid: str) -> dict[str, Any]:
 # =========================================================
 # CONNECT WIFI
 # =========================================================
-def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
+def connect_wifi(
+    ssid: str,
+    password: str,
+    *,
+    activation_timeout: int | None = None,
+    connection_wait_timeout: int | None = None,
+) -> dict[str, Any]:
     def _connect():
         ensure_wifi_radio()
 
@@ -623,10 +631,12 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
                 raise WifiAuthenticationError(f"Authentication failed for {ssid}: password required for new network")
 
             result = None
+            activation_wait = activation_timeout or DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS
+            connection_wait = connection_wait_timeout or min(20, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)
             try:
                 result = _nmcli(
                     ["connection", "up", "id", ssid, "ifname", DEFAULT_INTERFACE],
-                    timeout=DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS,
+                    timeout=activation_wait,
                     require_root=True,
                 )
             except WifiCommandError as exc:
@@ -636,10 +646,11 @@ def connect_wifi(ssid: str, password: str) -> dict[str, Any]:
                     "WiFi activation command timed out for %s; waiting for NetworkManager to finish association",
                     ssid,
                 )
-                if not _wait_for_connection(ssid, timeout=DEFAULT_WIFI_CONNECT_GRACE_SECONDS):
+                timeout_grace = connection_wait_timeout or DEFAULT_WIFI_CONNECT_GRACE_SECONDS
+                if not _wait_for_connection(ssid, timeout=timeout_grace):
                     raise
 
-            if not _wait_for_connection(ssid, timeout=min(20, DEFAULT_WIFI_CONNECT_TIMEOUT_SECONDS)):
+            if not _wait_for_connection(ssid, timeout=connection_wait):
                 details = get_connected_wifi_details()
                 logger.warning("Connection wait failed for %s; current WiFi details: %s", ssid, details)
                 raise WifiCommandError(f"Connection failed:{ssid}")
