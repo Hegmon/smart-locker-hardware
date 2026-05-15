@@ -1,12 +1,12 @@
 # Optional Raspberry Pi person-detection dependencies.
-# Keep these out of requirements.txt because tflite-runtime does not publish
-# wheels for every desktop/Python combination, including Python 3.12 x86_64.
+# Install numpy/OpenCV/GPIO on the Pi with apt first:
+#   sudo apt install -y python3-numpy python3-opencv python3-rpi.gpio
+#
+# Keep inference runtimes out of requirements.txt because tflite-runtime does
+# not publish wheels for every desktop/Python combination.
 
-numpy>=1.24,<2.0
-opencv-python-headless>=4.8,<4.11
-
-# tflite-runtime wheels are intended for Raspberry Pi/Linux aarch64 here.
-# Use Python 3.11 on the Pi if pip skips this on Python 3.12.
+# Preferred runtime for Python 3.11 and older.
 tflite-runtime>=2.14,<3.0; platform_machine == "aarch64" and python_version < "3.12"
 
-RPi.GPIO>=0.7.1; platform_machine == "aarch64" or platform_machine == "armv7l"
+# LiteRT package for Python 3.12+ where tflite-runtime wheels are unavailable.
+ai-edge-litert>=1.3,<3.0; platform_machine == "aarch64" and python_version >= "3.12"
