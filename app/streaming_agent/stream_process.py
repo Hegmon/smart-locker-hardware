@@ -121,6 +121,14 @@ class StreamProcess:
             return
 
         frame_size = self.frame_buffer.frame_size
+        logger.info(
+            "%s raw frame reader expecting complete frames of %s bytes (%sx%sx%s)",
+            self.name,
+            frame_size,
+            self.frame_buffer.width,
+            self.frame_buffer.height,
+            self.frame_buffer.channels,
+        )
         while self.running and self.process is not None:
             try:
                 frame = self.process.stdout.buffer.read(frame_size)
@@ -129,6 +137,13 @@ class StreamProcess:
                 return
 
             if len(frame) != frame_size:
+                logger.error(
+                    "%s raw frame reader stopped: expected complete frame_size=%s bytes, got=%s. "
+                    "This usually means ffmpeg exited, camera is busy, or raw pipe dimensions do not match the frame buffer.",
+                    self.name,
+                    frame_size,
+                    len(frame),
+                )
                 return
             self.frame_buffer.update(frame)
 
