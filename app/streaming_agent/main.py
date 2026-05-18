@@ -5,6 +5,7 @@ import time
 
 from app.core.config import MQTT_HOST, MQTT_PASSWORD, MQTT_PORT, MQTT_USERNAME
 from app.streaming_agent.detection.person_detector import PersonDetector
+from app.streaming_agent.detection.qr_scanner import QrScanner
 from app.streaming_agent.detection.tamper_detection import TamperDetection
 from app.streaming_agent.gpio.led_controller import LedController
 from app.streaming_agent.health_monitor import HealthMonitor
@@ -24,6 +25,7 @@ class StreamingAgent:
         self.hot_plug_monitor = None
         self.mqtt_publisher = None
         self.person_detector = None
+        self.qr_scanner = None
         self.tamper_detectors = []
         self.led_controller = LedController()
         self.keyboard_thread = None
@@ -39,6 +41,8 @@ class StreamingAgent:
             self.stream_manager.get_frame_buffer("internal"),
             led_controller=self.led_controller,
         )
+        self.qr_scanner = QrScanner(self.stream_manager.get_frame_buffer("external"))
+        self._warn_if_gpio_pins_overlap()
         self.tamper_detectors = [
             TamperDetection(
                 frame_buffer,
@@ -59,6 +63,23 @@ class StreamingAgent:
         )
         logger.info("Streaming agent initialized successfully")
 
+    def _warn_if_gpio_pins_overlap(self):
+        if not self.qr_scanner:
+            return
+
+        detection_pins = set(getattr(self.led_controller, "pins", ()))
+        qr_pins = {
+            getattr(self.qr_scanner.gpio_controller, "success_pin", None),
+            getattr(self.qr_scanner.gpio_controller, "failure_pin", None),
+        }
+        overlap = sorted(pin for pin in detection_pins.intersection(qr_pins) if pin is not None)
+        if overlap:
+            logger.warning(
+                "QR GPIO pins overlap with detection LED pins: %s. "
+                "Set QR_SUCCESS_GPIO_PIN/QR_FAILURE_GPIO_PIN or update detection LED pins if this hardware uses relays.",
+                overlap,
+            )
+
     def start(self):
         logger.info("Starting streaming agent")
         self.running = True
@@ -66,6 +87,8 @@ class StreamingAgent:
         self.led_controller.start()
         if self.person_detector:
             self.person_detector.start()
+        if self.qr_scanner:
+            self.qr_scanner.start()
         for tamper_detector in self.tamper_detectors:
             tamper_detector.start()
         self.health_monitor.start()
@@ -96,6 +119,8 @@ class StreamingAgent:
             for tamper_detector in self.tamper_detectors:
                 tamper_detector.stop()
             self.led_controller.cleanup()
+            if self.qr_scanner:
+                self.qr_scanner.stop()
             if self.stream_manager:
                 self.stream_manager.stop_all()
         finally:
