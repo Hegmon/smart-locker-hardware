@@ -14,6 +14,11 @@ except Exception:
     cv2 = None
     np = None
 
+try:
+    from pyzbar.pyzbar import decode as pyzbar_decode
+except Exception:
+    pyzbar_decode = None
+
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 from app.streaming_agent.camera_controls import CameraControlManager
 
@@ -37,6 +42,9 @@ QR_SCAN_DEBUG = os.getenv("QR_SCAN_DEBUG", "false").strip().lower() in {"1", "tr
 QR_SHARPEN_ENABLED = os.getenv("QR_SHARPEN_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
 QR_FOCUS_RETRY_SECONDS = float(os.getenv("QR_FOCUS_RETRY_SECONDS", "1.5"))
 QR_STATUS_LOG_SECONDS = float(os.getenv("QR_STATUS_LOG_SECONDS", "3"))
+QR_SAVE_DEBUG_FRAMES = os.getenv("QR_SAVE_DEBUG_FRAMES", "false").strip().lower() in {"1", "true", "yes", "on"}
+QR_DEBUG_FRAME_DIR = Path(os.getenv("QR_DEBUG_FRAME_DIR", "logs/qr_debug_frames"))
+QR_DEBUG_SAVE_INTERVAL_SECONDS = float(os.getenv("QR_DEBUG_SAVE_INTERVAL_SECONDS", "5"))
 
 
 class QrGpioController:
@@ -131,6 +139,9 @@ class QrScanner:
         self._last_focus_retry_at = 0.0
         self._last_status_log_at = 0.0
         self._saw_first_frame = False
+        self._last_debug_frame_saved_at = 0.0
+        self._pyzbar_unavailable_logged = False
+        self._last_pattern_decode_failed_log_at = 0.0
 
     def start(self):
         if self._running:
@@ -155,6 +166,11 @@ class QrScanner:
             self.frame_buffer.width,
             self.frame_buffer.height,
         )
+        if pyzbar_decode is None:
+            logger.warning(
+                "pyzbar QR fallback is unavailable. Install `pyzbar` and system package `libzbar0` "
+                "for stronger phone-screen QR decoding."
+            )
 
     def stop(self):
         self._running = False
@@ -200,12 +216,27 @@ class QrScanner:
                 logger.exception("QR scanner failed")
 
     def _decode_qr(self, frame_bytes):
+        expected_size = self.frame_buffer.frame_size
+        actual_size = len(frame_bytes)
+        if actual_size != expected_size:
+            logger.error(
+                "QR frame size mismatch: expected=%s actual=%s width=%s height=%s channels=%s. "
+                "Check QR_FRAME_WIDTH/QR_FRAME_HEIGHT/QR_FRAME_CHANNELS and ffmpeg raw pipe scale/pad settings.",
+                expected_size,
+                actual_size,
+                self.frame_buffer.width,
+                self.frame_buffer.height,
+                self.frame_buffer.channels,
+            )
+            return None, False, self._empty_metrics()
+
         frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
             self.frame_buffer.height,
             self.frame_buffer.width,
             self.frame_buffer.channels,
         )
         metrics = self._frame_metrics(frame)
+        self._maybe_save_debug_frame(frame, "latest")
         qr_seen = False
         for candidate_name, candidate in self._frame_candidates(frame):
             decoded, points = self._decode_candidate(candidate)
@@ -214,9 +245,22 @@ class QrScanner:
                 if candidate_name != "bgr":
                     logger.info("QR decoded from %s preprocessed external frame", candidate_name)
                 return decoded, True, metrics
-        if qr_seen and QR_SCAN_DEBUG:
-            logger.info("QR-like pattern seen on external camera but decode failed; autofocus requested")
+        if qr_seen:
+            now = time.monotonic()
+            if now - self._last_pattern_decode_failed_log_at >= QR_STATUS_LOG_SECONDS:
+                self._last_pattern_decode_failed_log_at = now
+                logger.warning("QR pattern detected on external camera but decode failed")
+            self._maybe_save_debug_frame(frame, "pattern_seen_decode_failed")
+        elif QR_SCAN_DEBUG:
+            logger.info("No QR pattern detected in external camera frame")
         return None, qr_seen, metrics
+
+    def _empty_metrics(self):
+        return {
+            "brightness": 0.0,
+            "contrast": 0.0,
+            "blur": 0.0,
+        }
 
     def _frame_metrics(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -280,7 +324,49 @@ class QrScanner:
                 return decoded, points
             if points is not None:
                 return None, points
+
+        pyzbar_value = self._decode_with_pyzbar(frame)
+        if pyzbar_value:
+            return pyzbar_value, points
         return None, points
+
+    def _decode_with_pyzbar(self, frame):
+        if pyzbar_decode is None:
+            if QR_SCAN_DEBUG and not self._pyzbar_unavailable_logged:
+                self._pyzbar_unavailable_logged = True
+                logger.info("Skipping pyzbar fallback because pyzbar/libzbar is not installed")
+            return None
+
+        try:
+            decoded_items = pyzbar_decode(frame)
+        except Exception as exc:
+            logger.warning("pyzbar QR fallback failed: %s", exc)
+            return None
+
+        for item in decoded_items:
+            value = item.data.decode("utf-8", errors="replace").strip()
+            if value:
+                logger.info("QR decoded from external camera using pyzbar fallback")
+                return value
+        return None
+
+    def _maybe_save_debug_frame(self, frame, label):
+        if not QR_SAVE_DEBUG_FRAMES or cv2 is None:
+            return
+
+        now = time.monotonic()
+        if now - self._last_debug_frame_saved_at < QR_DEBUG_SAVE_INTERVAL_SECONDS:
+            return
+        self._last_debug_frame_saved_at = now
+
+        try:
+            QR_DEBUG_FRAME_DIR.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            path = QR_DEBUG_FRAME_DIR / f"{timestamp}_{label}_{self.frame_buffer.width}x{self.frame_buffer.height}.jpg"
+            cv2.imwrite(str(path), frame)
+            logger.info("Saved QR debug frame: %s", path)
+        except Exception:
+            logger.exception("Failed to save QR debug frame")
 
     def _process_scan(self, raw_value):
         logger.info("QR decoded from external camera: %s", raw_value)
