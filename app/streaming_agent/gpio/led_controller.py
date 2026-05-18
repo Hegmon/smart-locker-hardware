@@ -1,14 +1,33 @@
+import os
+
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 
 
 logger = LoggingManager.get_logger(__name__)
 
 
+def _default_detection_pins():
+    value = os.getenv("DETECTION_LED_PINS", "").strip()
+    if not value:
+        return ()
+
+    pins = []
+    for pin in value.split(","):
+        pin = pin.strip()
+        if not pin:
+            continue
+        try:
+            pins.append(int(pin))
+        except ValueError:
+            logger.warning("Ignoring invalid DETECTION_LED_PINS value: %s", pin)
+    return tuple(pins)
+
+
 class LedController:
     """BCM GPIO LED controller with a no-op fallback for non-Pi environments."""
 
-    def __init__(self, pins=(14, 15)):
-        self.pins = tuple(pins)
+    def __init__(self, pins=None):
+        self.pins = tuple(_default_detection_pins() if pins is None else pins)
         self._gpio = None
         self._enabled = False
         self._on = False
@@ -16,6 +35,9 @@ class LedController:
 
     def start(self):
         if self._enabled:
+            return
+        if not self.pins:
+            logger.info("Detection LEDs disabled; set DETECTION_LED_PINS to enable them")
             return
         try:
             import RPi.GPIO as GPIO
