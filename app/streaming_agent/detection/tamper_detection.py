@@ -1,20 +1,14 @@
 import threading
 import time
-
 try:
     import cv2
     import numpy as np
 except Exception:
     cv2 = None
     np = None
-
 from app.streaming_agent.gpio.led_controller import LedController
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
-
-
 logger = LoggingManager.get_logger(__name__)
-
-
 class TamperDetection:
     """Detect camera tampering from an existing shared stream frame buffer."""
 
