@@ -35,11 +35,11 @@ DEFAULT_UNLOCK_SECONDS = int(os.getenv("QR_DEFAULT_UNLOCK_SECONDS", "5"))
 FAILURE_SIGNAL_SECONDS = float(os.getenv("QR_FAILURE_SIGNAL_SECONDS", "2"))
 DEBOUNCE_SECONDS = float(os.getenv("QR_DEBOUNCE_SECONDS", "5"))
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("QR_VERIFY_TIMEOUT_SECONDS", "10"))
-PROCESS_EVERY_N_FRAMES = int(os.getenv("QR_PROCESS_EVERY_N_FRAMES", "2"))
+PROCESS_EVERY_N_FRAMES = int(os.getenv("QR_PROCESS_EVERY_N_FRAMES", "1"))
 NO_FRAME_LOG_SECONDS = float(os.getenv("QR_NO_FRAME_LOG_SECONDS", "5"))
 QR_SCAN_DEBUG = os.getenv("QR_SCAN_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
 QR_SHARPEN_ENABLED = os.getenv("QR_SHARPEN_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
-QR_FOCUS_RETRY_SECONDS = float(os.getenv("QR_FOCUS_RETRY_SECONDS", "1.5"))
+QR_FOCUS_RETRY_SECONDS = float(os.getenv("QR_FOCUS_RETRY_SECONDS", "8"))
 QR_STATUS_LOG_SECONDS = float(os.getenv("QR_STATUS_LOG_SECONDS", "3"))
 QR_SAVE_DEBUG_FRAMES = os.getenv("QR_SAVE_DEBUG_FRAMES", "false").strip().lower() in {"1", "true", "yes", "on"}
 QR_DEBUG_FRAME_DIR = Path(os.getenv("QR_DEBUG_FRAME_DIR", "logs/qr_debug_frames"))
@@ -211,11 +211,9 @@ class QrScanner:
                         len(frame_bytes),
                     )
                 qr_value, qr_seen, metrics = self._decode_qr(frame_bytes)
-                if qr_seen and self.video_device:
-                    self.camera_controls.prepare_for_qr_scan(self.video_device, reason="QR pattern detected")
                 if qr_value:
                     self._queue_scan(qr_value)
-                elif self.video_device:
+                elif qr_seen and self.video_device:
                     self._maybe_retry_focus()
                 self._log_scan_status(qr_seen, bool(qr_value), metrics)
                 self._log_fps()
@@ -348,17 +346,26 @@ class QrScanner:
                 logger.info("Skipping pyzbar fallback because pyzbar/libzbar is not installed")
             return None
 
-        try:
-            decoded_items = pyzbar_decode(frame)
-        except Exception as exc:
-            logger.warning("pyzbar QR fallback failed: %s", exc)
-            return None
+        candidates = [("bgr", frame)]
+        if len(frame.shape) == 3:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            candidates.append(("gray", gray))
+            if QR_SHARPEN_ENABLED:
+                blurred = cv2.GaussianBlur(gray, (0, 0), 1.0)
+                candidates.append(("sharpened", cv2.addWeighted(gray, 1.7, blurred, -0.7, 0)))
 
-        for item in decoded_items:
-            value = item.data.decode("utf-8", errors="replace").strip()
-            if value:
-                logger.info("QR decoded from external camera using pyzbar fallback")
-                return value
+        for candidate_name, candidate in candidates:
+            try:
+                decoded_items = pyzbar_decode(candidate)
+            except Exception as exc:
+                logger.warning("pyzbar QR fallback failed: %s", exc)
+                return None
+
+            for item in decoded_items:
+                value = item.data.decode("utf-8", errors="replace").strip()
+                if value:
+                    logger.info("QR decoded from external camera using pyzbar %s fallback", candidate_name)
+                    return value
         return None
 
     def _maybe_save_debug_frame(self, frame, label):
@@ -466,7 +473,7 @@ class QrScanner:
         if now - self._last_focus_retry_at < QR_FOCUS_RETRY_SECONDS:
             return
         self._last_focus_retry_at = now
-        logger.info("QR decode retry: adjusting external camera focus/exposure")
+        logger.info("QR decode retry: QR pattern seen, adjusting external camera focus/exposure")
         self.camera_controls.prepare_for_qr_scan(
             self.video_device,
             reason="QR decode retry",
