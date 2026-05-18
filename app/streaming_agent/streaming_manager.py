@@ -1,4 +1,5 @@
 from app.streaming_agent.camera_roles import assign_camera_roles
+from app.streaming_agent.camera_controls import CameraControlManager
 from app.streaming_agent.ffmpeg_builder import build_ffmpeg_command
 from app.streaming_agent.frame_buffer import SharedFrameBuffer
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
@@ -16,6 +17,8 @@ class StreamingManager:
         self.streams = {}
         self.watchdog = None
         self.frame_buffers = {}
+        self.camera_roles = {}
+        self.camera_controls = CameraControlManager()
 
     def initialize(self):
         logger.info("Initializing streams")
@@ -23,12 +26,15 @@ class StreamingManager:
         self.frame_buffers.clear()
 
         camera_roles = assign_camera_roles()
+        self.camera_roles = camera_roles
         for role, camera in camera_roles.items():
             if camera is None:
                 logger.warning("Missing camera for role %s", role)
                 continue
 
             video_device = camera["video_device"]
+            if role == "external":
+                self.camera_controls.enable_autofocus(video_device, reason="external camera startup", force=True)
             logger.info("Building ffmpeg command for %s camera at %s", role, video_device)
             frame_buffer = SharedFrameBuffer()
             ffmpeg_command = build_ffmpeg_command(
@@ -50,6 +56,10 @@ class StreamingManager:
 
     def get_frame_buffer(self, role="internal"):
         return self.frame_buffers.get(role)
+
+    def get_camera_device(self, role):
+        camera = self.camera_roles.get(role) or {}
+        return camera.get("video_device")
 
     def start_all(self):
         logger.info("Starting all streams")
