@@ -1,8 +1,13 @@
+import os
+
 from app.streaming_agent.config_loader import get_device_id
 
 
 MEDIAMTX_HOST = "69.62.125.223"
 MEDIAMTX_RTSP_PORT = 8554
+QR_FRAME_WIDTH = int(os.getenv("QR_FRAME_WIDTH", "960"))
+QR_FRAME_HEIGHT = int(os.getenv("QR_FRAME_HEIGHT", "540"))
+QR_FRAME_CHANNELS = int(os.getenv("QR_FRAME_CHANNELS", "3"))
 
 
 def build_rtsp_url(camera_role):
@@ -10,7 +15,14 @@ def build_rtsp_url(camera_role):
     return f"rtsp://{MEDIAMTX_HOST}:{MEDIAMTX_RTSP_PORT}/{device_id}/{camera_role}"
 
 
-def build_ffmpeg_command(video_device, camera_role, *, frame_pipe=False, frame_width=640, frame_height=480):
+def build_ffmpeg_command(
+    video_device,
+    camera_role,
+    *,
+    frame_pipe=False,
+    frame_width=QR_FRAME_WIDTH,
+    frame_height=QR_FRAME_HEIGHT,
+):
     rtsp_url = build_rtsp_url(camera_role)
     if frame_pipe:
         return [
