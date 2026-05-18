@@ -36,6 +36,7 @@ NO_FRAME_LOG_SECONDS = float(os.getenv("QR_NO_FRAME_LOG_SECONDS", "5"))
 QR_SCAN_DEBUG = os.getenv("QR_SCAN_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
 QR_SHARPEN_ENABLED = os.getenv("QR_SHARPEN_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
 QR_FOCUS_RETRY_SECONDS = float(os.getenv("QR_FOCUS_RETRY_SECONDS", "1.5"))
+QR_STATUS_LOG_SECONDS = float(os.getenv("QR_STATUS_LOG_SECONDS", "3"))
 
 
 class QrGpioController:
@@ -59,6 +60,7 @@ class QrGpioController:
 
         self._gpio = GPIO
         GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
         GPIO.setup(self.success_pin, GPIO.OUT, initial=GPIO.LOW)
         GPIO.setup(self.failure_pin, GPIO.OUT, initial=GPIO.LOW)
         self._enabled = True
@@ -127,6 +129,8 @@ class QrScanner:
         self._fps_window_started_at = time.monotonic()
         self._last_no_frame_log_at = 0.0
         self._last_focus_retry_at = 0.0
+        self._last_status_log_at = 0.0
+        self._saw_first_frame = False
 
     def start(self):
         if self._running:
@@ -146,7 +150,11 @@ class QrScanner:
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True, name="external-qr-scanner")
         self._thread.start()
-        logger.info("QR scanner started on external camera frame buffer")
+        logger.info(
+            "QR scanner started on external camera frame buffer %sx%s",
+            self.frame_buffer.width,
+            self.frame_buffer.height,
+        )
 
     def stop(self):
         self._running = False
@@ -170,13 +178,23 @@ class QrScanner:
                 continue
 
             try:
-                qr_value, qr_seen = self._decode_qr(frame_bytes)
+                if not self._saw_first_frame:
+                    self._saw_first_frame = True
+                    logger.info(
+                        "QR scanner received first external camera frame: sequence=%s size=%sx%s bytes=%s",
+                        sequence,
+                        self.frame_buffer.width,
+                        self.frame_buffer.height,
+                        len(frame_bytes),
+                    )
+                qr_value, qr_seen, metrics = self._decode_qr(frame_bytes)
                 if qr_seen and self.video_device:
                     self.camera_controls.prepare_for_qr_scan(self.video_device, reason="QR pattern detected")
                 if qr_value:
                     self._process_scan(qr_value)
                 elif self.video_device:
                     self._maybe_retry_focus()
+                self._log_scan_status(qr_seen, bool(qr_value), metrics)
                 self._log_fps()
             except Exception:
                 logger.exception("QR scanner failed")
@@ -187,6 +205,7 @@ class QrScanner:
             self.frame_buffer.width,
             self.frame_buffer.channels,
         )
+        metrics = self._frame_metrics(frame)
         qr_seen = False
         for candidate_name, candidate in self._frame_candidates(frame):
             decoded, points = self._decode_candidate(candidate)
@@ -194,10 +213,18 @@ class QrScanner:
             if decoded:
                 if candidate_name != "bgr":
                     logger.info("QR decoded from %s preprocessed external frame", candidate_name)
-                return decoded, True
+                return decoded, True, metrics
         if qr_seen and QR_SCAN_DEBUG:
             logger.info("QR-like pattern seen on external camera but decode failed; autofocus requested")
-        return None, qr_seen
+        return None, qr_seen, metrics
+
+    def _frame_metrics(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return {
+            "brightness": float(np.mean(gray)),
+            "contrast": float(np.std(gray)),
+            "blur": float(cv2.Laplacian(gray, cv2.CV_64F).var()),
+        }
 
     def _frame_candidates(self, frame):
         yield "bgr", frame
@@ -311,7 +338,28 @@ class QrScanner:
         if now - self._last_focus_retry_at < QR_FOCUS_RETRY_SECONDS:
             return
         self._last_focus_retry_at = now
-        self.camera_controls.prepare_for_qr_scan(self.video_device, reason="QR decode retry")
+        logger.info("QR decode retry: adjusting external camera focus/exposure")
+        self.camera_controls.prepare_for_qr_scan(
+            self.video_device,
+            reason="QR decode retry",
+            sweep_focus=True,
+        )
+
+    def _log_scan_status(self, qr_seen, decoded, metrics):
+        now = time.monotonic()
+        if decoded or now - self._last_status_log_at < QR_STATUS_LOG_SECONDS:
+            return
+        self._last_status_log_at = now
+        logger.info(
+            "QR scan status: external frames active, size=%sx%s, brightness=%.1f, contrast=%.1f, blur=%.1f, "
+            "qr_pattern_seen=%s, decoded=no",
+            self.frame_buffer.width,
+            self.frame_buffer.height,
+            metrics["brightness"],
+            metrics["contrast"],
+            metrics["blur"],
+            "yes" if qr_seen else "no",
+        )
 
     def _maybe_log_no_frames(self, sequence):
         now = time.monotonic()
