@@ -1,8 +1,6 @@
-import os
-
 from app.streaming_agent.camera_roles import assign_camera_roles
 from app.streaming_agent.camera_controls import CameraControlManager
-from app.streaming_agent.ffmpeg_builder import build_ffmpeg_command
+from app.streaming_agent.ffmpeg_builder import QR_FRAME_CHANNELS, QR_FRAME_HEIGHT, QR_FRAME_WIDTH, build_ffmpeg_command
 from app.streaming_agent.frame_buffer import SharedFrameBuffer
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 from app.streaming_agent.stream_process import StreamProcess
@@ -10,9 +8,9 @@ from app.streaming_agent.watchdog import StreamWatchdog
 
 
 logger = LoggingManager.get_logger(__name__)
-
-QR_FRAME_WIDTH = int(os.getenv("QR_FRAME_WIDTH", "1280"))
-QR_FRAME_HEIGHT = int(os.getenv("QR_FRAME_HEIGHT", "720"))
+INTERNAL_FRAME_WIDTH = 640
+INTERNAL_FRAME_HEIGHT = 480
+INTERNAL_FRAME_CHANNELS = 3
 
 
 class StreamingManager:
@@ -41,15 +39,22 @@ class StreamingManager:
             if role == "external":
                 self.camera_controls.enable_autofocus(video_device, reason="external camera startup", force=True)
             logger.info("Building ffmpeg command for %s camera at %s", role, video_device)
-            frame_width = QR_FRAME_WIDTH if role == "external" else 640
-            frame_height = QR_FRAME_HEIGHT if role == "external" else 480
-            frame_buffer = SharedFrameBuffer(width=frame_width, height=frame_height)
+            is_external = role == "external"
+            frame_width = QR_FRAME_WIDTH if is_external else INTERNAL_FRAME_WIDTH
+            frame_height = QR_FRAME_HEIGHT if is_external else INTERNAL_FRAME_HEIGHT
+            frame_channels = QR_FRAME_CHANNELS if is_external else INTERNAL_FRAME_CHANNELS
+            frame_pipe = is_external or role == "internal"
+            frame_buffer = (
+                SharedFrameBuffer(width=frame_width, height=frame_height, channels=frame_channels)
+                if frame_pipe
+                else None
+            )
             ffmpeg_command = build_ffmpeg_command(
                 video_device,
                 camera_role=role,
-                frame_pipe=frame_buffer is not None,
-                frame_width=frame_buffer.width,
-                frame_height=frame_buffer.height,
+                frame_pipe=frame_pipe,
+                frame_width=frame_width,
+                frame_height=frame_height,
             )
             self.streams[role] = StreamProcess(
                 name=f"{role.capitalize()} Camera Stream",
@@ -58,12 +63,16 @@ class StreamingManager:
             )
             if frame_buffer:
                 self.frame_buffers[role] = frame_buffer
-            logger.info(
-                "Stream for %s camera initialized with detection frame buffer %sx%s",
-                role,
-                frame_buffer.width,
-                frame_buffer.height,
-            )
+                logger.info(
+                    "Stream for %s camera initialized with raw frame pipe %sx%sx%s frame_size=%s",
+                    role,
+                    frame_buffer.width,
+                    frame_buffer.height,
+                    frame_buffer.channels,
+                    frame_buffer.frame_size,
+                )
+            else:
+                logger.info("Stream for %s camera initialized without raw frame pipe", role)
 
         if not self.streams:
             logger.warning("No streaming cameras were initialized")
