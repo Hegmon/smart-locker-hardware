@@ -15,6 +15,7 @@ except Exception:
     np = None
 
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
+from app.streaming_agent.camera_controls import CameraControlManager
 
 
 logger = LoggingManager.get_logger(__name__)
@@ -30,7 +31,9 @@ DEFAULT_UNLOCK_SECONDS = int(os.getenv("QR_DEFAULT_UNLOCK_SECONDS", "5"))
 FAILURE_SIGNAL_SECONDS = float(os.getenv("QR_FAILURE_SIGNAL_SECONDS", "2"))
 DEBOUNCE_SECONDS = float(os.getenv("QR_DEBOUNCE_SECONDS", "5"))
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("QR_VERIFY_TIMEOUT_SECONDS", "10"))
-PROCESS_EVERY_N_FRAMES = int(os.getenv("QR_PROCESS_EVERY_N_FRAMES", "3"))
+PROCESS_EVERY_N_FRAMES = int(os.getenv("QR_PROCESS_EVERY_N_FRAMES", "1"))
+NO_FRAME_LOG_SECONDS = float(os.getenv("QR_NO_FRAME_LOG_SECONDS", "5"))
+QR_SCAN_DEBUG = os.getenv("QR_SCAN_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class QrGpioController:
@@ -102,11 +105,15 @@ class QrScanner:
         self,
         frame_buffer,
         *,
+        video_device=None,
         gpio_controller=None,
+        camera_controls=None,
         process_every_n_frames=PROCESS_EVERY_N_FRAMES,
     ):
         self.frame_buffer = frame_buffer
+        self.video_device = video_device
         self.gpio_controller = gpio_controller or QrGpioController()
+        self.camera_controls = camera_controls or CameraControlManager()
         self.process_every_n_frames = max(1, int(process_every_n_frames))
         self._owns_gpio_controller = gpio_controller is None
         self._running = False
@@ -116,6 +123,7 @@ class QrScanner:
         self._last_seen = {}
         self._processed_frames = 0
         self._fps_window_started_at = time.monotonic()
+        self._last_no_frame_log_at = 0.0
 
     def start(self):
         if self._running:
@@ -129,6 +137,8 @@ class QrScanner:
             return
 
         self._detector = cv2.QRCodeDetector()
+        if self.video_device:
+            self.camera_controls.enable_autofocus(self.video_device, reason="QR scanner startup")
         self.gpio_controller.start()
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True, name="external-qr-scanner")
@@ -148,6 +158,7 @@ class QrScanner:
         while self._running:
             frame_bytes, sequence, _ = self.frame_buffer.latest()
             if frame_bytes is None or sequence == self._last_sequence:
+                self._maybe_log_no_frames(sequence)
                 time.sleep(0.02)
                 continue
 
@@ -156,7 +167,9 @@ class QrScanner:
                 continue
 
             try:
-                qr_value = self._decode_qr(frame_bytes)
+                qr_value, qr_seen = self._decode_qr(frame_bytes)
+                if qr_seen and self.video_device:
+                    self.camera_controls.enable_autofocus(self.video_device, reason="QR pattern detected")
                 if qr_value:
                     self._process_scan(qr_value)
                 self._log_fps()
@@ -169,12 +182,57 @@ class QrScanner:
             self.frame_buffer.width,
             self.frame_buffer.channels,
         )
-        decoded, _points, _straight = self._detector.detectAndDecode(frame)
+        qr_seen = False
+        for candidate_name, candidate in self._frame_candidates(frame):
+            decoded, points = self._decode_candidate(candidate)
+            qr_seen = qr_seen or points is not None
+            if decoded:
+                if candidate_name != "bgr":
+                    logger.info("QR decoded from %s preprocessed external frame", candidate_name)
+                return decoded, True
+        if qr_seen and QR_SCAN_DEBUG:
+            logger.info("QR-like pattern seen on external camera but decode failed; autofocus requested")
+        return None, qr_seen
+
+    def _frame_candidates(self, frame):
+        yield "bgr", frame
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        yield "gray", gray
+        equalized = cv2.equalizeHist(gray)
+        yield "equalized", equalized
+        upscaled = cv2.resize(frame, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
+        yield "upscaled", upscaled
+        adaptive = cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            2,
+        )
+        yield "adaptive_threshold", adaptive
+
+    def _decode_candidate(self, frame):
+        decoded, points, _straight = self._detector.detectAndDecode(frame)
         decoded = decoded.strip() if decoded else ""
-        return decoded or None
+        if decoded:
+            return decoded, points
+
+        if hasattr(self._detector, "detectAndDecodeMulti"):
+            ok, decoded_values, points, _straight = self._detector.detectAndDecodeMulti(frame)
+            if ok and decoded_values:
+                for decoded_value in decoded_values:
+                    decoded_value = decoded_value.strip() if decoded_value else ""
+                    if decoded_value:
+                        return decoded_value, points
+            if points is not None:
+                return None, points
+        return None, points
 
     def _process_scan(self, raw_value):
         logger.info("QR decoded from external camera: %s", raw_value)
+        if self.video_device:
+            self.camera_controls.enable_autofocus(self.video_device, reason="QR decoded")
         backend_response = None
         try:
             payload, debounce_key = parse_qr_value(raw_value)
@@ -221,6 +279,20 @@ class QrScanner:
         logger.info("QR scanner FPS %.2f on external camera", self._processed_frames / elapsed)
         self._processed_frames = 0
         self._fps_window_started_at = now
+
+    def _maybe_log_no_frames(self, sequence):
+        now = time.monotonic()
+        if now - self._last_no_frame_log_at < NO_FRAME_LOG_SECONDS:
+            return
+        self._last_no_frame_log_at = now
+        if sequence == self._last_sequence and sequence >= 0:
+            logger.warning(
+                "QR scanner has not received a new external frame for %.1fs; "
+                "if ffmpeg logs 'Device or resource busy', stop other camera users or systemd instances.",
+                NO_FRAME_LOG_SECONDS,
+            )
+            return
+        logger.warning("QR scanner is waiting for the first external camera frame")
 
 
 def parse_qr_value(raw_value):
