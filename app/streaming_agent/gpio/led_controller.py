@@ -5,9 +5,11 @@ from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 
 logger = LoggingManager.get_logger(__name__)
 
+DEFAULT_DETECTION_LED_PINS = (14, 15)
+
 
 def _default_detection_pins():
-    value = os.getenv("DETECTION_LED_PINS", "").strip()
+    value = os.getenv("DETECTION_LED_PINS", "14,15").strip()
     if not value:
         return ()
 
@@ -20,7 +22,7 @@ def _default_detection_pins():
             pins.append(int(pin))
         except ValueError:
             logger.warning("Ignoring invalid DETECTION_LED_PINS value: %s", pin)
-    return tuple(pins)
+    return tuple(pins) if pins else DEFAULT_DETECTION_LED_PINS
 
 
 class LedController:
