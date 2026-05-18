@@ -21,13 +21,12 @@ except Exception:
 
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 from app.streaming_agent.camera_controls import CameraControlManager
+from app.streaming_agent.config_loader import get_device_id
 
 
 logger = LoggingManager.get_logger(__name__)
 
 VERIFY_URL = os.getenv("BACKEND_QR_VERIFY_URL", "https://backend.qbox.sa/shipments/qr/verify/")
-LOCKER_ID = os.getenv("LOCKER_ID", "TEWPUH775796")
-DEVICE_ID = os.getenv("DEVICE_ID", "PI4-001")
 LOG_FILE = Path(os.getenv("QR_SCAN_LOG_FILE", "logs/qr_scans.jsonl"))
 
 SUCCESS_GPIO_PIN = int(os.getenv("QR_SUCCESS_GPIO_PIN", "15"))
@@ -45,6 +44,11 @@ QR_STATUS_LOG_SECONDS = float(os.getenv("QR_STATUS_LOG_SECONDS", "3"))
 QR_SAVE_DEBUG_FRAMES = os.getenv("QR_SAVE_DEBUG_FRAMES", "false").strip().lower() in {"1", "true", "yes", "on"}
 QR_DEBUG_FRAME_DIR = Path(os.getenv("QR_DEBUG_FRAME_DIR", "logs/qr_debug_frames"))
 QR_DEBUG_SAVE_INTERVAL_SECONDS = float(os.getenv("QR_DEBUG_SAVE_INTERVAL_SECONDS", "5"))
+QR_DECODE_MODE = os.getenv("QR_DECODE_MODE", "fast").strip().lower()
+QR_UPSCALE_EVERY_N_FRAMES = int(os.getenv("QR_UPSCALE_EVERY_N_FRAMES", "6"))
+_IDENTITY_LOCK = threading.Lock()
+_CACHED_QR_DEVICE_ID = None
+_CACHED_QR_LOCKER_ID = None
 
 
 class QrGpioController:
@@ -144,6 +148,7 @@ class QrScanner:
         self._last_pattern_decode_failed_log_at = 0.0
         self._scan_lock = threading.Lock()
         self._processing_keys = set()
+        self._decode_attempts = 0
 
     def start(self):
         if self._running:
@@ -218,6 +223,7 @@ class QrScanner:
                 logger.exception("QR scanner failed")
 
     def _decode_qr(self, frame_bytes):
+        self._decode_attempts += 1
         expected_size = self.frame_buffer.frame_size
         actual_size = len(frame_bytes)
         if actual_size != expected_size:
@@ -240,6 +246,11 @@ class QrScanner:
         metrics = self._frame_metrics(frame)
         self._maybe_save_debug_frame(frame, "latest")
         qr_seen = False
+
+        pyzbar_value = self._decode_with_pyzbar(frame)
+        if pyzbar_value:
+            return pyzbar_value, True, metrics
+
         for candidate_name, candidate in self._frame_candidates(frame):
             decoded, points = self._decode_candidate(candidate)
             qr_seen = qr_seen or points is not None
@@ -276,16 +287,16 @@ class QrScanner:
         yield "bgr", frame
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         yield "gray", gray
-        downscaled = cv2.resize(frame, None, fx=0.75, fy=0.75, interpolation=cv2.INTER_AREA)
-        yield "downscaled_0_75", downscaled
-        half_size = cv2.resize(frame, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
-        yield "downscaled_0_5", half_size
-        equalized = cv2.equalizeHist(gray)
-        yield "equalized", equalized
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
         yield "clahe", clahe
-        upscaled = cv2.resize(frame, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
-        yield "upscaled", upscaled
+
+        should_try_expensive = QR_DECODE_MODE == "thorough" or self._decode_attempts % QR_UPSCALE_EVERY_N_FRAMES == 0
+        if should_try_expensive:
+            downscaled = cv2.resize(frame, None, fx=0.75, fy=0.75, interpolation=cv2.INTER_AREA)
+            yield "downscaled_0_75", downscaled
+            upscaled = cv2.resize(frame, None, fx=1.35, fy=1.35, interpolation=cv2.INTER_CUBIC)
+            yield "upscaled", upscaled
+
         if QR_SHARPEN_ENABLED:
             blurred = cv2.GaussianBlur(gray, (0, 0), 1.0)
             sharpened = cv2.addWeighted(gray, 1.7, blurred, -0.7, 0)
@@ -299,9 +310,10 @@ class QrScanner:
             2,
         )
         yield "adaptive_threshold", adaptive
-        otsu_source = cv2.GaussianBlur(clahe, (3, 3), 0)
-        _threshold, otsu = cv2.threshold(otsu_source, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        yield "otsu_threshold", otsu
+        if should_try_expensive:
+            otsu_source = cv2.GaussianBlur(clahe, (3, 3), 0)
+            _threshold, otsu = cv2.threshold(otsu_source, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            yield "otsu_threshold", otsu
 
     def _decode_candidate(self, frame):
         decoded, points, _straight = self._detector.detectAndDecode(frame)
@@ -327,9 +339,6 @@ class QrScanner:
             if points is not None:
                 return None, points
 
-        pyzbar_value = self._decode_with_pyzbar(frame)
-        if pyzbar_value:
-            return pyzbar_value, points
         return None, points
 
     def _decode_with_pyzbar(self, frame):
@@ -391,8 +400,8 @@ class QrScanner:
         with self._scan_lock:
             last_time = self._last_seen.get(debounce_key, 0)
             if now - last_time < DEBOUNCE_SECONDS:
-                logger.info("Debounced repeated QR token for %.1fs: %s", DEBOUNCE_SECONDS, debounce_key)
-                write_scan_log(raw_value, None, "debounced_no_gpio")
+                if QR_SCAN_DEBUG:
+                    logger.info("Debounced repeated QR token for %.1fs: %s", DEBOUNCE_SECONDS, debounce_key)
                 return
             if debounce_key in self._processing_keys:
                 logger.info("QR verification already in progress for token: %s", debounce_key)
@@ -499,14 +508,16 @@ def parse_qr_value(raw_value):
     value = raw_value.strip()
     if not value:
         raise ValueError("QR value is empty")
+    locker_id = get_qr_locker_id()
+    device_id = get_qr_device_id()
 
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError:
         return {
             "token": value,
-            "locker_id": LOCKER_ID,
-            "device_id": DEVICE_ID,
+            "locker_id": locker_id,
+            "device_id": device_id,
         }, value
 
     if not isinstance(parsed, dict):
@@ -514,8 +525,8 @@ def parse_qr_value(raw_value):
 
     if "qr_payload" in parsed or "qr_data" in parsed:
         payload = dict(parsed)
-        payload["locker_id"] = str(payload.get("locker_id") or LOCKER_ID)
-        payload["device_id"] = str(payload.get("device_id") or DEVICE_ID)
+        payload["locker_id"] = str(payload.get("locker_id") or locker_id)
+        payload["device_id"] = str(payload.get("device_id") or device_id)
         debounce_key = _debounce_key_from_payload(payload)
         return payload, debounce_key
 
@@ -528,15 +539,57 @@ def parse_qr_value(raw_value):
         return {
             "qr_code_id": qr_code_id,
             "unique_token": unique_token,
-            "locker_id": str(parsed.get("locker_id") or LOCKER_ID),
-            "device_id": str(parsed.get("device_id") or DEVICE_ID),
+            "locker_id": str(parsed.get("locker_id") or locker_id),
+            "device_id": str(parsed.get("device_id") or device_id),
         }, unique_token
 
     return {
         "qr_payload": parsed,
-        "locker_id": LOCKER_ID,
-        "device_id": DEVICE_ID,
+        "locker_id": locker_id,
+        "device_id": device_id,
     }, unique_token
+
+
+def get_qr_device_id():
+    global _CACHED_QR_DEVICE_ID
+    if _CACHED_QR_DEVICE_ID:
+        return _CACHED_QR_DEVICE_ID
+
+    env_device_id = os.getenv("DEVICE_ID", "").strip()
+    if env_device_id and env_device_id != "PI4-001":
+        _CACHED_QR_DEVICE_ID = env_device_id
+        return env_device_id
+
+    with _IDENTITY_LOCK:
+        if _CACHED_QR_DEVICE_ID:
+            return _CACHED_QR_DEVICE_ID
+        try:
+            _CACHED_QR_DEVICE_ID = get_device_id()
+        except Exception as exc:
+            logger.warning("Could not load QR device_id from backend device config; using fallback: %s", exc)
+            _CACHED_QR_DEVICE_ID = env_device_id or "TEWPUH775796"
+        return _CACHED_QR_DEVICE_ID
+
+
+def get_qr_locker_id():
+    global _CACHED_QR_LOCKER_ID
+    if _CACHED_QR_LOCKER_ID:
+        return _CACHED_QR_LOCKER_ID
+
+    env_locker_id = os.getenv("LOCKER_ID", "").strip()
+    if env_locker_id:
+        _CACHED_QR_LOCKER_ID = env_locker_id
+        return env_locker_id
+
+    with _IDENTITY_LOCK:
+        if _CACHED_QR_LOCKER_ID:
+            return _CACHED_QR_LOCKER_ID
+        try:
+            _CACHED_QR_LOCKER_ID = get_device_id()
+        except Exception as exc:
+            logger.warning("Could not load QR locker_id from backend device config; using fallback: %s", exc)
+            _CACHED_QR_LOCKER_ID = "TEWPUH775796"
+        return _CACHED_QR_LOCKER_ID
 
 
 def _is_minimal_qr_payload(payload):
