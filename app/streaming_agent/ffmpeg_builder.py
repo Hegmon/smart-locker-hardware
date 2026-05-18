@@ -8,6 +8,7 @@ MEDIAMTX_RTSP_PORT = 8554
 QR_FRAME_WIDTH = int(os.getenv("QR_FRAME_WIDTH", "960"))
 QR_FRAME_HEIGHT = int(os.getenv("QR_FRAME_HEIGHT", "540"))
 QR_FRAME_CHANNELS = int(os.getenv("QR_FRAME_CHANNELS", "3"))
+QR_FRAME_FPS = max(1, int(os.getenv("QR_FRAME_FPS", "5")))
 
 
 def build_rtsp_url(camera_role):
@@ -30,6 +31,7 @@ def build_ffmpeg_command(
             "-loglevel", "warning",
             "-fflags", "nobuffer",
             "-flags", "low_delay",
+            "-thread_queue_size", "2",
             "-f", "v4l2",
             "-input_format", "mjpeg",
             "-video_size", "1280x720",
@@ -38,7 +40,8 @@ def build_ffmpeg_command(
             "-an",
             "-filter_complex",
             "[0:v]split=2[rtsp][detect];"
-            f"[detect]scale={frame_width}:{frame_height}:force_original_aspect_ratio=decrease,"
+            f"[detect]fps={QR_FRAME_FPS},"
+            f"scale={frame_width}:{frame_height}:force_original_aspect_ratio=decrease,"
             f"pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2,format=bgr24[raw]",
             "-map", "[rtsp]",
             "-c:v", "h264_v4l2m2m",
@@ -49,6 +52,8 @@ def build_ffmpeg_command(
             "-g", "40",
             "-bf", "0",
             "-rtsp_transport", "tcp",
+            "-muxdelay", "0",
+            "-muxpreload", "0",
             "-f", "rtsp",
             rtsp_url,
             "-map", "[raw]",
@@ -64,6 +69,7 @@ def build_ffmpeg_command(
     # Low latency
     "-fflags", "nobuffer",
     "-flags", "low_delay",
+    "-thread_queue_size", "2",
  
     # Camera input
     "-f", "v4l2",
@@ -91,6 +97,8 @@ def build_ffmpeg_command(
  
     # RTSP output
     "-rtsp_transport", "tcp",
+    "-muxdelay", "0",
+    "-muxpreload", "0",
     "-f", "rtsp",
     rtsp_url,
 ]
