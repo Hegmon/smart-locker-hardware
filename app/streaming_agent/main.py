@@ -3,7 +3,6 @@ import sys
 import threading
 import time
 import os
-
 try:
     import fcntl
 except Exception:
