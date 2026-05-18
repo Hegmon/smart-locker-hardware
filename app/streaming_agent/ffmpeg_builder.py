@@ -10,7 +10,7 @@ def build_rtsp_url(camera_role):
     return f"rtsp://{MEDIAMTX_HOST}:{MEDIAMTX_RTSP_PORT}/{device_id}/{camera_role}"
 
 
-def build_ffmpeg_command(video_device, camera_role, *, frame_pipe=False):
+def build_ffmpeg_command(video_device, camera_role, *, frame_pipe=False, frame_width=640, frame_height=480):
     rtsp_url = build_rtsp_url(camera_role)
     if frame_pipe:
         return [
@@ -26,8 +26,8 @@ def build_ffmpeg_command(video_device, camera_role, *, frame_pipe=False):
             "-an",
             "-filter_complex",
             "[0:v]split=2[rtsp][detect];"
-            "[detect]scale=640:480:force_original_aspect_ratio=decrease,"
-            "pad=640:480:(ow-iw)/2:(oh-ih)/2,format=bgr24[raw]",
+            f"[detect]scale={frame_width}:{frame_height}:force_original_aspect_ratio=decrease,"
+            f"pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2,format=bgr24[raw]",
             "-map", "[rtsp]",
             "-c:v", "h264_v4l2m2m",
             "-pix_fmt", "yuv420p",
