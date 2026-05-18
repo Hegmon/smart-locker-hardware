@@ -39,14 +39,15 @@ class CameraControlManager:
         self._last_autofocus_at = {}
         self._last_qr_controls_at = {}
         self._focus_sweep_indexes = {}
+        self._last_focus_warning_at = {}
 
-    def prepare_for_qr_scan(self, video_device, *, reason="QR scan", force=False):
+    def prepare_for_qr_scan(self, video_device, *, reason="QR scan", force=False, sweep_focus=False):
         if not video_device:
             return False
 
         applied = self.enable_autofocus(video_device, reason=reason, force=force)
         applied = self._apply_qr_camera_controls(video_device, force=force) or applied
-        if not applied and FOCUS_SWEEP_ENABLED:
+        if FOCUS_SWEEP_ENABLED and (sweep_focus or not applied):
             applied = self.sweep_manual_focus(video_device, reason=reason) or applied
         return applied
 
@@ -89,6 +90,17 @@ class CameraControlManager:
         applied = self._set_control(video_device, f"focus_absolute={focus_value}") or applied
         if applied:
             logger.info("Manual focus sweep set %s to %s (%s)", video_device, focus_value, reason)
+        else:
+            now = time.monotonic()
+            last_warning = self._last_focus_warning_at.get(video_device, 0)
+            if now - last_warning >= 10:
+                self._last_focus_warning_at[video_device] = now
+                logger.warning(
+                    "Manual focus sweep was not accepted for %s. Check `v4l2-ctl -d %s --list-ctrls` "
+                    "for a focus_absolute or equivalent focus control.",
+                    video_device,
+                    video_device,
+                )
         return applied
 
     def _apply_qr_camera_controls(self, video_device, *, force=False):
