@@ -2,6 +2,12 @@ import signal
 import sys
 import threading
 import time
+import os
+
+try:
+    import fcntl
+except Exception:
+    fcntl = None
 
 from app.core.config import MQTT_HOST, MQTT_PASSWORD, MQTT_PORT, MQTT_USERNAME
 from app.streaming_agent.detection.person_detector import PersonDetector
@@ -32,16 +38,22 @@ class StreamingAgent:
         self.running = False
         self._stopping = False
         self._stop_lock = threading.Lock()
+        self._lock_file = None
 
     def initialize(self):
         logger.info("Initializing streaming agent")
+        self._acquire_single_instance_lock()
         self.stream_manager = StreamingManager()
         self.stream_manager.initialize()
         self.person_detector = PersonDetector(
             self.stream_manager.get_frame_buffer("internal"),
             led_controller=self.led_controller,
         )
-        self.qr_scanner = QrScanner(self.stream_manager.get_frame_buffer("external"))
+        self.qr_scanner = QrScanner(
+            self.stream_manager.get_frame_buffer("external"),
+            video_device=self.stream_manager.get_camera_device("external"),
+            camera_controls=self.stream_manager.camera_controls,
+        )
         self._warn_if_gpio_pins_overlap()
         self.tamper_detectors = [
             TamperDetection(
@@ -79,6 +91,22 @@ class StreamingAgent:
                 "Set QR_SUCCESS_GPIO_PIN/QR_FAILURE_GPIO_PIN or update detection LED pins if this hardware uses relays.",
                 overlap,
             )
+
+    def _acquire_single_instance_lock(self):
+        if fcntl is None:
+            logger.warning("Single-instance lock unavailable on this platform")
+            return
+        lock_path = os.getenv("STREAMING_AGENT_LOCK_FILE", "/tmp/smartlocker-streaming-agent.lock")
+        self._lock_file = open(lock_path, "w", encoding="utf-8")
+        try:
+            fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                "Another streaming agent instance is already running. "
+                "Stop the existing process/service before starting a new one, otherwise cameras show 'Device or resource busy'."
+            ) from exc
+        self._lock_file.write(str(os.getpid()))
+        self._lock_file.flush()
 
     def start(self):
         logger.info("Starting streaming agent")
@@ -123,6 +151,9 @@ class StreamingAgent:
                 self.qr_scanner.stop()
             if self.stream_manager:
                 self.stream_manager.stop_all()
+            if self._lock_file:
+                self._lock_file.close()
+                self._lock_file = None
         finally:
             logger.info("Streaming agent stopped successfully")
 
