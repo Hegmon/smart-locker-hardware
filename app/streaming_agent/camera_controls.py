@@ -40,6 +40,7 @@ class CameraControlManager:
         self._last_qr_controls_at = {}
         self._focus_sweep_indexes = {}
         self._last_focus_warning_at = {}
+        self._unsupported_controls = set()
 
     def prepare_for_qr_scan(self, video_device, *, reason="QR scan", force=False, sweep_focus=False):
         if not video_device:
@@ -118,8 +119,11 @@ class CameraControlManager:
             logger.info("QR camera controls applied on %s", video_device)
         return applied
 
-    @staticmethod
-    def _set_control(video_device, control):
+    def _set_control(self, video_device, control):
+        unsupported_key = (video_device, control.split("=", 1)[0])
+        if unsupported_key in self._unsupported_controls:
+            return False
+
         try:
             result = subprocess.run(
                 ["v4l2-ctl", "-d", video_device, "--set-ctrl", control],
@@ -143,6 +147,18 @@ class CameraControlManager:
             return True
 
         stderr = result.stderr.strip()
+        if self._is_unsupported_control_error(stderr):
+            self._unsupported_controls.add(unsupported_key)
         if stderr:
             logger.debug("Camera control unsupported on %s: %s (%s)", video_device, control, stderr)
         return False
+
+    @staticmethod
+    def _is_unsupported_control_error(stderr):
+        normalized = stderr.lower()
+        return (
+            "unknown control" in normalized
+            or "invalid argument" in normalized
+            or "not found" in normalized
+            or "unsupported" in normalized
+        )
