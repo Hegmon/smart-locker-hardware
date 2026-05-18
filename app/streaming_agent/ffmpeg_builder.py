@@ -24,7 +24,10 @@ def build_ffmpeg_command(video_device, camera_role, *, frame_pipe=False):
             "-framerate", "20",
             "-i", video_device,
             "-an",
-            "-filter_complex", "[0:v]split=2[rtsp][detect];[detect]scale=640:480,format=bgr24[raw]",
+            "-filter_complex",
+            "[0:v]split=2[rtsp][detect];"
+            "[detect]scale=640:480:force_original_aspect_ratio=decrease,"
+            "pad=640:480:(ow-iw)/2:(oh-ih)/2,format=bgr24[raw]",
             "-map", "[rtsp]",
             "-c:v", "h264_v4l2m2m",
             "-pix_fmt", "yuv420p",
