@@ -35,6 +35,7 @@ PROCESS_EVERY_N_FRAMES = int(os.getenv("QR_PROCESS_EVERY_N_FRAMES", "1"))
 NO_FRAME_LOG_SECONDS = float(os.getenv("QR_NO_FRAME_LOG_SECONDS", "5"))
 QR_SCAN_DEBUG = os.getenv("QR_SCAN_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
 QR_SHARPEN_ENABLED = os.getenv("QR_SHARPEN_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
+QR_FOCUS_RETRY_SECONDS = float(os.getenv("QR_FOCUS_RETRY_SECONDS", "1.5"))
 
 
 class QrGpioController:
@@ -125,6 +126,7 @@ class QrScanner:
         self._processed_frames = 0
         self._fps_window_started_at = time.monotonic()
         self._last_no_frame_log_at = 0.0
+        self._last_focus_retry_at = 0.0
 
     def start(self):
         if self._running:
@@ -139,7 +141,7 @@ class QrScanner:
 
         self._detector = cv2.QRCodeDetector()
         if self.video_device:
-            self.camera_controls.enable_autofocus(self.video_device, reason="QR scanner startup")
+            self.camera_controls.prepare_for_qr_scan(self.video_device, reason="QR scanner startup", force=True)
         self.gpio_controller.start()
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True, name="external-qr-scanner")
@@ -170,9 +172,11 @@ class QrScanner:
             try:
                 qr_value, qr_seen = self._decode_qr(frame_bytes)
                 if qr_seen and self.video_device:
-                    self.camera_controls.enable_autofocus(self.video_device, reason="QR pattern detected")
+                    self.camera_controls.prepare_for_qr_scan(self.video_device, reason="QR pattern detected")
                 if qr_value:
                     self._process_scan(qr_value)
+                elif self.video_device:
+                    self._maybe_retry_focus()
                 self._log_fps()
             except Exception:
                 logger.exception("QR scanner failed")
@@ -241,6 +245,14 @@ class QrScanner:
                         return decoded_value, points
             if points is not None:
                 return None, points
+
+        if hasattr(self._detector, "detectAndDecodeCurved"):
+            decoded, points, _straight = self._detector.detectAndDecodeCurved(frame)
+            decoded = decoded.strip() if decoded else ""
+            if decoded:
+                return decoded, points
+            if points is not None:
+                return None, points
         return None, points
 
     def _process_scan(self, raw_value):
@@ -293,6 +305,13 @@ class QrScanner:
         logger.info("QR scanner FPS %.2f on external camera", self._processed_frames / elapsed)
         self._processed_frames = 0
         self._fps_window_started_at = now
+
+    def _maybe_retry_focus(self):
+        now = time.monotonic()
+        if now - self._last_focus_retry_at < QR_FOCUS_RETRY_SECONDS:
+            return
+        self._last_focus_retry_at = now
+        self.camera_controls.prepare_for_qr_scan(self.video_device, reason="QR decode retry")
 
     def _maybe_log_no_frames(self, sequence):
         now = time.monotonic()
