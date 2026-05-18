@@ -1,6 +1,7 @@
 # Optional Raspberry Pi person-detection dependencies.
 # Install numpy/OpenCV/GPIO on the Pi with apt first:
 #   sudo apt install -y python3-numpy python3-opencv python3-rpi.gpio
+# The QR scanner uses OpenCV's built-in QRCodeDetector, requests, and RPi.GPIO.
 #
 # Keep inference runtimes out of requirements.txt because tflite-runtime does
 # not publish wheels for every desktop/Python combination.
