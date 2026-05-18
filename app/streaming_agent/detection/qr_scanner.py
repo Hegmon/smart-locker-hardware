@@ -36,7 +36,7 @@ DEFAULT_UNLOCK_SECONDS = int(os.getenv("QR_DEFAULT_UNLOCK_SECONDS", "5"))
 FAILURE_SIGNAL_SECONDS = float(os.getenv("QR_FAILURE_SIGNAL_SECONDS", "2"))
 DEBOUNCE_SECONDS = float(os.getenv("QR_DEBOUNCE_SECONDS", "5"))
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("QR_VERIFY_TIMEOUT_SECONDS", "10"))
-PROCESS_EVERY_N_FRAMES = int(os.getenv("QR_PROCESS_EVERY_N_FRAMES", "1"))
+PROCESS_EVERY_N_FRAMES = int(os.getenv("QR_PROCESS_EVERY_N_FRAMES", "2"))
 NO_FRAME_LOG_SECONDS = float(os.getenv("QR_NO_FRAME_LOG_SECONDS", "5"))
 QR_SCAN_DEBUG = os.getenv("QR_SCAN_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
 QR_SHARPEN_ENABLED = os.getenv("QR_SHARPEN_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
@@ -142,6 +142,8 @@ class QrScanner:
         self._last_debug_frame_saved_at = 0.0
         self._pyzbar_unavailable_logged = False
         self._last_pattern_decode_failed_log_at = 0.0
+        self._scan_lock = threading.Lock()
+        self._processing_keys = set()
 
     def start(self):
         if self._running:
@@ -207,7 +209,7 @@ class QrScanner:
                 if qr_seen and self.video_device:
                     self.camera_controls.prepare_for_qr_scan(self.video_device, reason="QR pattern detected")
                 if qr_value:
-                    self._process_scan(qr_value)
+                    self._queue_scan(qr_value)
                 elif self.video_device:
                     self._maybe_retry_focus()
                 self._log_scan_status(qr_seen, bool(qr_value), metrics)
@@ -368,46 +370,77 @@ class QrScanner:
         except Exception:
             logger.exception("Failed to save QR debug frame")
 
-    def _process_scan(self, raw_value):
-        logger.info("QR decoded from external camera: %s", raw_value)
+    def _queue_scan(self, raw_value):
+        logger.info("QR decoded from external camera: %s", summarize_qr_value(raw_value))
         if self.video_device:
             self.camera_controls.enable_autofocus(self.video_device, reason="QR decoded")
-        backend_response = None
+
         try:
             payload, debounce_key = parse_qr_value(raw_value)
         except Exception as exc:
             logger.warning("Invalid QR payload: %s", exc)
-            self.gpio_controller.pulse_failure()
-            write_scan_log(raw_value, None, "failure_gpio_14", str(exc))
+            threading.Thread(
+                target=self._reject_invalid_scan,
+                args=(raw_value, str(exc)),
+                daemon=True,
+                name="qr-invalid-scan",
+            ).start()
             return
 
         now = time.monotonic()
-        last_time = self._last_seen.get(debounce_key, 0)
-        if now - last_time < DEBOUNCE_SECONDS:
-            logger.info("Debounced repeated QR token for %.1fs: %s", DEBOUNCE_SECONDS, debounce_key)
-            write_scan_log(raw_value, None, "debounced_no_gpio")
-            return
-        self._last_seen[debounce_key] = now
+        with self._scan_lock:
+            last_time = self._last_seen.get(debounce_key, 0)
+            if now - last_time < DEBOUNCE_SECONDS:
+                logger.info("Debounced repeated QR token for %.1fs: %s", DEBOUNCE_SECONDS, debounce_key)
+                write_scan_log(raw_value, None, "debounced_no_gpio")
+                return
+            if debounce_key in self._processing_keys:
+                logger.info("QR verification already in progress for token: %s", debounce_key)
+                return
+            self._last_seen[debounce_key] = now
+            self._processing_keys.add(debounce_key)
+
+        logger.info("Queued QR verification worker for token: %s", debounce_key)
+        threading.Thread(
+            target=self._process_scan,
+            args=(raw_value, payload, debounce_key),
+            daemon=True,
+            name="qr-verification",
+        ).start()
+
+    def _reject_invalid_scan(self, raw_value, error):
+        self.gpio_controller.pulse_failure()
+        write_scan_log(raw_value, None, "failure_gpio_14", error)
+
+    def _process_scan(self, raw_value, payload, debounce_key):
+        backend_response = None
 
         try:
-            logger.info("Verifying QR with backend: %s", VERIFY_URL)
-            backend_response = verify_qr(payload)
-            logger.info("QR backend response: %s", backend_response)
-        except Exception as exc:
-            logger.warning("QR backend verification error; locker will stay closed: %s", exc)
+            try:
+                logger.info("Verifying QR with backend: %s", VERIFY_URL)
+                backend_response = verify_qr(payload)
+                logger.info("QR backend response: %s", backend_response)
+            except Exception as exc:
+                logger.warning("QR backend verification error; locker will stay closed: %s", exc)
+                self.gpio_controller.pulse_failure()
+                write_scan_log(raw_value, backend_response, "failure_gpio_14", str(exc))
+                return
+
+            if should_open_locker(backend_response):
+                duration = unlock_duration(backend_response)
+                self.gpio_controller.pulse_success(duration)
+                write_scan_log(raw_value, backend_response, f"success_gpio_15_{duration}s")
+                return
+
+            logger.info("QR backend denied access; locker will stay closed")
             self.gpio_controller.pulse_failure()
-            write_scan_log(raw_value, backend_response, "failure_gpio_14", str(exc))
-            return
+            write_scan_log(raw_value, backend_response, "failure_gpio_14")
+        finally:
+            self._finish_processing(debounce_key)
 
-        if should_open_locker(backend_response):
-            duration = unlock_duration(backend_response)
-            self.gpio_controller.pulse_success(duration)
-            write_scan_log(raw_value, backend_response, f"success_gpio_15_{duration}s")
-            return
-
-        logger.info("QR backend denied access; locker will stay closed")
-        self.gpio_controller.pulse_failure()
-        write_scan_log(raw_value, backend_response, "failure_gpio_14")
+    def _finish_processing(self, debounce_key):
+        with self._scan_lock:
+            self._processing_keys.discard(debounce_key)
 
     def _log_fps(self):
         self._processed_frames += 1
@@ -479,22 +512,107 @@ def parse_qr_value(raw_value):
     if not isinstance(parsed, dict):
         raise ValueError("QR JSON must be an object")
 
+    if "qr_payload" in parsed or "qr_data" in parsed:
+        payload = dict(parsed)
+        payload["locker_id"] = str(payload.get("locker_id") or LOCKER_ID)
+        payload["device_id"] = str(payload.get("device_id") or DEVICE_ID)
+        debounce_key = _debounce_key_from_payload(payload)
+        return payload, debounce_key
+
     unique_token = str(parsed.get("unique_token") or parsed.get("token") or "").strip()
     qr_code_id = str(parsed.get("qr_code_id") or "").strip()
     if not unique_token:
         raise ValueError("QR JSON is missing unique_token")
 
+    if qr_code_id and _is_minimal_qr_payload(parsed):
+        return {
+            "qr_code_id": qr_code_id,
+            "unique_token": unique_token,
+            "locker_id": str(parsed.get("locker_id") or LOCKER_ID),
+            "device_id": str(parsed.get("device_id") or DEVICE_ID),
+        }, unique_token
+
     return {
-        "qr_code_id": qr_code_id,
-        "unique_token": unique_token,
-        "locker_id": str(parsed.get("locker_id") or LOCKER_ID),
-        "device_id": str(parsed.get("device_id") or DEVICE_ID),
+        "qr_payload": parsed,
+        "locker_id": LOCKER_ID,
+        "device_id": DEVICE_ID,
     }, unique_token
+
+
+def _is_minimal_qr_payload(payload):
+    minimal_keys = {"qr_code_id", "unique_token", "token", "locker_id", "device_id"}
+    return set(payload.keys()).issubset(minimal_keys)
+
+
+def _debounce_key_from_payload(payload):
+    qr_payload = payload.get("qr_payload")
+    if isinstance(qr_payload, dict):
+        token = str(qr_payload.get("unique_token") or qr_payload.get("token") or "").strip()
+        if token:
+            return token
+        qr_code_id = str(qr_payload.get("qr_code_id") or "").strip()
+        if qr_code_id:
+            return qr_code_id
+
+    qr_data = payload.get("qr_data")
+    if isinstance(qr_data, str):
+        try:
+            parsed_data = json.loads(qr_data)
+        except json.JSONDecodeError:
+            parsed_data = None
+        if isinstance(parsed_data, dict):
+            token = str(parsed_data.get("unique_token") or parsed_data.get("token") or "").strip()
+            if token:
+                return token
+            qr_code_id = str(parsed_data.get("qr_code_id") or "").strip()
+            if qr_code_id:
+                return qr_code_id
+
+    token = str(payload.get("unique_token") or payload.get("token") or "").strip()
+    if token:
+        return token
+    qr_code_id = str(payload.get("qr_code_id") or "").strip()
+    if qr_code_id:
+        return qr_code_id
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
+def summarize_qr_value(raw_value):
+    value = raw_value.strip()
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        if len(value) <= 16:
+            return value
+        return f"token:{value[:6]}...{value[-6:]}"
+
+    if not isinstance(parsed, dict):
+        return "non-object-json"
+    token = str(parsed.get("unique_token") or parsed.get("token") or "").strip()
+    qr_code_id = str(parsed.get("qr_code_id") or "").strip()
+    tracking_number = str(parsed.get("tracking_number") or "").strip()
+    parts = []
+    if qr_code_id:
+        parts.append(f"qr_code_id={qr_code_id}")
+    if token:
+        parts.append(f"token=...{token[-8:]}")
+    if tracking_number:
+        parts.append(f"tracking_number={tracking_number}")
+    return " ".join(parts) or f"json_keys={sorted(parsed.keys())}"
 
 
 def verify_qr(payload):
     response = requests.post(VERIFY_URL, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError:
+        logger.warning(
+            "QR backend rejected request: status=%s response=%s payload_keys=%s",
+            response.status_code,
+            response.text[:500],
+            sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__,
+        )
+        raise
     return response.json()
 
 
