@@ -34,6 +34,7 @@ REQUEST_TIMEOUT_SECONDS = float(os.getenv("QR_VERIFY_TIMEOUT_SECONDS", "10"))
 PROCESS_EVERY_N_FRAMES = int(os.getenv("QR_PROCESS_EVERY_N_FRAMES", "1"))
 NO_FRAME_LOG_SECONDS = float(os.getenv("QR_NO_FRAME_LOG_SECONDS", "5"))
 QR_SCAN_DEBUG = os.getenv("QR_SCAN_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
+QR_SHARPEN_ENABLED = os.getenv("QR_SHARPEN_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
 
 
 class QrGpioController:
@@ -198,10 +199,20 @@ class QrScanner:
         yield "bgr", frame
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         yield "gray", gray
+        downscaled = cv2.resize(frame, None, fx=0.75, fy=0.75, interpolation=cv2.INTER_AREA)
+        yield "downscaled_0_75", downscaled
+        half_size = cv2.resize(frame, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+        yield "downscaled_0_5", half_size
         equalized = cv2.equalizeHist(gray)
         yield "equalized", equalized
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+        yield "clahe", clahe
         upscaled = cv2.resize(frame, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
         yield "upscaled", upscaled
+        if QR_SHARPEN_ENABLED:
+            blurred = cv2.GaussianBlur(gray, (0, 0), 1.0)
+            sharpened = cv2.addWeighted(gray, 1.7, blurred, -0.7, 0)
+            yield "sharpened", sharpened
         adaptive = cv2.adaptiveThreshold(
             gray,
             255,
@@ -211,6 +222,9 @@ class QrScanner:
             2,
         )
         yield "adaptive_threshold", adaptive
+        otsu_source = cv2.GaussianBlur(clahe, (3, 3), 0)
+        _threshold, otsu = cv2.threshold(otsu_source, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        yield "otsu_threshold", otsu
 
     def _decode_candidate(self, frame):
         decoded, points, _straight = self._detector.detectAndDecode(frame)
