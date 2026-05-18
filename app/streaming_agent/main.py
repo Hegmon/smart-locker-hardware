@@ -22,6 +22,8 @@ from app.streaming_agent.streaming_manager import StreamingManager
 
 logger = LoggingManager.get_logger(__name__)
 
+DETECTION_LED_HOLD_SECONDS = float(os.getenv("DETECTION_LED_HOLD_SECONDS", "3"))
+
 
 class StreamingAgent:
     def __init__(self):
@@ -47,6 +49,7 @@ class StreamingAgent:
         self.person_detector = PersonDetector(
             self.stream_manager.get_frame_buffer("internal"),
             led_controller=self.led_controller,
+            led_off_delay_seconds=DETECTION_LED_HOLD_SECONDS,
         )
         self.qr_scanner = QrScanner(
             self.stream_manager.get_frame_buffer("external"),
@@ -59,6 +62,7 @@ class StreamingAgent:
                 frame_buffer,
                 camera_role=role,
                 led_controller=self.led_controller,
+                tamper_clear_seconds=DETECTION_LED_HOLD_SECONDS,
             )
             for role, frame_buffer in self.stream_manager.frame_buffers.items()
         ]
