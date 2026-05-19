@@ -52,7 +52,13 @@ class QRScannerConfig:
     camera_resolution: Tuple[int, int] = (960, 540)
     autofocus_enabled: bool = True
     preprocessing_enabled: bool = True
-    detection_width: int = 480
+    detection_width: int = 320
+    roi_enabled: bool = True
+    roi_width_ratio: float = 0.82
+    roi_height_ratio: float = 0.82
+    expensive_preprocess_every_n: int = 1
+    quiet_zone_border_ratio: float = 0.08
+    invert_candidate_enabled: bool = True
     adaptive_block_size: int = 31
     adaptive_c: int = 4
     clahe_clip_limit: float = 2.5
@@ -99,7 +105,13 @@ class QRScannerConfig:
             ),
             autofocus_enabled=_env_bool("QR_AUTOFOCUS_ENABLED", True),
             preprocessing_enabled=_env_bool("QR_PREPROCESSING_ENABLED", True),
-            detection_width=_env_int("QR_DETECTION_WIDTH", _env_int("QR_DETECT_WIDTH", 480), minimum=240),
+            detection_width=_env_int("QR_DETECTION_WIDTH", _env_int("QR_DETECT_WIDTH", 320), minimum=240),
+            roi_enabled=_env_bool("QR_ROI_ENABLED", True),
+            roi_width_ratio=_env_float("QR_ROI_WIDTH_RATIO", 0.82, minimum=0.3),
+            roi_height_ratio=_env_float("QR_ROI_HEIGHT_RATIO", 0.82, minimum=0.3),
+            expensive_preprocess_every_n=_env_int("QR_EXPENSIVE_PREPROCESS_EVERY_N", 1, minimum=1),
+            quiet_zone_border_ratio=_env_float("QR_QUIET_ZONE_BORDER_RATIO", 0.08, minimum=0.0),
+            invert_candidate_enabled=_env_bool("QR_INVERT_CANDIDATE_ENABLED", True),
             adaptive_block_size=_make_odd(_env_int("QR_ADAPTIVE_BLOCK_SIZE", 31, minimum=3)),
             adaptive_c=_env_int("QR_ADAPTIVE_C", 4),
             clahe_clip_limit=_env_float("QR_CLAHE_CLIP_LIMIT", 2.5, minimum=0.1),
