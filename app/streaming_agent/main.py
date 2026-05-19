@@ -57,15 +57,18 @@ class StreamingAgent:
             camera_controls=self.stream_manager.camera_controls,
         )
         self._warn_if_gpio_pins_overlap()
-        self.tamper_detectors = [
-            TamperDetection(
-                frame_buffer,
-                camera_role=role,
-                led_controller=self.led_controller,
-                tamper_clear_seconds=DETECTION_LED_HOLD_SECONDS,
+        self.tamper_detectors = []
+        for role, frame_buffer in self.stream_manager.frame_buffers.items():
+            skip_when = self.qr_scanner.is_qr_attention_active if role == "external" and self.qr_scanner else None
+            self.tamper_detectors.append(
+                TamperDetection(
+                    frame_buffer,
+                    camera_role=role,
+                    led_controller=self.led_controller,
+                    tamper_clear_seconds=DETECTION_LED_HOLD_SECONDS,
+                    skip_when=skip_when,
+                )
             )
-            for role, frame_buffer in self.stream_manager.frame_buffers.items()
-        ]
         self.health_monitor = HealthMonitor(stream_registry=self.stream_manager.streams)
         self.hot_plug_monitor = HotPlugMonitor(stream_manager=self.stream_manager)
         self.mqtt_publisher = MQTTPublisher(
