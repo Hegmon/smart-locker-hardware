@@ -10,7 +10,8 @@ except Exception:
 
 from app.core.config import MQTT_HOST, MQTT_PASSWORD, MQTT_PORT, MQTT_USERNAME
 from app.streaming_agent.detection.person_detector import PersonDetector
-from app.streaming_agent.detection.qr_scanner import QrScanner
+from app.streaming_agent.detection.qr_scanner import BackendQRValidator, QrScanner, summarize_qr_value
+from app.streaming_agent.detection.scanner_config import QRScannerConfig
 from app.streaming_agent.detection.tamper_detection import TamperDetection
 from app.streaming_agent.gpio.led_controller import LedController
 from app.streaming_agent.health_monitor import HealthMonitor
@@ -33,6 +34,7 @@ class StreamingAgent:
         self.mqtt_publisher = None
         self.person_detector = None
         self.qr_scanner = None
+        self.qr_scanner_config = QRScannerConfig.from_env()
         self.tamper_detectors = []
         self.led_controller = LedController()
         self.keyboard_thread = None
@@ -55,6 +57,9 @@ class StreamingAgent:
             self.stream_manager.get_frame_buffer("external"),
             video_device=self.stream_manager.get_camera_device("external"),
             camera_controls=self.stream_manager.camera_controls,
+            config=self.qr_scanner_config,
+            on_qr_detected=self._handle_qr_detected,
+            backend_validator=self._validate_qr_with_backend,
         )
         self._warn_if_gpio_pins_overlap()
         self.tamper_detectors = []
@@ -97,6 +102,15 @@ class StreamingAgent:
                 "Set QR_SUCCESS_GPIO_PIN/QR_FAILURE_GPIO_PIN or update detection LED pins if this hardware uses relays.",
                 overlap,
             )
+
+    def _handle_qr_detected(self, payload):
+        """One-time scan event hook for telemetry, MQTT fanout, or local audit actions."""
+        logger.info("QR scan event received: payload_keys=%s", sorted(payload.keys()))
+
+    def _validate_qr_with_backend(self, payload):
+        """Backend validation hook. JWTs are not trusted locally and are verified remotely."""
+        logger.info("Validating QR payload with backend: %s", summarize_qr_value(str(payload.get("token") or payload)))
+        return BackendQRValidator(self.qr_scanner_config)(payload)
 
     def _acquire_single_instance_lock(self):
         if fcntl is None:
