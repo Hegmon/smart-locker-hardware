@@ -51,9 +51,10 @@ QR_PYZBAR_EVERY_N_FRAMES = max(1, int(os.getenv("QR_PYZBAR_EVERY_N_FRAMES", "3")
 QR_ATTENTION_HOLD_SECONDS = float(os.getenv("QR_ATTENTION_HOLD_SECONDS", "2.5"))
 QR_DETECT_WIDTH = max(240, int(os.getenv("QR_DETECT_WIDTH", "320")))
 QR_ACTIVE_ROI_MARGIN = float(os.getenv("QR_ACTIVE_ROI_MARGIN", "0.6"))
-QR_PYZBAR_FRAME_WIDTH = max(320, int(os.getenv("QR_PYZBAR_FRAME_WIDTH", "720")))
+QR_PYZBAR_FRAME_WIDTH = max(320, int(os.getenv("QR_PYZBAR_FRAME_WIDTH", "480")))
 QR_OPENCV_DETECT_EVERY_N_FRAMES = max(1, int(os.getenv("QR_OPENCV_DETECT_EVERY_N_FRAMES", "8")))
 QR_METRICS_WIDTH = max(160, int(os.getenv("QR_METRICS_WIDTH", "320")))
+QR_REPEAT_SUPPRESS_SECONDS = float(os.getenv("QR_REPEAT_SUPPRESS_SECONDS", "1.0"))
 _IDENTITY_LOCK = threading.Lock()
 _CACHED_QR_DEVICE_ID = None
 _CACHED_QR_LOCKER_ID = None
@@ -162,6 +163,8 @@ class QrScanner:
         self._focus_worker_running = False
         self._focus_worker_lock = threading.Lock()
         self._active_qr_rect = None
+        self._last_decoded_key = None
+        self._last_decoded_at = 0.0
 
     def start(self):
         if self._running:
@@ -390,6 +393,8 @@ class QrScanner:
             prefer_gray=True,
             scaled_width=QR_PYZBAR_FRAME_WIDTH,
             return_rect=True,
+            fast=True,
+            log_success=False,
         )
         if not pyzbar_result:
             return None
@@ -398,7 +403,6 @@ class QrScanner:
         if rect is not None:
             self._active_qr_rect = self._expand_rect(rect, frame.shape, margin=QR_ACTIVE_ROI_MARGIN)
         self._mark_qr_attention()
-        logger.info("QR decoded from phone screen frame using pyzbar")
         return value
 
     def _crop_active_region(self, frame, gray):
@@ -659,7 +663,17 @@ class QrScanner:
 
         return None, points
 
-    def _decode_with_pyzbar(self, frame, *, gray=None, prefer_gray=False, scaled_width=None, return_rect=False):
+    def _decode_with_pyzbar(
+        self,
+        frame,
+        *,
+        gray=None,
+        prefer_gray=False,
+        scaled_width=None,
+        return_rect=False,
+        fast=False,
+        log_success=True,
+    ):
         if pyzbar_decode is None:
             if QR_SCAN_DEBUG and not self._pyzbar_unavailable_logged:
                 self._pyzbar_unavailable_logged = True
@@ -679,14 +693,16 @@ class QrScanner:
                 small_frame = frame
             if prefer_gray:
                 candidates.append(("gray", small_gray, scale))
-                candidates.append(("bgr", small_frame, scale))
+                if not fast:
+                    candidates.append(("bgr", small_frame, scale))
             else:
                 candidates.append(("bgr", small_frame, scale))
-                candidates.append(("gray", small_gray, scale))
-            if QR_SHARPEN_ENABLED:
+                if not fast:
+                    candidates.append(("gray", small_gray, scale))
+            if QR_SHARPEN_ENABLED and not fast:
                 blurred = cv2.GaussianBlur(small_gray, (0, 0), 1.0)
                 candidates.append(("sharpened", cv2.addWeighted(small_gray, 1.7, blurred, -0.7, 0), scale))
-            if self._decode_attempts % QR_PYZBAR_EVERY_N_FRAMES == 0:
+            if not fast and self._decode_attempts % QR_PYZBAR_EVERY_N_FRAMES == 0:
                 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(small_gray)
                 candidates.append(("clahe", clahe, scale))
         else:
@@ -708,7 +724,8 @@ class QrScanner:
             for item in decoded_items:
                 value = item.data.decode("utf-8", errors="replace").strip()
                 if value:
-                    logger.info("QR decoded from external camera using pyzbar %s fallback", candidate_name)
+                    if log_success:
+                        logger.info("QR decoded from external camera using pyzbar %s fallback", candidate_name)
                     rect = self._pyzbar_item_rect(item, candidate_scale)
                     return (value, rect) if return_rect else value
         return None
@@ -777,10 +794,6 @@ class QrScanner:
             logger.exception("Failed to save QR debug frame")
 
     def _queue_scan(self, raw_value):
-        logger.info("QR decoded from external camera: %s", summarize_qr_value(raw_value))
-        if self.video_device:
-            self._maybe_retry_focus()
-
         try:
             payload, debounce_key = parse_qr_value(raw_value)
         except Exception as exc:
@@ -795,6 +808,11 @@ class QrScanner:
 
         now = time.monotonic()
         with self._scan_lock:
+            if debounce_key == self._last_decoded_key and now - self._last_decoded_at < QR_REPEAT_SUPPRESS_SECONDS:
+                return
+            self._last_decoded_key = debounce_key
+            self._last_decoded_at = now
+
             last_time = self._last_seen.get(debounce_key, 0)
             if now - last_time < DEBOUNCE_SECONDS:
                 if QR_SCAN_DEBUG:
@@ -806,6 +824,9 @@ class QrScanner:
             self._last_seen[debounce_key] = now
             self._processing_keys.add(debounce_key)
 
+        logger.info("QR decoded from external camera: %s", summarize_qr_value(raw_value))
+        if self.video_device:
+            self._maybe_retry_focus()
         logger.info("Queued QR verification worker for token: %s", debounce_key)
         threading.Thread(
             target=self._process_scan,
