@@ -55,20 +55,54 @@ class QRPreprocessor:
             return
 
         working = self._center_roi(frame)
-        small, scale = self._resize_for_detection(working)
+        gray_source = cv2.cvtColor(working, cv2.COLOR_BGR2GRAY) if len(working.shape) == 3 else working
+
+        for width in self._scan_widths(gray_source):
+            small, scale = self._resize_for_detection(gray_source, target_width=width)
+            gray = self._with_quiet_zone(small)
+            yield PreprocessedFrame(f"gray_{width}", gray, scale)
+
+            if not self._config_value("preprocessing_enabled", True):
+                continue
+
+            clahe = self._clahe.apply(gray) if self._clahe is not None else gray
+            yield PreprocessedFrame(f"clahe_{width}", clahe, scale)
+
+            if not self._should_try_expensive(attempt_index):
+                continue
+
+            adaptive = cv2.adaptiveThreshold(
+                clahe,
+                255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                self._config_value("adaptive_block_size", 31),
+                self._config_value("adaptive_c", 4),
+            )
+            yield PreprocessedFrame(f"adaptive_threshold_{width}", adaptive, scale)
+
+            if self._config_value("invert_candidate_enabled", True):
+                yield PreprocessedFrame(f"adaptive_threshold_inverted_{width}", cv2.bitwise_not(adaptive), scale)
+
+    def opencv_candidates(self, frame, attempt_index: int = 0) -> Iterable[PreprocessedFrame]:
+        if cv2 is None or np is None:
+            return
+
+        working = self._center_roi(frame)
+        small, scale = self._resize_for_detection(
+            working,
+            target_width=min(int(self._config_value("detection_width", 640)), 640),
+        )
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if len(small.shape) == 3 else small
         gray = self._with_quiet_zone(gray)
+        yield PreprocessedFrame("opencv_gray", gray, scale)
 
-        yield PreprocessedFrame("gray", gray, scale)
         if not self._config_value("preprocessing_enabled", True):
             return
 
         clahe = self._clahe.apply(gray) if self._clahe is not None else gray
-        yield PreprocessedFrame("clahe", clahe, scale)
-
-        expensive_every_n = max(1, int(self._config_value("expensive_preprocess_every_n", 1)))
-        should_try_expensive = attempt_index % expensive_every_n == 0
-        if not should_try_expensive:
+        yield PreprocessedFrame("opencv_clahe", clahe, scale)
+        if not self._should_try_expensive(attempt_index):
             return
 
         adaptive = cv2.adaptiveThreshold(
@@ -79,15 +113,11 @@ class QRPreprocessor:
             self._config_value("adaptive_block_size", 31),
             self._config_value("adaptive_c", 4),
         )
-        yield PreprocessedFrame("adaptive_threshold", adaptive, scale)
+        yield PreprocessedFrame("opencv_adaptive_threshold", adaptive, scale)
 
-        if self._config_value("invert_candidate_enabled", True):
-            yield PreprocessedFrame("adaptive_threshold_inverted", cv2.bitwise_not(adaptive), scale)
-
-        if self._config_value("sharpening_enabled", True):
-            blurred = cv2.GaussianBlur(clahe, (0, 0), 1.0)
-            sharpened = cv2.addWeighted(clahe, 1.7, blurred, -0.7, 0)
-            yield PreprocessedFrame("sharpened", sharpened, scale)
+    def _should_try_expensive(self, attempt_index: int) -> bool:
+        expensive_every_n = max(1, int(self._config_value("expensive_preprocess_every_n", 1)))
+        return attempt_index % expensive_every_n == 0
 
     def quality_metrics(self, frame) -> FrameQualityMetrics:
         if cv2 is None or np is None:
@@ -95,7 +125,7 @@ class QRPreprocessor:
         try:
             small, _ = self._resize_for_detection(
                 self._center_roi(frame),
-                target_width=min(self._config_value("detection_width", 320), 320),
+                target_width=min(self._config_value("detection_width", 640), 640),
             )
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if len(small.shape) == 3 else small
             return FrameQualityMetrics(
@@ -107,7 +137,7 @@ class QRPreprocessor:
             return FrameQualityMetrics.empty()
 
     def _resize_for_detection(self, frame, target_width: int | None = None) -> Tuple[object, float]:
-        target = target_width or min(int(self._config_value("detection_width", 320)), 320)
+        target = target_width or int(self._config_value("detection_width", 640))
         width = frame.shape[1]
         if width <= target:
             return frame, 1.0
@@ -145,3 +175,13 @@ class QRPreprocessor:
 
     def _config_value(self, name, default):
         return getattr(self.config, name, default)
+
+    def _scan_widths(self, image):
+        widths = getattr(self.config, "pyzbar_scan_widths", (960, 640, 320))
+        seen = set()
+        for width in widths:
+            width = min(int(width), image.shape[1])
+            if width in seen:
+                continue
+            seen.add(width)
+            yield width
