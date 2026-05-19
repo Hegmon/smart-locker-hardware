@@ -39,7 +39,7 @@ PROCESS_EVERY_N_FRAMES = int(os.getenv("QR_PROCESS_EVERY_N_FRAMES", "1"))
 NO_FRAME_LOG_SECONDS = float(os.getenv("QR_NO_FRAME_LOG_SECONDS", "5"))
 QR_SCAN_DEBUG = os.getenv("QR_SCAN_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
 QR_SHARPEN_ENABLED = os.getenv("QR_SHARPEN_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
-QR_FOCUS_RETRY_SECONDS = float(os.getenv("QR_FOCUS_RETRY_SECONDS", "1.5"))
+QR_FOCUS_RETRY_SECONDS = float(os.getenv("QR_FOCUS_RETRY_SECONDS", "5"))
 QR_STATUS_LOG_SECONDS = float(os.getenv("QR_STATUS_LOG_SECONDS", "3"))
 QR_SAVE_DEBUG_FRAMES = os.getenv("QR_SAVE_DEBUG_FRAMES", "false").strip().lower() in {"1", "true", "yes", "on"}
 QR_DEBUG_FRAME_DIR = Path(os.getenv("QR_DEBUG_FRAME_DIR", "logs/qr_debug_frames"))
@@ -153,6 +153,8 @@ class QrScanner:
         self._decode_attempts = 0
         self._qr_attention_until = 0.0
         self._qr_attention_lock = threading.Lock()
+        self._focus_worker_running = False
+        self._focus_worker_lock = threading.Lock()
 
     def start(self):
         if self._running:
@@ -166,6 +168,10 @@ class QrScanner:
             return
 
         self._detector = cv2.QRCodeDetector()
+        if hasattr(self._detector, "setEpsX"):
+            self._detector.setEpsX(float(os.getenv("QR_DETECTOR_EPS_X", "0.4")))
+        if hasattr(self._detector, "setEpsY"):
+            self._detector.setEpsY(float(os.getenv("QR_DETECTOR_EPS_Y", "0.4")))
         if self.video_device:
             self.camera_controls.prepare_for_qr_scan(self.video_device, reason="QR scanner startup", force=True)
         self.gpio_controller.start()
@@ -258,11 +264,15 @@ class QrScanner:
                 qr_seen = True
                 qr_points = points
                 self._mark_qr_attention()
-                if self.video_device:
-                    self._maybe_retry_focus()
             if decoded:
                 if candidate_name != "bgr":
                     logger.info("QR decoded from %s external frame", candidate_name)
+                return decoded, True, metrics
+
+        if qr_seen:
+            decoded = self._decode_from_points(frame, gray, qr_points)
+            if decoded:
+                logger.info("QR decoded from perspective-corrected external frame")
                 return decoded, True, metrics
 
         if qr_seen:
@@ -286,8 +296,6 @@ class QrScanner:
                 qr_seen = True
                 qr_points = points
                 self._mark_qr_attention()
-                if self.video_device:
-                    self._maybe_retry_focus()
             if decoded:
                 logger.info("QR decoded from %s preprocessed external frame", candidate_name)
                 return decoded, True, metrics
@@ -368,6 +376,80 @@ class QrScanner:
             yield "roi_sharpened", cv2.addWeighted(roi_gray, 1.8, blurred, -0.8, 0)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(roi_gray)
         yield "roi_clahe", clahe
+
+    def _decode_from_points(self, frame, gray, points):
+        for candidate_name, candidate in self._warped_qr_candidates(frame, gray, points):
+            decoded, _points = self._decode_candidate(candidate)
+            if decoded:
+                logger.info("QR decoded from warped %s candidate", candidate_name)
+                return decoded
+
+            pyzbar_value = self._decode_with_pyzbar(candidate, prefer_gray=True)
+            if pyzbar_value:
+                logger.info("QR decoded from warped %s pyzbar candidate", candidate_name)
+                return pyzbar_value
+        return None
+
+    def _warped_qr_candidates(self, frame, gray, points):
+        ordered = self._ordered_qr_points(points)
+        if ordered is None:
+            return
+
+        top_width = np.linalg.norm(ordered[1] - ordered[0])
+        bottom_width = np.linalg.norm(ordered[2] - ordered[3])
+        left_height = np.linalg.norm(ordered[3] - ordered[0])
+        right_height = np.linalg.norm(ordered[2] - ordered[1])
+        side = int(max(top_width, bottom_width, left_height, right_height))
+        if side < 24:
+            return
+
+        side = min(max(side, 180), 720)
+        destination = np.array(
+            [[0, 0], [side - 1, 0], [side - 1, side - 1], [0, side - 1]],
+            dtype=np.float32,
+        )
+        matrix = cv2.getPerspectiveTransform(ordered, destination)
+        for source_name, source in (("gray", gray), ("bgr", frame)):
+            warped = cv2.warpPerspective(source, matrix, (side, side))
+            bordered = cv2.copyMakeBorder(
+                warped,
+                max(8, side // 12),
+                max(8, side // 12),
+                max(8, side // 12),
+                max(8, side // 12),
+                cv2.BORDER_CONSTANT,
+                value=255,
+            )
+            yield source_name, bordered
+            yield f"{source_name}_upscaled", cv2.resize(
+                bordered,
+                None,
+                fx=1.6,
+                fy=1.6,
+                interpolation=cv2.INTER_CUBIC,
+            )
+
+    def _ordered_qr_points(self, points):
+        if points is None:
+            return None
+        pts = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        if len(pts) < 4:
+            return None
+
+        sums = pts.sum(axis=1)
+        diffs = np.diff(pts, axis=1).reshape(-1)
+        ordered = np.array(
+            [
+                pts[np.argmin(sums)],
+                pts[np.argmin(diffs)],
+                pts[np.argmax(sums)],
+                pts[np.argmax(diffs)],
+            ],
+            dtype=np.float32,
+        )
+        if len({tuple(point) for point in ordered}) < 4:
+            return None
+        return ordered
 
     def _qr_roi(self, frame, points):
         if points is None:
@@ -485,7 +567,7 @@ class QrScanner:
     def _queue_scan(self, raw_value):
         logger.info("QR decoded from external camera: %s", summarize_qr_value(raw_value))
         if self.video_device:
-            self.camera_controls.enable_autofocus(self.video_device, reason="QR decoded")
+            self._maybe_retry_focus()
 
         try:
             payload, debounce_key = parse_qr_value(raw_value)
@@ -569,12 +651,23 @@ class QrScanner:
         if now - self._last_focus_retry_at < QR_FOCUS_RETRY_SECONDS:
             return
         self._last_focus_retry_at = now
-        logger.info("QR decode retry: QR pattern seen, adjusting external camera focus/exposure")
-        self.camera_controls.prepare_for_qr_scan(
-            self.video_device,
-            reason="QR decode retry",
-            sweep_focus=True,
-        )
+        with self._focus_worker_lock:
+            if self._focus_worker_running:
+                return
+            self._focus_worker_running = True
+        threading.Thread(
+            target=self._focus_retry_worker,
+            daemon=True,
+            name="qr-focus-retry",
+        ).start()
+
+    def _focus_retry_worker(self):
+        try:
+            logger.info("QR decode retry: QR pattern seen, nudging external camera autofocus")
+            self.camera_controls.enable_autofocus(self.video_device, reason="QR decode retry")
+        finally:
+            with self._focus_worker_lock:
+                self._focus_worker_running = False
 
     def _log_scan_status(self, qr_seen, decoded, metrics):
         now = time.monotonic()
