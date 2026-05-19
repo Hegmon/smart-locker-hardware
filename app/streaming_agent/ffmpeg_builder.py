@@ -8,7 +8,7 @@ MEDIAMTX_RTSP_PORT = 8554
 QR_FRAME_WIDTH = int(os.getenv("QR_FRAME_WIDTH", "960"))
 QR_FRAME_HEIGHT = int(os.getenv("QR_FRAME_HEIGHT", "540"))
 QR_FRAME_CHANNELS = int(os.getenv("QR_FRAME_CHANNELS", "3"))
-QR_FRAME_FPS = max(1, int(os.getenv("QR_FRAME_FPS", "5")))
+QR_FRAME_FPS = max(1, int(os.getenv("QR_FRAME_FPS", "10")))
 
 
 def build_rtsp_url(camera_role):
