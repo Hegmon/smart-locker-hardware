@@ -43,6 +43,25 @@ def _env_resolution(name: str, default: Tuple[int, int]) -> Tuple[int, int]:
         return default
 
 
+def _env_int_tuple(name: str, default: Tuple[int, ...], *, minimum: int | None = None) -> Tuple[int, ...]:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    values = []
+    for part in raw.replace("x", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            value = int(part)
+        except ValueError:
+            continue
+        if minimum is not None:
+            value = max(minimum, value)
+        values.append(value)
+    return tuple(values) or default
+
+
 @dataclass(frozen=True)
 class QRScannerConfig:
     """Runtime settings for the external QR scanner service."""
@@ -52,7 +71,8 @@ class QRScannerConfig:
     camera_resolution: Tuple[int, int] = (960, 540)
     autofocus_enabled: bool = True
     preprocessing_enabled: bool = True
-    detection_width: int = 320
+    detection_width: int = 640
+    pyzbar_scan_widths: Tuple[int, ...] = (960, 640, 320)
     roi_enabled: bool = True
     roi_width_ratio: float = 1.0
     roi_height_ratio: float = 1.0
@@ -61,6 +81,7 @@ class QRScannerConfig:
     invert_candidate_enabled: bool = True
     pyzbar_enabled: bool = True
     opencv_fallback_every_n: int = 5
+    opencv_max_candidates: int = 1
     adaptive_block_size: int = 31
     adaptive_c: int = 4
     clahe_clip_limit: float = 2.5
@@ -107,7 +128,8 @@ class QRScannerConfig:
             ),
             autofocus_enabled=_env_bool("QR_AUTOFOCUS_ENABLED", True),
             preprocessing_enabled=_env_bool("QR_PREPROCESSING_ENABLED", True),
-            detection_width=_env_int("QR_DETECTION_WIDTH", _env_int("QR_DETECT_WIDTH", 320), minimum=240),
+            detection_width=_env_int("QR_DETECTION_WIDTH", _env_int("QR_DETECT_WIDTH", 640), minimum=240),
+            pyzbar_scan_widths=_env_int_tuple("QR_PYZBAR_SCAN_WIDTHS", (960, 640, 320), minimum=240),
             roi_enabled=_env_bool("QR_ROI_ENABLED", True),
             roi_width_ratio=_env_float("QR_ROI_WIDTH_RATIO", 1.0, minimum=0.3),
             roi_height_ratio=_env_float("QR_ROI_HEIGHT_RATIO", 1.0, minimum=0.3),
@@ -116,6 +138,7 @@ class QRScannerConfig:
             invert_candidate_enabled=_env_bool("QR_INVERT_CANDIDATE_ENABLED", True),
             pyzbar_enabled=_env_bool("QR_PYZBAR_ENABLED", True),
             opencv_fallback_every_n=_env_int("QR_OPENCV_FALLBACK_EVERY_N", 5, minimum=1),
+            opencv_max_candidates=_env_int("QR_OPENCV_MAX_CANDIDATES", 1, minimum=0),
             adaptive_block_size=_make_odd(_env_int("QR_ADAPTIVE_BLOCK_SIZE", 31, minimum=3)),
             adaptive_c=_env_int("QR_ADAPTIVE_C", 4),
             clahe_clip_limit=_env_float("QR_CLAHE_CLIP_LIMIT", 2.5, minimum=0.1),
