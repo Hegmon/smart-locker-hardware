@@ -57,6 +57,7 @@ class QRPreprocessor:
         working = self._center_roi(frame)
         small, scale = self._resize_for_detection(working)
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if len(small.shape) == 3 else small
+        gray = self._with_quiet_zone(gray)
 
         yield PreprocessedFrame("gray", gray, scale)
         if not self._config_value("preprocessing_enabled", True):
@@ -65,7 +66,7 @@ class QRPreprocessor:
         clahe = self._clahe.apply(gray) if self._clahe is not None else gray
         yield PreprocessedFrame("clahe", clahe, scale)
 
-        expensive_every_n = max(1, int(self._config_value("expensive_preprocess_every_n", 4)))
+        expensive_every_n = max(1, int(self._config_value("expensive_preprocess_every_n", 1)))
         should_try_expensive = attempt_index % expensive_every_n == 0
         if not should_try_expensive:
             return
@@ -79,6 +80,9 @@ class QRPreprocessor:
             self._config_value("adaptive_c", 4),
         )
         yield PreprocessedFrame("adaptive_threshold", adaptive, scale)
+
+        if self._config_value("invert_candidate_enabled", True):
+            yield PreprocessedFrame("adaptive_threshold_inverted", cv2.bitwise_not(adaptive), scale)
 
         if self._config_value("sharpening_enabled", True):
             blurred = cv2.GaussianBlur(clahe, (0, 0), 1.0)
@@ -109,6 +113,22 @@ class QRPreprocessor:
             return frame, 1.0
         scale = target / float(width)
         return cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA), scale
+
+    def _with_quiet_zone(self, image):
+        ratio = float(self._config_value("quiet_zone_border_ratio", 0.08))
+        if ratio <= 0:
+            return image
+        side = min(image.shape[:2])
+        border = max(8, int(side * ratio))
+        return cv2.copyMakeBorder(
+            image,
+            border,
+            border,
+            border,
+            border,
+            cv2.BORDER_CONSTANT,
+            value=255,
+        )
 
     def _center_roi(self, frame):
         if not self._config_value("roi_enabled", True):
