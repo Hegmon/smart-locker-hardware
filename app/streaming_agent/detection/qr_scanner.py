@@ -48,6 +48,8 @@ QR_DECODE_MODE = os.getenv("QR_DECODE_MODE", "fast").strip().lower()
 QR_UPSCALE_EVERY_N_FRAMES = int(os.getenv("QR_UPSCALE_EVERY_N_FRAMES", "6"))
 QR_PYZBAR_EVERY_N_FRAMES = max(1, int(os.getenv("QR_PYZBAR_EVERY_N_FRAMES", "3")))
 QR_ATTENTION_HOLD_SECONDS = float(os.getenv("QR_ATTENTION_HOLD_SECONDS", "2.5"))
+QR_DETECT_WIDTH = max(240, int(os.getenv("QR_DETECT_WIDTH", "480")))
+QR_ACTIVE_ROI_MARGIN = float(os.getenv("QR_ACTIVE_ROI_MARGIN", "0.6"))
 _IDENTITY_LOCK = threading.Lock()
 _CACHED_QR_DEVICE_ID = None
 _CACHED_QR_LOCKER_ID = None
@@ -155,6 +157,7 @@ class QrScanner:
         self._qr_attention_lock = threading.Lock()
         self._focus_worker_running = False
         self._focus_worker_lock = threading.Lock()
+        self._active_qr_rect = None
 
     def start(self):
         if self._running:
@@ -254,61 +257,33 @@ class QrScanner:
         )
         metrics = self._frame_metrics(frame)
         self._maybe_save_debug_frame(frame, "latest")
-        qr_seen = False
-        qr_points = None
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        for candidate_name, candidate in (("gray", gray), ("bgr", frame)):
-            decoded, points = self._decode_candidate(candidate)
-            if points is not None:
-                qr_seen = True
-                qr_points = points
-                self._mark_qr_attention()
-            if decoded:
-                if candidate_name != "bgr":
-                    logger.info("QR decoded from %s external frame", candidate_name)
-                return decoded, True, metrics
-
+        decoded, qr_seen = self._scan_active_qr_region(frame, gray)
+        if decoded:
+            return decoded, True, metrics
         if qr_seen:
-            decoded = self._decode_from_points(frame, gray, qr_points)
-            if decoded:
-                logger.info("QR decoded from perspective-corrected external frame")
-                return decoded, True, metrics
+            return None, True, metrics
 
-        if qr_seen:
-            for candidate_name, candidate in self._focused_candidates(frame, gray, qr_points):
-                decoded, extra_points = self._decode_candidate(candidate)
-                if extra_points is not None:
-                    self._mark_qr_attention()
-                if decoded:
-                    logger.info("QR decoded from focused %s external frame", candidate_name)
-                    return decoded, True, metrics
+        points = self._detect_qr_points(gray)
+        if points is None:
+            if QR_SCAN_DEBUG:
+                logger.info("No QR pattern detected in external camera frame")
+            return None, False, metrics
 
-        if qr_seen or self._decode_attempts % QR_PYZBAR_EVERY_N_FRAMES == 0:
-            pyzbar_value = self._decode_with_pyzbar(frame, gray=gray, prefer_gray=True)
-            if pyzbar_value:
-                self._mark_qr_attention()
-                return pyzbar_value, True, metrics
+        self._mark_qr_attention()
+        self._active_qr_rect = self._rect_from_points(points, frame.shape, margin=QR_ACTIVE_ROI_MARGIN)
 
-        for candidate_name, candidate in self._frame_candidates(frame, gray=gray, qr_seen=qr_seen):
-            decoded, points = self._decode_candidate(candidate)
-            if points is not None:
-                qr_seen = True
-                qr_points = points
-                self._mark_qr_attention()
-            if decoded:
-                logger.info("QR decoded from %s preprocessed external frame", candidate_name)
-                return decoded, True, metrics
+        decoded = self._decode_detected_qr(frame, gray, points)
+        if decoded:
+            return decoded, True, metrics
 
-        if qr_seen:
-            now = time.monotonic()
-            if now - self._last_pattern_decode_failed_log_at >= QR_STATUS_LOG_SECONDS:
-                self._last_pattern_decode_failed_log_at = now
-                logger.warning("QR pattern detected on external camera but decode failed")
-            self._maybe_save_debug_frame(frame, "pattern_seen_decode_failed")
-        elif QR_SCAN_DEBUG:
-            logger.info("No QR pattern detected in external camera frame")
-        return None, qr_seen, metrics
+        now = time.monotonic()
+        if now - self._last_pattern_decode_failed_log_at >= QR_STATUS_LOG_SECONDS:
+            self._last_pattern_decode_failed_log_at = now
+            logger.warning("QR pattern detected on external camera but decode failed")
+        self._maybe_save_debug_frame(frame, "pattern_seen_decode_failed")
+        return None, True, metrics
 
     def _empty_metrics(self):
         return {
@@ -363,6 +338,135 @@ class QrScanner:
             _threshold, otsu = cv2.threshold(otsu_source, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             yield "otsu_threshold", otsu
 
+    def _scan_active_qr_region(self, frame, gray):
+        if not self.is_qr_attention_active() or self._active_qr_rect is None:
+            return None, False
+
+        cropped_frame, cropped_gray, offset = self._crop_active_region(frame, gray)
+        if cropped_frame is None:
+            self._active_qr_rect = None
+            return None, False
+
+        points = self._detect_qr_points(cropped_gray)
+        if points is None:
+            if self._decode_attempts % QR_PYZBAR_EVERY_N_FRAMES == 0:
+                pyzbar_value = self._decode_with_pyzbar(cropped_frame, gray=cropped_gray, prefer_gray=True)
+                if pyzbar_value:
+                    logger.info("QR decoded from active external QR crop using pyzbar")
+                    return pyzbar_value, True
+            return None, False
+
+        self._mark_qr_attention()
+        full_points = points.copy()
+        full_points[..., 0] += offset[0]
+        full_points[..., 1] += offset[1]
+        self._active_qr_rect = self._rect_from_points(full_points, frame.shape, margin=QR_ACTIVE_ROI_MARGIN)
+
+        decoded = self._decode_detected_qr(cropped_frame, cropped_gray, points)
+        if decoded:
+            logger.info("QR decoded from active external QR crop")
+            return decoded, True
+        return None, True
+
+    def _crop_active_region(self, frame, gray):
+        if self._active_qr_rect is None:
+            return None, None, (0, 0)
+        x0, y0, x1, y1 = self._active_qr_rect
+        x0 = max(0, min(frame.shape[1] - 1, int(x0)))
+        y0 = max(0, min(frame.shape[0] - 1, int(y0)))
+        x1 = max(x0 + 1, min(frame.shape[1], int(x1)))
+        y1 = max(y0 + 1, min(frame.shape[0], int(y1)))
+        return frame[y0:y1, x0:x1], gray[y0:y1, x0:x1], (x0, y0)
+
+    def _detect_qr_points(self, gray):
+        scale = 1.0
+        detect_gray = gray
+        if gray.shape[1] > QR_DETECT_WIDTH:
+            scale = QR_DETECT_WIDTH / float(gray.shape[1])
+            detect_gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+
+        points = self._detect_points_on_candidate(detect_gray)
+        if points is None:
+            equalized = cv2.equalizeHist(detect_gray)
+            points = self._detect_points_on_candidate(equalized)
+        if points is None:
+            return None
+        if scale != 1.0:
+            points = points / scale
+        return points.astype(np.float32)
+
+    def _detect_points_on_candidate(self, candidate):
+        try:
+            ok, points = self._detector.detect(candidate)
+        except Exception:
+            logger.exception("QR point detection failed")
+            return None
+        if ok and points is not None:
+            return points
+
+        if not hasattr(self._detector, "detectMulti"):
+            return None
+        try:
+            ok, points = self._detector.detectMulti(candidate)
+        except Exception:
+            logger.exception("QR multi-point detection failed")
+            return None
+        if ok and points is not None:
+            return points
+        return None
+
+    def _decode_detected_qr(self, frame, gray, points):
+        decoded = self._decode_with_points(gray, points)
+        if decoded:
+            logger.info("QR decoded from detected external QR points")
+            return decoded
+
+        decoded = self._decode_from_points(frame, gray, points)
+        if decoded:
+            logger.info("QR decoded from perspective-corrected external frame")
+            return decoded
+
+        for candidate_name, candidate in self._focused_candidates(frame, gray, points):
+            decoded, extra_points = self._decode_candidate(candidate)
+            if extra_points is not None:
+                self._mark_qr_attention()
+            if decoded:
+                logger.info("QR decoded from focused %s external frame", candidate_name)
+                return decoded
+
+        roi = self._qr_roi(frame, points)
+        if roi is not None:
+            pyzbar_value = self._decode_with_pyzbar(roi, prefer_gray=True)
+            if pyzbar_value:
+                logger.info("QR decoded from focused external QR ROI using pyzbar")
+                return pyzbar_value
+        return None
+
+    def _decode_with_points(self, gray, points):
+        if not hasattr(self._detector, "decode"):
+            return None
+        for qr_points in self._iter_point_sets(points):
+            try:
+                decoded, _straight = self._detector.decode(gray, qr_points)
+            except Exception:
+                logger.exception("QR point decode failed")
+                continue
+            decoded = decoded.strip() if decoded else ""
+            if decoded:
+                return decoded
+        return None
+
+    def _iter_point_sets(self, points):
+        pts = np.asarray(points, dtype=np.float32)
+        if pts.ndim == 2:
+            yield pts.reshape(1, -1, 2)
+            return
+        if pts.ndim == 3 and pts.shape[0] == 1:
+            yield pts
+            return
+        for index in range(pts.shape[0]):
+            yield pts[index].reshape(1, -1, 2)
+
     def _focused_candidates(self, frame, gray, points):
         roi = self._qr_roi(frame, points)
         if roi is None:
@@ -391,43 +495,65 @@ class QrScanner:
         return None
 
     def _warped_qr_candidates(self, frame, gray, points):
-        ordered = self._ordered_qr_points(points)
-        if ordered is None:
-            return
+        for point_set in self._iter_point_sets(points):
+            ordered = self._ordered_qr_points(point_set)
+            if ordered is None:
+                continue
 
-        top_width = np.linalg.norm(ordered[1] - ordered[0])
-        bottom_width = np.linalg.norm(ordered[2] - ordered[3])
-        left_height = np.linalg.norm(ordered[3] - ordered[0])
-        right_height = np.linalg.norm(ordered[2] - ordered[1])
-        side = int(max(top_width, bottom_width, left_height, right_height))
-        if side < 24:
-            return
+            top_width = np.linalg.norm(ordered[1] - ordered[0])
+            bottom_width = np.linalg.norm(ordered[2] - ordered[3])
+            left_height = np.linalg.norm(ordered[3] - ordered[0])
+            right_height = np.linalg.norm(ordered[2] - ordered[1])
+            side = int(max(top_width, bottom_width, left_height, right_height))
+            if side < 24:
+                continue
 
-        side = min(max(side, 180), 720)
-        destination = np.array(
-            [[0, 0], [side - 1, 0], [side - 1, side - 1], [0, side - 1]],
-            dtype=np.float32,
-        )
-        matrix = cv2.getPerspectiveTransform(ordered, destination)
-        for source_name, source in (("gray", gray), ("bgr", frame)):
-            warped = cv2.warpPerspective(source, matrix, (side, side))
-            bordered = cv2.copyMakeBorder(
-                warped,
-                max(8, side // 12),
-                max(8, side // 12),
-                max(8, side // 12),
-                max(8, side // 12),
-                cv2.BORDER_CONSTANT,
-                value=255,
+            side = min(max(side, 180), 720)
+            destination = np.array(
+                [[0, 0], [side - 1, 0], [side - 1, side - 1], [0, side - 1]],
+                dtype=np.float32,
             )
-            yield source_name, bordered
-            yield f"{source_name}_upscaled", cv2.resize(
-                bordered,
-                None,
-                fx=1.6,
-                fy=1.6,
-                interpolation=cv2.INTER_CUBIC,
-            )
+            matrix = cv2.getPerspectiveTransform(ordered, destination)
+            for source_name, source in (("gray", gray), ("bgr", frame)):
+                warped = cv2.warpPerspective(source, matrix, (side, side))
+                bordered = cv2.copyMakeBorder(
+                    warped,
+                    max(8, side // 12),
+                    max(8, side // 12),
+                    max(8, side // 12),
+                    max(8, side // 12),
+                    cv2.BORDER_CONSTANT,
+                    value=255,
+                )
+                yield source_name, bordered
+                yield f"{source_name}_upscaled", cv2.resize(
+                    bordered,
+                    None,
+                    fx=1.6,
+                    fy=1.6,
+                    interpolation=cv2.INTER_CUBIC,
+                )
+
+    def _rect_from_points(self, points, frame_shape, *, margin=0.35):
+        pts = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        if pts.size == 0:
+            return None
+
+        x_min, y_min = np.min(pts, axis=0)
+        x_max, y_max = np.max(pts, axis=0)
+        width = x_max - x_min
+        height = y_max - y_min
+        if width < 8 or height < 8:
+            return None
+
+        pad = max(width, height) * margin
+        x0 = max(0, int(x_min - pad))
+        y0 = max(0, int(y_min - pad))
+        x1 = min(frame_shape[1], int(x_max + pad))
+        y1 = min(frame_shape[0], int(y_max + pad))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return x0, y0, x1, y1
 
     def _ordered_qr_points(self, points):
         if points is None:
