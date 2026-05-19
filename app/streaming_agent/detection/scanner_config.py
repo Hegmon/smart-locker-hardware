@@ -92,7 +92,8 @@ class QRScannerConfig:
     scan_timeout_seconds: float = 30.0
     camera_watchdog_seconds: float = 8.0
     camera_reconnect_backoff_seconds: float = 2.0
-    duplicate_cache_seconds: float = 180.0
+    duplicate_cache_seconds: float = 0.0
+    local_duplicate_suppression_enabled: bool = False
     debug_preview_enabled: bool = False
     debug_frame_dir: Path = Path("logs/qr_debug_frames")
     debug_save_interval_seconds: float = 5.0
@@ -149,7 +150,8 @@ class QRScannerConfig:
             scan_timeout_seconds=_env_float("QR_SCAN_TIMEOUT_SECONDS", 30.0, minimum=1.0),
             camera_watchdog_seconds=_env_float("QR_CAMERA_WATCHDOG_SECONDS", 8.0, minimum=2.0),
             camera_reconnect_backoff_seconds=_env_float("QR_CAMERA_RECONNECT_BACKOFF_SECONDS", 2.0, minimum=0.5),
-            duplicate_cache_seconds=_env_float("QR_DUPLICATE_CACHE_SECONDS", 180.0, minimum=1.0),
+            duplicate_cache_seconds=_env_float("QR_DUPLICATE_CACHE_SECONDS", 0.0, minimum=0.0),
+            local_duplicate_suppression_enabled=_env_bool("QR_LOCAL_DUPLICATE_SUPPRESSION_ENABLED", False),
             debug_preview_enabled=_env_bool("QR_DEBUG_PREVIEW", _env_bool("QR_SCAN_DEBUG", False)),
             debug_frame_dir=Path(os.getenv("QR_DEBUG_FRAME_DIR", "logs/qr_debug_frames")),
             debug_save_interval_seconds=_env_float("QR_DEBUG_SAVE_INTERVAL_SECONDS", 5.0, minimum=0.5),
