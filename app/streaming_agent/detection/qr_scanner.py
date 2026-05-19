@@ -331,9 +331,19 @@ class QRScanner:
 
         with self._lock:
             self.metrics.last_detection_ms = (time.perf_counter() - started_at) * 1000.0
+        self._maybe_save_debug_frame(frame, "latest_no_decode")
         return None, False, metrics
 
     def _detect_candidate(self, image):
+        try:
+            decoded, points, _straight = self._detector.detectAndDecode(image)
+        except Exception:
+            logger.exception("OpenCV QR detectAndDecode failed")
+            decoded, points = "", None
+        decoded = decoded.strip() if decoded else ""
+        if decoded:
+            return decoded, points
+
         try:
             ok, points = self._detector.detect(image)
         except Exception:
@@ -350,6 +360,18 @@ class QRScanner:
         decoded = decoded.strip() if decoded else ""
         if decoded:
             return decoded, points
+
+        if hasattr(self._detector, "detectAndDecodeMulti"):
+            try:
+                ok, decoded_values, multi_points, _straight = self._detector.detectAndDecodeMulti(image)
+            except Exception:
+                logger.exception("OpenCV QR detectAndDecodeMulti failed")
+                return None, points
+            if ok and decoded_values:
+                for decoded_value in decoded_values:
+                    decoded_value = decoded_value.strip() if decoded_value else ""
+                    if decoded_value:
+                        return decoded_value, multi_points
 
         if hasattr(self._detector, "detectMulti") and hasattr(self._detector, "decodeMulti"):
             try:
