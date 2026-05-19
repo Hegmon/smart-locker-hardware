@@ -46,8 +46,8 @@ class QRPreprocessor:
         self._clahe = None
         if cv2 is not None:
             self._clahe = cv2.createCLAHE(
-                clipLimit=config.clahe_clip_limit,
-                tileGridSize=config.clahe_tile_grid_size,
+                clipLimit=self._config_value("clahe_clip_limit", 2.5),
+                tileGridSize=self._config_value("clahe_tile_grid_size", (8, 8)),
             )
 
     def candidates(self, frame, attempt_index: int = 0) -> Iterable[PreprocessedFrame]:
@@ -59,13 +59,14 @@ class QRPreprocessor:
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if len(small.shape) == 3 else small
 
         yield PreprocessedFrame("gray", gray, scale)
-        if not self.config.preprocessing_enabled:
+        if not self._config_value("preprocessing_enabled", True):
             return
 
         clahe = self._clahe.apply(gray) if self._clahe is not None else gray
         yield PreprocessedFrame("clahe", clahe, scale)
 
-        should_try_expensive = attempt_index % self.config.expensive_preprocess_every_n == 0
+        expensive_every_n = max(1, int(self._config_value("expensive_preprocess_every_n", 4)))
+        should_try_expensive = attempt_index % expensive_every_n == 0
         if not should_try_expensive:
             return
 
@@ -74,12 +75,12 @@ class QRPreprocessor:
             255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY,
-            self.config.adaptive_block_size,
-            self.config.adaptive_c,
+            self._config_value("adaptive_block_size", 31),
+            self._config_value("adaptive_c", 4),
         )
         yield PreprocessedFrame("adaptive_threshold", adaptive, scale)
 
-        if self.config.sharpening_enabled:
+        if self._config_value("sharpening_enabled", True):
             blurred = cv2.GaussianBlur(clahe, (0, 0), 1.0)
             sharpened = cv2.addWeighted(clahe, 1.7, blurred, -0.7, 0)
             yield PreprocessedFrame("sharpened", sharpened, scale)
@@ -90,7 +91,7 @@ class QRPreprocessor:
         try:
             small, _ = self._resize_for_detection(
                 self._center_roi(frame),
-                target_width=min(self.config.detection_width, 320),
+                target_width=min(self._config_value("detection_width", 320), 320),
             )
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if len(small.shape) == 3 else small
             return FrameQualityMetrics(
@@ -102,7 +103,7 @@ class QRPreprocessor:
             return FrameQualityMetrics.empty()
 
     def _resize_for_detection(self, frame, target_width: int | None = None) -> Tuple[object, float]:
-        target = target_width or self.config.detection_width
+        target = target_width or min(int(self._config_value("detection_width", 320)), 320)
         width = frame.shape[1]
         if width <= target:
             return frame, 1.0
@@ -110,12 +111,17 @@ class QRPreprocessor:
         return cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA), scale
 
     def _center_roi(self, frame):
-        if not self.config.roi_enabled:
+        if not self._config_value("roi_enabled", True):
             return frame
 
         height, width = frame.shape[:2]
-        roi_width = min(width, max(1, int(width * min(self.config.roi_width_ratio, 1.0))))
-        roi_height = min(height, max(1, int(height * min(self.config.roi_height_ratio, 1.0))))
+        roi_width_ratio = min(float(self._config_value("roi_width_ratio", 0.82)), 1.0)
+        roi_height_ratio = min(float(self._config_value("roi_height_ratio", 0.82)), 1.0)
+        roi_width = min(width, max(1, int(width * roi_width_ratio)))
+        roi_height = min(height, max(1, int(height * roi_height_ratio)))
         x0 = max(0, (width - roi_width) // 2)
         y0 = max(0, (height - roi_height) // 2)
         return frame[y0 : y0 + roi_height, x0 : x0 + roi_width]
+
+    def _config_value(self, name, default):
+        return getattr(self.config, name, default)
