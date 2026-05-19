@@ -64,6 +64,14 @@ class StreamingAgent:
         self._warn_if_gpio_pins_overlap()
         self.tamper_detectors = []
         for role, frame_buffer in self.stream_manager.frame_buffers.items():
+            if role == "external" and os.getenv("EXTERNAL_TAMPER_DETECTION_ENABLED", "false").strip().lower() not in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                logger.info("External tamper detection disabled; external camera is dedicated to QR scanning")
+                continue
             skip_when = self.qr_scanner.is_qr_attention_active if role == "external" and self.qr_scanner else None
             self.tamper_detectors.append(
                 TamperDetection(
