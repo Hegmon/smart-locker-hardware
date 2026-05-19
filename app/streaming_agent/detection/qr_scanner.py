@@ -317,7 +317,8 @@ class QRScanner:
             self.metrics.detection_attempts += 1
             self.metrics.last_quality = metrics
 
-        for candidate in self.preprocessor.candidates(frame):
+        attempt_index = self.metrics.detection_attempts
+        for candidate in self.preprocessor.candidates(frame, attempt_index=attempt_index):
             decoded, points = self._detect_candidate(candidate.image)
             if points is not None:
                 self._mark_qr_attention()
@@ -334,25 +335,40 @@ class QRScanner:
 
     def _detect_candidate(self, image):
         try:
-            decoded, points, _straight = self._detector.detectAndDecode(image)
+            ok, points = self._detector.detect(image)
         except Exception:
-            logger.exception("OpenCV QR detectAndDecode failed")
+            logger.exception("OpenCV QR detect failed")
             return None, None
+        if not ok or points is None:
+            return None, None
+
+        try:
+            decoded, _straight = self._detector.decode(image, points)
+        except Exception:
+            logger.exception("OpenCV QR decode failed")
+            return None, points
         decoded = decoded.strip() if decoded else ""
         if decoded:
             return decoded, points
 
-        if hasattr(self._detector, "detectAndDecodeMulti"):
+        if hasattr(self._detector, "detectMulti") and hasattr(self._detector, "decodeMulti"):
             try:
-                ok, decoded_values, points, _straight = self._detector.detectAndDecodeMulti(image)
+                ok, multi_points = self._detector.detectMulti(image)
             except Exception:
-                logger.exception("OpenCV QR detectAndDecodeMulti failed")
+                logger.exception("OpenCV QR detectMulti failed")
                 return None, points
+            if not ok or multi_points is None:
+                return None, points
+            try:
+                ok, decoded_values, _straight = self._detector.decodeMulti(image, multi_points)
+            except Exception:
+                logger.exception("OpenCV QR decodeMulti failed")
+                return None, multi_points
             if ok and decoded_values:
                 for decoded_value in decoded_values:
                     decoded_value = decoded_value.strip() if decoded_value else ""
                     if decoded_value:
-                        return decoded_value, points
+                        return decoded_value, multi_points
         return None, points
 
     def _decode_qr(self, frame_bytes):
