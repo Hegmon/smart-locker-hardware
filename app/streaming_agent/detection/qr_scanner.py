@@ -102,6 +102,8 @@ class QrGpioController:
         self._gpio = None
         self._enabled = False
         self._lock = threading.Lock()
+        self._pulse_until = {}
+        self._pulse_running = set()
 
     def start(self):
         if self._enabled:
@@ -136,6 +138,8 @@ class QrGpioController:
             return
         with self._lock:
             try:
+                self._pulse_until.clear()
+                self._pulse_running.clear()
                 self._gpio.output(self.success_pin, self._inactive_state())
                 self._gpio.output(self.failure_pin, self._inactive_state())
                 self._gpio.cleanup((self.success_pin, self.failure_pin))
@@ -150,17 +154,40 @@ class QrGpioController:
             logger.info("QR GPIO dry-run: %s pin=%s duration=%ss", action_name, pin, duration_seconds)
             return
 
-        def worker():
-            with self._lock:
-                logger.info("QR GPIO ON: %s pin=%s duration=%ss", action_name, pin, duration_seconds)
-                self._gpio.output(pin, self._active_state())
-                try:
-                    time.sleep(duration_seconds)
-                finally:
-                    self._gpio.output(pin, self._inactive_state())
-                    logger.info("QR GPIO OFF: %s pin=%s", action_name, pin)
+        now = time.monotonic()
+        with self._lock:
+            old_until = self._pulse_until.get(pin, 0.0)
+            self._pulse_until[pin] = max(old_until, now + duration_seconds)
+            if pin in self._pulse_running:
+                logger.info("QR GPIO pulse extended: %s pin=%s duration=%ss", action_name, pin, duration_seconds)
+                return
+            self._pulse_running.add(pin)
 
-        threading.Thread(target=worker, daemon=True, name=f"qr-gpio-{action_name}").start()
+        threading.Thread(
+            target=self._pulse_worker,
+            args=(pin, action_name),
+            daemon=True,
+            name=f"qr-gpio-{action_name}",
+        ).start()
+
+    def _pulse_worker(self, pin, action_name):
+        try:
+            logger.info("QR GPIO ON: %s pin=%s", action_name, pin)
+            self._gpio.output(pin, self._active_state())
+            while True:
+                with self._lock:
+                    until = self._pulse_until.get(pin, 0.0)
+                remaining = until - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(remaining, 0.1))
+        finally:
+            with self._lock:
+                self._pulse_until.pop(pin, None)
+                self._pulse_running.discard(pin)
+            if self._gpio is not None:
+                self._gpio.output(pin, self._inactive_state())
+            logger.info("QR GPIO OFF: %s pin=%s", action_name, pin)
 
     def _active_state(self):
         if self._gpio is None:
