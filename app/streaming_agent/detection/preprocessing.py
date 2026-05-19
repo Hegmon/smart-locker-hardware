@@ -59,26 +59,19 @@ class QRPreprocessor:
 
         for width in self._scan_widths(gray_source):
             small, scale = self._resize_for_detection(gray_source, target_width=width)
-            gray = self._with_quiet_zone(small)
+            gray = self._safe_gray_image(self._with_quiet_zone(small))
             yield PreprocessedFrame(f"gray_{width}", gray, scale)
 
             if not self._config_value("preprocessing_enabled", True):
                 continue
 
-            clahe = self._clahe.apply(gray) if self._clahe is not None else gray
+            clahe = self._apply_clahe(gray)
             yield PreprocessedFrame(f"clahe_{width}", clahe, scale)
 
             if not self._should_try_expensive(attempt_index):
                 continue
 
-            adaptive = cv2.adaptiveThreshold(
-                clahe,
-                255,
-                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY,
-                self._config_value("adaptive_block_size", 31),
-                self._config_value("adaptive_c", 4),
-            )
+            adaptive = self._adaptive_threshold(clahe)
             yield PreprocessedFrame(f"adaptive_threshold_{width}", adaptive, scale)
 
             if self._config_value("invert_candidate_enabled", True):
@@ -94,25 +87,18 @@ class QRPreprocessor:
             target_width=min(int(self._config_value("detection_width", 640)), 640),
         )
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if len(small.shape) == 3 else small
-        gray = self._with_quiet_zone(gray)
+        gray = self._safe_gray_image(self._with_quiet_zone(gray))
         yield PreprocessedFrame("opencv_gray", gray, scale)
 
         if not self._config_value("preprocessing_enabled", True):
             return
 
-        clahe = self._clahe.apply(gray) if self._clahe is not None else gray
+        clahe = self._apply_clahe(gray)
         yield PreprocessedFrame("opencv_clahe", clahe, scale)
         if not self._should_try_expensive(attempt_index):
             return
 
-        adaptive = cv2.adaptiveThreshold(
-            clahe,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            self._config_value("adaptive_block_size", 31),
-            self._config_value("adaptive_c", 4),
-        )
+        adaptive = self._adaptive_threshold(clahe)
         yield PreprocessedFrame("opencv_adaptive_threshold", adaptive, scale)
 
     def _should_try_expensive(self, attempt_index: int) -> bool:
@@ -159,6 +145,37 @@ class QRPreprocessor:
             cv2.BORDER_CONSTANT,
             value=255,
         )
+
+    def _apply_clahe(self, gray):
+        gray = self._safe_gray_image(gray)
+        if self._clahe is None:
+            return gray
+        try:
+            return self._safe_gray_image(self._clahe.apply(gray))
+        except Exception:
+            return gray
+
+    def _adaptive_threshold(self, gray):
+        gray = self._safe_gray_image(gray)
+        block_size = int(self._config_value("adaptive_block_size", 31))
+        if block_size % 2 == 0:
+            block_size += 1
+        block_size = max(3, min(block_size, min(gray.shape[:2]) | 1))
+        return cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            block_size,
+            self._config_value("adaptive_c", 4),
+        )
+
+    def _safe_gray_image(self, image):
+        if len(image.shape) == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if image.dtype != np.uint8:
+            image = image.astype(np.uint8)
+        return np.ascontiguousarray(image)
 
     def _center_roi(self, frame):
         if not self._config_value("roi_enabled", True):
