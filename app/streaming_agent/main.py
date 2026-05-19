@@ -107,9 +107,11 @@ class StreamingAgent:
         if overlap:
             logger.warning(
                 "QR GPIO pins overlap with detection LED pins: %s. "
-                "Set QR_SUCCESS_GPIO_PIN/QR_FAILURE_GPIO_PIN or update detection LED pins if this hardware uses relays.",
+                "Removing overlapping pins from detection LED controller so QR GPIO has ownership. "
+                "Set DETECTION_LED_PINS or QR_SUCCESS_GPIO_PIN/QR_FAILURE_GPIO_PIN to separate wiring for both features.",
                 overlap,
             )
+            self.led_controller.pins = tuple(pin for pin in self.led_controller.pins if pin not in overlap)
 
     def _handle_qr_detected(self, payload):
         """One-time scan event hook for telemetry, MQTT fanout, or local audit actions."""
