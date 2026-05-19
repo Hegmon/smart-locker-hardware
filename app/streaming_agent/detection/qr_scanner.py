@@ -213,6 +213,8 @@ class QRScanner:
         self._qr_attention_until = 0.0
         self._last_debug_frame_saved_at = 0.0
         self._pyzbar_unavailable_logged = False
+        self._opencv_worker_running = False
+        self._opencv_worker_lock = threading.Lock()
 
     @property
     def latest_result(self) -> QRScanResult | None:
@@ -241,6 +243,11 @@ class QRScanner:
             self._detector.setEpsY(self.config.qr_detector_eps_y)
         if self.video_device and self.config.autofocus_enabled:
             self.camera_controls.prepare_for_qr_scan(self.video_device, reason="QR scanner startup", force=True)
+        if pyzbar_decode is None and getattr(self.config, "pyzbar_enabled", True):
+            logger.error(
+                "Fast QR scanner is not available because pyzbar/libzbar is missing. "
+                "Install with: sudo apt install -y libzbar0 && pip install pyzbar"
+            )
         self.camera_manager.start()
         self.gpio_controller.start()
         self._running = True
@@ -328,9 +335,7 @@ class QRScanner:
 
         attempt_index = self.metrics.detection_attempts
         for candidate in self.preprocessor.candidates(frame, attempt_index=attempt_index):
-            decoded, points = self._detect_candidate(candidate.image, attempt_index=attempt_index)
-            if points is not None:
-                self._mark_qr_attention()
+            decoded = self._detect_with_pyzbar(candidate.image)
             if decoded:
                 with self._lock:
                     self.metrics.detections += 1
@@ -338,22 +343,62 @@ class QRScanner:
                 self._maybe_save_debug_frame(frame, "decoded")
                 return decoded, True, metrics
 
+        self._maybe_start_opencv_fallback(frame.copy(), attempt_index)
+
         with self._lock:
             self.metrics.last_detection_ms = (time.perf_counter() - started_at) * 1000.0
         self._maybe_save_debug_frame(frame, "latest_no_decode")
         return None, False, metrics
 
-    def _detect_candidate(self, image, attempt_index: int):
-        decoded = self._detect_with_pyzbar(image)
-        if decoded:
-            return decoded, None
-
+    def _maybe_start_opencv_fallback(self, frame, attempt_index: int):
         opencv_every_n = max(1, int(getattr(self.config, "opencv_fallback_every_n", 5)))
-        if attempt_index % opencv_every_n != 0:
-            return None, None
+        opencv_max_candidates = max(0, int(getattr(self.config, "opencv_max_candidates", 1)))
+        if not opencv_max_candidates or attempt_index % opencv_every_n != 0:
+            return
 
+        with self._opencv_worker_lock:
+            if self._opencv_worker_running:
+                return
+            self._opencv_worker_running = True
+
+        threading.Thread(
+            target=self._opencv_fallback_worker,
+            args=(frame, attempt_index, opencv_max_candidates),
+            daemon=True,
+            name="qr-opencv-fallback",
+        ).start()
+
+    def _opencv_fallback_worker(self, frame, attempt_index: int, max_candidates: int):
+        started_at = time.perf_counter()
         try:
-            ok, points = self._detector.detect(image)
+            detector = cv2.QRCodeDetector()
+            if hasattr(detector, "setEpsX"):
+                detector.setEpsX(self.config.qr_detector_eps_x)
+            if hasattr(detector, "setEpsY"):
+                detector.setEpsY(self.config.qr_detector_eps_y)
+            for index, candidate in enumerate(self.preprocessor.opencv_candidates(frame, attempt_index=attempt_index)):
+                if index >= max_candidates or not self._running:
+                    break
+                decoded, points = self._detect_with_opencv(candidate.image, detector=detector)
+                if points is not None:
+                    self._mark_qr_attention()
+                if decoded:
+                    with self._lock:
+                        self.metrics.detections += 1
+                        self.metrics.last_detection_ms = (time.perf_counter() - started_at) * 1000.0
+                    self._maybe_save_debug_frame(frame, "decoded_opencv")
+                    self._handle_decoded_value(decoded)
+                    return
+        except Exception:
+            logger.exception("QR OpenCV fallback worker failed")
+        finally:
+            with self._opencv_worker_lock:
+                self._opencv_worker_running = False
+
+    def _detect_with_opencv(self, image, detector=None):
+        detector = detector or self._detector
+        try:
+            ok, points = detector.detect(image)
         except Exception:
             logger.exception("OpenCV QR detect failed")
             return None, None
@@ -361,7 +406,7 @@ class QRScanner:
             return None, None
 
         try:
-            decoded, _straight = self._detector.decode(image, points)
+            decoded, _straight = detector.decode(image, points)
         except Exception:
             logger.exception("OpenCV QR decode failed")
             return None, points
