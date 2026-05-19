@@ -76,6 +76,7 @@ class QRPreprocessor:
 
             if self._config_value("invert_candidate_enabled", True):
                 yield PreprocessedFrame(f"adaptive_threshold_inverted_{width}", cv2.bitwise_not(adaptive), scale)
+            break
 
     def opencv_candidates(self, frame, attempt_index: int = 0) -> Iterable[PreprocessedFrame]:
         if cv2 is None or np is None:
