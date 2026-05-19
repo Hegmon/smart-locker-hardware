@@ -15,8 +15,9 @@ except Exception:
     np = None
 
 try:
-    from pyzbar.pyzbar import decode as pyzbar_decode
+    from pyzbar.pyzbar import ZBarSymbol, decode as pyzbar_decode
 except Exception:
+    ZBarSymbol = None
     pyzbar_decode = None
 
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
@@ -48,8 +49,11 @@ QR_DECODE_MODE = os.getenv("QR_DECODE_MODE", "fast").strip().lower()
 QR_UPSCALE_EVERY_N_FRAMES = int(os.getenv("QR_UPSCALE_EVERY_N_FRAMES", "6"))
 QR_PYZBAR_EVERY_N_FRAMES = max(1, int(os.getenv("QR_PYZBAR_EVERY_N_FRAMES", "3")))
 QR_ATTENTION_HOLD_SECONDS = float(os.getenv("QR_ATTENTION_HOLD_SECONDS", "2.5"))
-QR_DETECT_WIDTH = max(240, int(os.getenv("QR_DETECT_WIDTH", "480")))
+QR_DETECT_WIDTH = max(240, int(os.getenv("QR_DETECT_WIDTH", "320")))
 QR_ACTIVE_ROI_MARGIN = float(os.getenv("QR_ACTIVE_ROI_MARGIN", "0.6"))
+QR_PYZBAR_FRAME_WIDTH = max(320, int(os.getenv("QR_PYZBAR_FRAME_WIDTH", "720")))
+QR_OPENCV_DETECT_EVERY_N_FRAMES = max(1, int(os.getenv("QR_OPENCV_DETECT_EVERY_N_FRAMES", "8")))
+QR_METRICS_WIDTH = max(160, int(os.getenv("QR_METRICS_WIDTH", "320")))
 _IDENTITY_LOCK = threading.Lock()
 _CACHED_QR_DEVICE_ID = None
 _CACHED_QR_LOCKER_ID = None
@@ -259,11 +263,20 @@ class QrScanner:
         self._maybe_save_debug_frame(frame, "latest")
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+        decoded = self._decode_phone_screen_qr(frame, gray)
+        if decoded:
+            return decoded, True, metrics
+
         decoded, qr_seen = self._scan_active_qr_region(frame, gray)
         if decoded:
             return decoded, True, metrics
         if qr_seen:
             return None, True, metrics
+
+        if self._decode_attempts % QR_OPENCV_DETECT_EVERY_N_FRAMES != 0:
+            if QR_SCAN_DEBUG:
+                logger.info("No QR pattern detected in external camera frame")
+            return None, False, metrics
 
         points = self._detect_qr_points(gray)
         if points is None:
@@ -294,6 +307,9 @@ class QrScanner:
 
     def _frame_metrics(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if gray.shape[1] > QR_METRICS_WIDTH:
+            scale = QR_METRICS_WIDTH / float(gray.shape[1])
+            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         return {
             "brightness": float(np.mean(gray)),
             "contrast": float(np.std(gray)),
@@ -349,11 +365,10 @@ class QrScanner:
 
         points = self._detect_qr_points(cropped_gray)
         if points is None:
-            if self._decode_attempts % QR_PYZBAR_EVERY_N_FRAMES == 0:
-                pyzbar_value = self._decode_with_pyzbar(cropped_frame, gray=cropped_gray, prefer_gray=True)
-                if pyzbar_value:
-                    logger.info("QR decoded from active external QR crop using pyzbar")
-                    return pyzbar_value, True
+            pyzbar_value = self._decode_with_pyzbar(cropped_frame, gray=cropped_gray, prefer_gray=True)
+            if pyzbar_value:
+                logger.info("QR decoded from active external QR crop using pyzbar")
+                return pyzbar_value, True
             return None, False
 
         self._mark_qr_attention()
@@ -367,6 +382,24 @@ class QrScanner:
             logger.info("QR decoded from active external QR crop")
             return decoded, True
         return None, True
+
+    def _decode_phone_screen_qr(self, frame, gray):
+        pyzbar_result = self._decode_with_pyzbar(
+            frame,
+            gray=gray,
+            prefer_gray=True,
+            scaled_width=QR_PYZBAR_FRAME_WIDTH,
+            return_rect=True,
+        )
+        if not pyzbar_result:
+            return None
+
+        value, rect = pyzbar_result
+        if rect is not None:
+            self._active_qr_rect = self._expand_rect(rect, frame.shape, margin=QR_ACTIVE_ROI_MARGIN)
+        self._mark_qr_attention()
+        logger.info("QR decoded from phone screen frame using pyzbar")
+        return value
 
     def _crop_active_region(self, frame, gray):
         if self._active_qr_rect is None:
@@ -626,7 +659,7 @@ class QrScanner:
 
         return None, points
 
-    def _decode_with_pyzbar(self, frame, *, gray=None, prefer_gray=False):
+    def _decode_with_pyzbar(self, frame, *, gray=None, prefer_gray=False, scaled_width=None, return_rect=False):
         if pyzbar_decode is None:
             if QR_SCAN_DEBUG and not self._pyzbar_unavailable_logged:
                 self._pyzbar_unavailable_logged = True
@@ -634,23 +667,40 @@ class QrScanner:
             return None
 
         candidates = []
+        scale = 1.0
         if len(frame.shape) == 3:
             gray = gray if gray is not None else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            if prefer_gray:
-                candidates.append(("gray", gray))
-                candidates.append(("bgr", frame))
+            if scaled_width and gray.shape[1] > scaled_width:
+                scale = scaled_width / float(gray.shape[1])
+                small_gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                small_frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
             else:
-                candidates.append(("bgr", frame))
-                candidates.append(("gray", gray))
+                small_gray = gray
+                small_frame = frame
+            if prefer_gray:
+                candidates.append(("gray", small_gray, scale))
+                candidates.append(("bgr", small_frame, scale))
+            else:
+                candidates.append(("bgr", small_frame, scale))
+                candidates.append(("gray", small_gray, scale))
             if QR_SHARPEN_ENABLED:
-                blurred = cv2.GaussianBlur(gray, (0, 0), 1.0)
-                candidates.append(("sharpened", cv2.addWeighted(gray, 1.7, blurred, -0.7, 0)))
+                blurred = cv2.GaussianBlur(small_gray, (0, 0), 1.0)
+                candidates.append(("sharpened", cv2.addWeighted(small_gray, 1.7, blurred, -0.7, 0), scale))
+            if self._decode_attempts % QR_PYZBAR_EVERY_N_FRAMES == 0:
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(small_gray)
+                candidates.append(("clahe", clahe, scale))
         else:
-            candidates.append(("gray", frame))
+            if scaled_width and frame.shape[1] > scaled_width:
+                scale = scaled_width / float(frame.shape[1])
+                frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            candidates.append(("gray", frame, scale))
 
-        for candidate_name, candidate in candidates:
+        for candidate_name, candidate, candidate_scale in candidates:
             try:
-                decoded_items = pyzbar_decode(candidate)
+                if ZBarSymbol is not None:
+                    decoded_items = pyzbar_decode(candidate, symbols=[ZBarSymbol.QRCODE])
+                else:
+                    decoded_items = pyzbar_decode(candidate)
             except Exception as exc:
                 logger.warning("pyzbar QR fallback failed: %s", exc)
                 return None
@@ -659,8 +709,44 @@ class QrScanner:
                 value = item.data.decode("utf-8", errors="replace").strip()
                 if value:
                     logger.info("QR decoded from external camera using pyzbar %s fallback", candidate_name)
-                    return value
+                    rect = self._pyzbar_item_rect(item, candidate_scale)
+                    return (value, rect) if return_rect else value
         return None
+
+    def _pyzbar_item_rect(self, item, scale):
+        points = []
+        polygon = getattr(item, "polygon", None)
+        if polygon:
+            points = [(point.x / scale, point.y / scale) for point in polygon]
+        elif getattr(item, "rect", None):
+            rect = item.rect
+            points = [
+                (rect.left / scale, rect.top / scale),
+                ((rect.left + rect.width) / scale, rect.top / scale),
+                ((rect.left + rect.width) / scale, (rect.top + rect.height) / scale),
+                (rect.left / scale, (rect.top + rect.height) / scale),
+            ]
+        if not points:
+            return None
+        pts = np.asarray(points, dtype=np.float32)
+        x_min, y_min = np.min(pts, axis=0)
+        x_max, y_max = np.max(pts, axis=0)
+        return int(x_min), int(y_min), int(x_max), int(y_max)
+
+    def _expand_rect(self, rect, frame_shape, *, margin=0.35):
+        x0, y0, x1, y1 = rect
+        width = max(1, x1 - x0)
+        height = max(1, y1 - y0)
+        pad = max(width, height) * margin
+        expanded = (
+            max(0, int(x0 - pad)),
+            max(0, int(y0 - pad)),
+            min(frame_shape[1], int(x1 + pad)),
+            min(frame_shape[0], int(y1 + pad)),
+        )
+        if expanded[2] <= expanded[0] or expanded[3] <= expanded[1]:
+            return None
+        return expanded
 
     def _mark_qr_attention(self):
         until = time.monotonic() + QR_ATTENTION_HOLD_SECONDS
