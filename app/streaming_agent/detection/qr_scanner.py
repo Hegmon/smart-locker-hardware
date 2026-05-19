@@ -88,10 +88,17 @@ class QRScannerMetrics:
 class QrGpioController:
     """Independent BCM GPIO control for QR verification result pins."""
 
-    def __init__(self, success_pin: int = 15, failure_pin: int = 14, failure_signal_seconds: float = 2.0):
+    def __init__(
+        self,
+        success_pin: int = 15,
+        failure_pin: int = 14,
+        failure_signal_seconds: float = 2.0,
+        active_low: bool = False,
+    ):
         self.success_pin = success_pin
         self.failure_pin = failure_pin
         self.failure_signal_seconds = failure_signal_seconds
+        self.active_low = active_low
         self._gpio = None
         self._enabled = False
         self._lock = threading.Lock()
@@ -108,10 +115,15 @@ class QrGpioController:
         self._gpio = GPIO
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
-        GPIO.setup(self.success_pin, GPIO.OUT, initial=GPIO.LOW)
-        GPIO.setup(self.failure_pin, GPIO.OUT, initial=GPIO.LOW)
+        GPIO.setup(self.success_pin, GPIO.OUT, initial=self._inactive_state())
+        GPIO.setup(self.failure_pin, GPIO.OUT, initial=self._inactive_state())
         self._enabled = True
-        logger.info("QR GPIO initialized on BCM pins success=%s failure=%s", self.success_pin, self.failure_pin)
+        logger.info(
+            "QR GPIO initialized on BCM pins success=%s failure=%s active_low=%s",
+            self.success_pin,
+            self.failure_pin,
+            self.active_low,
+        )
 
     def pulse_success(self, duration_seconds):
         self._pulse(self.success_pin, duration_seconds, "success/open")
@@ -124,8 +136,8 @@ class QrGpioController:
             return
         with self._lock:
             try:
-                self._gpio.output(self.success_pin, self._gpio.LOW)
-                self._gpio.output(self.failure_pin, self._gpio.LOW)
+                self._gpio.output(self.success_pin, self._inactive_state())
+                self._gpio.output(self.failure_pin, self._inactive_state())
                 self._gpio.cleanup((self.success_pin, self.failure_pin))
             except Exception:
                 logger.exception("QR GPIO cleanup failed")
@@ -141,14 +153,24 @@ class QrGpioController:
         def worker():
             with self._lock:
                 logger.info("QR GPIO ON: %s pin=%s duration=%ss", action_name, pin, duration_seconds)
-                self._gpio.output(pin, self._gpio.HIGH)
+                self._gpio.output(pin, self._active_state())
                 try:
                     time.sleep(duration_seconds)
                 finally:
-                    self._gpio.output(pin, self._gpio.LOW)
+                    self._gpio.output(pin, self._inactive_state())
                     logger.info("QR GPIO OFF: %s pin=%s", action_name, pin)
 
         threading.Thread(target=worker, daemon=True, name=f"qr-gpio-{action_name}").start()
+
+    def _active_state(self):
+        if self._gpio is None:
+            return None
+        return self._gpio.LOW if self.active_low else self._gpio.HIGH
+
+    def _inactive_state(self):
+        if self._gpio is None:
+            return None
+        return self._gpio.HIGH if self.active_low else self._gpio.LOW
 
 
 class BackendQRValidator:
@@ -186,9 +208,10 @@ class QRScanner:
         self.video_device = video_device
         self.camera_controls = camera_controls or CameraControlManager()
         self.gpio_controller = gpio_controller or QrGpioController(
-            self.config.success_gpio_pin,
-            self.config.failure_gpio_pin,
-            self.config.failure_signal_seconds,
+            getattr(self.config, "success_gpio_pin", 15),
+            getattr(self.config, "failure_gpio_pin", 14),
+            getattr(self.config, "failure_signal_seconds", 2.0),
+            getattr(self.config, "gpio_active_low", False),
         )
         self._owns_gpio_controller = gpio_controller is None
         self.on_qr_detected = on_qr_detected
@@ -215,6 +238,7 @@ class QRScanner:
         self._pyzbar_unavailable_logged = False
         self._opencv_worker_running = False
         self._opencv_worker_lock = threading.Lock()
+        self._duplicate_log_last_at = {}
 
     @property
     def latest_result(self) -> QRScanResult | None:
@@ -500,7 +524,7 @@ class QRScanner:
                 return False
             if debounce_key in self._token_cache or debounce_key in self._processing_keys:
                 self.metrics.duplicate_suppressed += 1
-                logger.info("Suppressed duplicate QR token during replay window: %s", debounce_key)
+                self._log_duplicate_suppressed(debounce_key)
                 return False
             self._processing_keys.add(debounce_key)
             self._token_cache[debounce_key] = now + self.config.duplicate_cache_seconds
@@ -515,15 +539,33 @@ class QRScanner:
             if self.on_qr_detected:
                 self.on_qr_detected(result.payload)
 
+            logger.info(
+                "QR backend validation started: url=%s token=%s payload_keys=%s",
+                self.config.backend_verify_url,
+                result.debounce_key,
+                sorted(result.payload.keys()),
+            )
             backend_response = self.backend_validator(result.payload) if self.backend_validator else None
+            logger.info("QR backend validation response: %s", summarize_backend_response(backend_response))
             accepted = should_open_locker(backend_response)
             duration = unlock_duration(backend_response, self.config) if accepted else 0
             if accepted:
+                logger.info(
+                    "QR backend accepted token=%s; pulsing success GPIO pin=%s duration=%ss",
+                    result.debounce_key,
+                    self.config.success_gpio_pin,
+                    duration,
+                )
                 self.gpio_controller.pulse_success(duration)
                 with self._lock:
                     self.metrics.backend_success += 1
                 write_scan_log(result.raw_value, backend_response, f"success_gpio_{self.config.success_gpio_pin}_{duration}s")
             else:
+                logger.warning(
+                    "QR backend denied token=%s; pulsing failure GPIO pin=%s",
+                    result.debounce_key,
+                    self.config.failure_gpio_pin,
+                )
                 self.gpio_controller.pulse_failure()
                 with self._lock:
                     self.metrics.backend_failure += 1
@@ -540,6 +582,18 @@ class QRScanner:
         finally:
             with self._lock:
                 self._processing_keys.discard(result.debounce_key)
+
+    def _log_duplicate_suppressed(self, debounce_key: str):
+        now = time.monotonic()
+        last_at = self._duplicate_log_last_at.get(debounce_key, 0.0)
+        if now - last_at < 3.0:
+            return
+        self._duplicate_log_last_at[debounce_key] = now
+        logger.info(
+            "Suppressed duplicate QR token during replay window: %s. "
+            "This token was already validated recently; set QR_DUPLICATE_CACHE_SECONDS lower for repeated lab tests.",
+            debounce_key,
+        )
 
     def _publish_result(self, result, *, backend_response, accepted, error=None):
         updated = QRScanResult(
@@ -783,8 +837,30 @@ def summarize_qr_value(raw_value):
     return " ".join(parts) or f"json_keys={sorted(parsed.keys())}"
 
 
+def summarize_backend_response(response):
+    if not isinstance(response, dict):
+        return type(response).__name__
+
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    summary = {
+        "success": response.get("success"),
+        "can_open_locker": data.get("can_open_locker"),
+        "unlock_duration_seconds": data.get("unlock_duration_seconds"),
+    }
+    message = response.get("message") or response.get("detail") or response.get("error")
+    if message:
+        summary["message"] = str(message)[:200]
+    return summary
+
+
 def verify_qr(payload, *, config: QRScannerConfig | None = None):
     scanner_config = config or QRScannerConfig.from_env()
+    logger.info(
+        "Posting QR payload to backend: url=%s timeout=%.1fs payload_keys=%s",
+        scanner_config.backend_verify_url,
+        scanner_config.backend_timeout_seconds,
+        sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__,
+    )
     response = requests.post(
         scanner_config.backend_verify_url,
         json=payload,
