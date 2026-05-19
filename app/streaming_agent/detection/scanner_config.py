@@ -101,6 +101,7 @@ class QRScannerConfig:
     backend_timeout_seconds: float = 10.0
     success_gpio_pin: int = 15
     failure_gpio_pin: int = 14
+    gpio_active_low: bool = False
     default_unlock_seconds: int = 5
     failure_signal_seconds: float = 2.0
     attention_hold_seconds: float = 2.5
@@ -157,6 +158,7 @@ class QRScannerConfig:
             backend_timeout_seconds=_env_float("QR_VERIFY_TIMEOUT_SECONDS", 10.0, minimum=0.5),
             success_gpio_pin=_env_int("QR_SUCCESS_GPIO_PIN", 15),
             failure_gpio_pin=_env_int("QR_FAILURE_GPIO_PIN", 14),
+            gpio_active_low=_env_bool("QR_GPIO_ACTIVE_LOW", False),
             default_unlock_seconds=_env_int("QR_DEFAULT_UNLOCK_SECONDS", 5, minimum=1),
             failure_signal_seconds=_env_float("QR_FAILURE_SIGNAL_SECONDS", 2.0, minimum=0.1),
             attention_hold_seconds=_env_float("QR_ATTENTION_HOLD_SECONDS", 2.5, minimum=0.1),
