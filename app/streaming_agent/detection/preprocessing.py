@@ -50,11 +50,12 @@ class QRPreprocessor:
                 tileGridSize=config.clahe_tile_grid_size,
             )
 
-    def candidates(self, frame) -> Iterable[PreprocessedFrame]:
+    def candidates(self, frame, attempt_index: int = 0) -> Iterable[PreprocessedFrame]:
         if cv2 is None or np is None:
             return
 
-        small, scale = self._resize_for_detection(frame)
+        working = self._center_roi(frame)
+        small, scale = self._resize_for_detection(working)
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if len(small.shape) == 3 else small
 
         yield PreprocessedFrame("gray", gray, scale)
@@ -63,6 +64,10 @@ class QRPreprocessor:
 
         clahe = self._clahe.apply(gray) if self._clahe is not None else gray
         yield PreprocessedFrame("clahe", clahe, scale)
+
+        should_try_expensive = attempt_index % self.config.expensive_preprocess_every_n == 0
+        if not should_try_expensive:
+            return
 
         adaptive = cv2.adaptiveThreshold(
             clahe,
@@ -83,7 +88,10 @@ class QRPreprocessor:
         if cv2 is None or np is None:
             return FrameQualityMetrics.empty()
         try:
-            small, _ = self._resize_for_detection(frame, target_width=min(self.config.detection_width, 320))
+            small, _ = self._resize_for_detection(
+                self._center_roi(frame),
+                target_width=min(self.config.detection_width, 320),
+            )
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if len(small.shape) == 3 else small
             return FrameQualityMetrics(
                 brightness=float(np.mean(gray)),
@@ -100,3 +108,14 @@ class QRPreprocessor:
             return frame, 1.0
         scale = target / float(width)
         return cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA), scale
+
+    def _center_roi(self, frame):
+        if not self.config.roi_enabled:
+            return frame
+
+        height, width = frame.shape[:2]
+        roi_width = min(width, max(1, int(width * min(self.config.roi_width_ratio, 1.0))))
+        roi_height = min(height, max(1, int(height * min(self.config.roi_height_ratio, 1.0))))
+        x0 = max(0, (width - roi_width) // 2)
+        y0 = max(0, (height - roi_height) // 2)
+        return frame[y0 : y0 + roi_height, x0 : x0 + roi_width]
