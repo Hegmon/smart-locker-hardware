@@ -64,7 +64,7 @@ class StreamingAgent:
         self._warn_if_gpio_pins_overlap()
         self.tamper_detectors = []
         for role, frame_buffer in self.stream_manager.frame_buffers.items():
-            if role == "external" and os.getenv("EXTERNAL_TAMPER_DETECTION_ENABLED", "false").strip().lower() not in {
+            if role == "external" and os.getenv("EXTERNAL_TAMPER_DETECTION_ENABLED", "true").strip().lower() not in {
                 "1",
                 "true",
                 "yes",
@@ -105,13 +105,20 @@ class StreamingAgent:
         }
         overlap = sorted(pin for pin in detection_pins.intersection(qr_pins) if pin is not None)
         if overlap:
+            if os.getenv("QR_GPIO_EXCLUSIVE", "false").strip().lower() in {"1", "true", "yes", "on"}:
+                logger.warning(
+                    "QR GPIO pins overlap with detection LED pins: %s. "
+                    "QR_GPIO_EXCLUSIVE=true, so overlapping pins are removed from detection LEDs.",
+                    overlap,
+                )
+                self.led_controller.pins = tuple(pin for pin in self.led_controller.pins if pin not in overlap)
+                return
             logger.warning(
                 "QR GPIO pins overlap with detection LED pins: %s. "
-                "Removing overlapping pins from detection LED controller so QR GPIO has ownership. "
-                "Set DETECTION_LED_PINS or QR_SUCCESS_GPIO_PIN/QR_FAILURE_GPIO_PIN to separate wiring for both features.",
+                "Both QR and person/tamper detection LEDs will drive these pins. "
+                "For independent wiring, set DETECTION_LED_PINS or QR_SUCCESS_GPIO_PIN/QR_FAILURE_GPIO_PIN differently.",
                 overlap,
             )
-            self.led_controller.pins = tuple(pin for pin in self.led_controller.pins if pin not in overlap)
 
     def _handle_qr_detected(self, payload):
         """One-time scan event hook for telemetry, MQTT fanout, or local audit actions."""
