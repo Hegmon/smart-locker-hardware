@@ -26,6 +26,7 @@ class TamperDetection:
         blur_threshold=20.0,
         edge_density_threshold=0.01,
         large_change_threshold=0.55,
+        skip_when=None,
     ):
         self.frame_buffer = frame_buffer
         self.camera_role = camera_role
@@ -39,6 +40,7 @@ class TamperDetection:
         self.blur_threshold = float(blur_threshold)
         self.edge_density_threshold = float(edge_density_threshold)
         self.large_change_threshold = float(large_change_threshold)
+        self.skip_when = skip_when
 
         self._running = False
         self._thread = None
@@ -94,11 +96,31 @@ class TamperDetection:
                 continue
 
             try:
+                if self._should_skip_detection():
+                    self._pause_tamper_state("QR pattern active")
+                    continue
                 tampered, reason = self._detect_tamper(frame_bytes)
                 self._update_tamper_state(tampered, reason)
                 self._log_fps()
             except Exception:
                 logger.exception("Tamper detection failed for %s camera", self.camera_role)
+
+    def _should_skip_detection(self):
+        if self.skip_when is None:
+            return False
+        try:
+            return bool(self.skip_when())
+        except Exception:
+            logger.exception("Tamper skip check failed for %s camera", self.camera_role)
+            return False
+
+    def _pause_tamper_state(self, reason):
+        self._tamper_started_at = None
+        self._last_tamper_seen_at = 0.0
+        if self._tamper_active:
+            self._tamper_active = False
+            self.led_controller.set_tamper_active(self.camera_role, False)
+            logger.info("Tamper paused for %s camera while %s", self.camera_role, reason)
 
     def _detect_tamper(self, frame_bytes):
         frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
