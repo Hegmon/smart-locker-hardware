@@ -39,13 +39,15 @@ PROCESS_EVERY_N_FRAMES = int(os.getenv("QR_PROCESS_EVERY_N_FRAMES", "1"))
 NO_FRAME_LOG_SECONDS = float(os.getenv("QR_NO_FRAME_LOG_SECONDS", "5"))
 QR_SCAN_DEBUG = os.getenv("QR_SCAN_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
 QR_SHARPEN_ENABLED = os.getenv("QR_SHARPEN_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
-QR_FOCUS_RETRY_SECONDS = float(os.getenv("QR_FOCUS_RETRY_SECONDS", "8"))
+QR_FOCUS_RETRY_SECONDS = float(os.getenv("QR_FOCUS_RETRY_SECONDS", "1.5"))
 QR_STATUS_LOG_SECONDS = float(os.getenv("QR_STATUS_LOG_SECONDS", "3"))
 QR_SAVE_DEBUG_FRAMES = os.getenv("QR_SAVE_DEBUG_FRAMES", "false").strip().lower() in {"1", "true", "yes", "on"}
 QR_DEBUG_FRAME_DIR = Path(os.getenv("QR_DEBUG_FRAME_DIR", "logs/qr_debug_frames"))
 QR_DEBUG_SAVE_INTERVAL_SECONDS = float(os.getenv("QR_DEBUG_SAVE_INTERVAL_SECONDS", "5"))
 QR_DECODE_MODE = os.getenv("QR_DECODE_MODE", "fast").strip().lower()
 QR_UPSCALE_EVERY_N_FRAMES = int(os.getenv("QR_UPSCALE_EVERY_N_FRAMES", "6"))
+QR_PYZBAR_EVERY_N_FRAMES = max(1, int(os.getenv("QR_PYZBAR_EVERY_N_FRAMES", "3")))
+QR_ATTENTION_HOLD_SECONDS = float(os.getenv("QR_ATTENTION_HOLD_SECONDS", "2.5"))
 _IDENTITY_LOCK = threading.Lock()
 _CACHED_QR_DEVICE_ID = None
 _CACHED_QR_LOCKER_ID = None
@@ -149,6 +151,8 @@ class QrScanner:
         self._scan_lock = threading.Lock()
         self._processing_keys = set()
         self._decode_attempts = 0
+        self._qr_attention_until = 0.0
+        self._qr_attention_lock = threading.Lock()
 
     def start(self):
         if self._running:
@@ -212,6 +216,7 @@ class QrScanner:
                     )
                 qr_value, qr_seen, metrics = self._decode_qr(frame_bytes)
                 if qr_value:
+                    self._mark_qr_attention()
                     self._queue_scan(qr_value)
                 elif qr_seen and self.video_device:
                     self._maybe_retry_focus()
@@ -244,18 +249,49 @@ class QrScanner:
         metrics = self._frame_metrics(frame)
         self._maybe_save_debug_frame(frame, "latest")
         qr_seen = False
+        qr_points = None
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        pyzbar_value = self._decode_with_pyzbar(frame)
-        if pyzbar_value:
-            return pyzbar_value, True, metrics
-
-        for candidate_name, candidate in self._frame_candidates(frame):
+        for candidate_name, candidate in (("gray", gray), ("bgr", frame)):
             decoded, points = self._decode_candidate(candidate)
-            qr_seen = qr_seen or points is not None
+            if points is not None:
+                qr_seen = True
+                qr_points = points
+                self._mark_qr_attention()
+                if self.video_device:
+                    self._maybe_retry_focus()
             if decoded:
                 if candidate_name != "bgr":
-                    logger.info("QR decoded from %s preprocessed external frame", candidate_name)
+                    logger.info("QR decoded from %s external frame", candidate_name)
                 return decoded, True, metrics
+
+        if qr_seen:
+            for candidate_name, candidate in self._focused_candidates(frame, gray, qr_points):
+                decoded, extra_points = self._decode_candidate(candidate)
+                if extra_points is not None:
+                    self._mark_qr_attention()
+                if decoded:
+                    logger.info("QR decoded from focused %s external frame", candidate_name)
+                    return decoded, True, metrics
+
+        if qr_seen or self._decode_attempts % QR_PYZBAR_EVERY_N_FRAMES == 0:
+            pyzbar_value = self._decode_with_pyzbar(frame, gray=gray, prefer_gray=True)
+            if pyzbar_value:
+                self._mark_qr_attention()
+                return pyzbar_value, True, metrics
+
+        for candidate_name, candidate in self._frame_candidates(frame, gray=gray, qr_seen=qr_seen):
+            decoded, points = self._decode_candidate(candidate)
+            if points is not None:
+                qr_seen = True
+                qr_points = points
+                self._mark_qr_attention()
+                if self.video_device:
+                    self._maybe_retry_focus()
+            if decoded:
+                logger.info("QR decoded from %s preprocessed external frame", candidate_name)
+                return decoded, True, metrics
+
         if qr_seen:
             now = time.monotonic()
             if now - self._last_pattern_decode_failed_log_at >= QR_STATUS_LOG_SECONDS:
@@ -281,15 +317,21 @@ class QrScanner:
             "blur": float(cv2.Laplacian(gray, cv2.CV_64F).var()),
         }
 
-    def _frame_candidates(self, frame):
-        yield "bgr", frame
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        yield "gray", gray
+    def _frame_candidates(self, frame, *, gray=None, qr_seen=False):
+        if gray is None:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        should_try_expensive = (
+            qr_seen
+            or QR_DECODE_MODE == "thorough"
+            or self._decode_attempts % QR_UPSCALE_EVERY_N_FRAMES == 0
+        )
+        if not should_try_expensive:
+            return
+
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
         yield "clahe", clahe
 
-        should_try_expensive = QR_DECODE_MODE == "thorough" or self._decode_attempts % QR_UPSCALE_EVERY_N_FRAMES == 0
-        if should_try_expensive:
+        if QR_DECODE_MODE == "thorough" or self._decode_attempts % QR_UPSCALE_EVERY_N_FRAMES == 0:
             downscaled = cv2.resize(frame, None, fx=0.75, fy=0.75, interpolation=cv2.INTER_AREA)
             yield "downscaled_0_75", downscaled
             upscaled = cv2.resize(frame, None, fx=1.35, fy=1.35, interpolation=cv2.INTER_CUBIC)
@@ -312,6 +354,43 @@ class QrScanner:
             otsu_source = cv2.GaussianBlur(clahe, (3, 3), 0)
             _threshold, otsu = cv2.threshold(otsu_source, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             yield "otsu_threshold", otsu
+
+    def _focused_candidates(self, frame, gray, points):
+        roi = self._qr_roi(frame, points)
+        if roi is None:
+            return
+
+        roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        yield "roi_gray", roi_gray
+        yield "roi_upscaled", cv2.resize(roi_gray, None, fx=1.8, fy=1.8, interpolation=cv2.INTER_CUBIC)
+        if QR_SHARPEN_ENABLED:
+            blurred = cv2.GaussianBlur(roi_gray, (0, 0), 1.0)
+            yield "roi_sharpened", cv2.addWeighted(roi_gray, 1.8, blurred, -0.8, 0)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(roi_gray)
+        yield "roi_clahe", clahe
+
+    def _qr_roi(self, frame, points):
+        if points is None:
+            return None
+        pts = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        if pts.size == 0:
+            return None
+
+        x_min, y_min = np.min(pts, axis=0)
+        x_max, y_max = np.max(pts, axis=0)
+        width = x_max - x_min
+        height = y_max - y_min
+        if width < 12 or height < 12:
+            return None
+
+        margin = max(width, height) * 0.35
+        x0 = max(0, int(x_min - margin))
+        y0 = max(0, int(y_min - margin))
+        x1 = min(frame.shape[1], int(x_max + margin))
+        y1 = min(frame.shape[0], int(y_max + margin))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return frame[y0:y1, x0:x1]
 
     def _decode_candidate(self, frame):
         decoded, points, _straight = self._detector.detectAndDecode(frame)
@@ -339,20 +418,27 @@ class QrScanner:
 
         return None, points
 
-    def _decode_with_pyzbar(self, frame):
+    def _decode_with_pyzbar(self, frame, *, gray=None, prefer_gray=False):
         if pyzbar_decode is None:
             if QR_SCAN_DEBUG and not self._pyzbar_unavailable_logged:
                 self._pyzbar_unavailable_logged = True
                 logger.info("Skipping pyzbar fallback because pyzbar/libzbar is not installed")
             return None
 
-        candidates = [("bgr", frame)]
+        candidates = []
         if len(frame.shape) == 3:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            candidates.append(("gray", gray))
+            gray = gray if gray is not None else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if prefer_gray:
+                candidates.append(("gray", gray))
+                candidates.append(("bgr", frame))
+            else:
+                candidates.append(("bgr", frame))
+                candidates.append(("gray", gray))
             if QR_SHARPEN_ENABLED:
                 blurred = cv2.GaussianBlur(gray, (0, 0), 1.0)
                 candidates.append(("sharpened", cv2.addWeighted(gray, 1.7, blurred, -0.7, 0)))
+        else:
+            candidates.append(("gray", frame))
 
         for candidate_name, candidate in candidates:
             try:
@@ -367,6 +453,16 @@ class QrScanner:
                     logger.info("QR decoded from external camera using pyzbar %s fallback", candidate_name)
                     return value
         return None
+
+    def _mark_qr_attention(self):
+        until = time.monotonic() + QR_ATTENTION_HOLD_SECONDS
+        with self._qr_attention_lock:
+            if until > self._qr_attention_until:
+                self._qr_attention_until = until
+
+    def is_qr_attention_active(self):
+        with self._qr_attention_lock:
+            return time.monotonic() < self._qr_attention_until
 
     def _maybe_save_debug_frame(self, frame, label):
         if not QR_SAVE_DEBUG_FRAMES or cv2 is None:
