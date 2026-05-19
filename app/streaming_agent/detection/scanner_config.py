@@ -71,12 +71,12 @@ class QRScannerConfig:
     camera_resolution: Tuple[int, int] = (960, 540)
     autofocus_enabled: bool = True
     preprocessing_enabled: bool = True
-    detection_width: int = 640
-    pyzbar_scan_widths: Tuple[int, ...] = (960, 640, 320)
+    detection_width: int = 480
+    pyzbar_scan_widths: Tuple[int, ...] = (640, 480)
     roi_enabled: bool = True
     roi_width_ratio: float = 1.0
     roi_height_ratio: float = 1.0
-    expensive_preprocess_every_n: int = 1
+    expensive_preprocess_every_n: int = 5
     quiet_zone_border_ratio: float = 0.08
     invert_candidate_enabled: bool = True
     pyzbar_enabled: bool = True
@@ -130,12 +130,12 @@ class QRScannerConfig:
             ),
             autofocus_enabled=_env_bool("QR_AUTOFOCUS_ENABLED", True),
             preprocessing_enabled=_env_bool("QR_PREPROCESSING_ENABLED", True),
-            detection_width=_env_int("QR_DETECTION_WIDTH", _env_int("QR_DETECT_WIDTH", 640), minimum=240),
-            pyzbar_scan_widths=_env_int_tuple("QR_PYZBAR_SCAN_WIDTHS", (960, 640, 320), minimum=240),
+            detection_width=_env_int("QR_DETECTION_WIDTH", _env_int("QR_DETECT_WIDTH", 480), minimum=240),
+            pyzbar_scan_widths=_env_int_tuple("QR_PYZBAR_SCAN_WIDTHS", (640, 480), minimum=240),
             roi_enabled=_env_bool("QR_ROI_ENABLED", True),
             roi_width_ratio=_env_float("QR_ROI_WIDTH_RATIO", 1.0, minimum=0.3),
             roi_height_ratio=_env_float("QR_ROI_HEIGHT_RATIO", 1.0, minimum=0.3),
-            expensive_preprocess_every_n=_env_int("QR_EXPENSIVE_PREPROCESS_EVERY_N", 1, minimum=1),
+            expensive_preprocess_every_n=_env_int("QR_EXPENSIVE_PREPROCESS_EVERY_N", 5, minimum=1),
             quiet_zone_border_ratio=_env_float("QR_QUIET_ZONE_BORDER_RATIO", 0.08, minimum=0.0),
             invert_candidate_enabled=_env_bool("QR_INVERT_CANDIDATE_ENABLED", True),
             pyzbar_enabled=_env_bool("QR_PYZBAR_ENABLED", True),
