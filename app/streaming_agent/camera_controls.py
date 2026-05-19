@@ -8,7 +8,7 @@ from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 logger = LoggingManager.get_logger(__name__)
 
 AUTOFOCUS_ENABLED = os.getenv("QR_AUTOFOCUS_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
-AUTOFOCUS_COOLDOWN_SECONDS = float(os.getenv("QR_AUTOFOCUS_COOLDOWN_SECONDS", "3"))
+AUTOFOCUS_COOLDOWN_SECONDS = float(os.getenv("QR_AUTOFOCUS_COOLDOWN_SECONDS", "8"))
 AUTOFOCUS_CONTROLS = (
     "focus_auto=1",
     "focus_automatic_continuous=1",
@@ -23,8 +23,8 @@ QR_CAMERA_CONTROLS = (
     "white_balance_temperature_auto=1",
     "backlight_compensation=0",
 )
-QR_CONTROL_COOLDOWN_SECONDS = float(os.getenv("QR_CAMERA_CONTROL_COOLDOWN_SECONDS", "2"))
-FOCUS_SWEEP_ENABLED = os.getenv("QR_FOCUS_SWEEP_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
+QR_CONTROL_COOLDOWN_SECONDS = float(os.getenv("QR_CAMERA_CONTROL_COOLDOWN_SECONDS", "15"))
+FOCUS_SWEEP_ENABLED = os.getenv("QR_FOCUS_SWEEP_ENABLED", "false").strip().lower() not in {"0", "false", "no"}
 FOCUS_SWEEP_VALUES = tuple(
     int(value.strip())
     for value in os.getenv("QR_FOCUS_SWEEP_VALUES", "0,10,20,30,40,55,70,90,115,145,180,220").split(",")
@@ -130,7 +130,7 @@ class CameraControlManager:
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=2,
+                timeout=0.6,
             )
         except FileNotFoundError:
             logger.warning("v4l2-ctl not found; cannot configure autofocus for %s", video_device)
