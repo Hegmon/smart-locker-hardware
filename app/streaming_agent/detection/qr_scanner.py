@@ -51,10 +51,11 @@ QR_PYZBAR_EVERY_N_FRAMES = max(1, int(os.getenv("QR_PYZBAR_EVERY_N_FRAMES", "3")
 QR_ATTENTION_HOLD_SECONDS = float(os.getenv("QR_ATTENTION_HOLD_SECONDS", "2.5"))
 QR_DETECT_WIDTH = max(240, int(os.getenv("QR_DETECT_WIDTH", "320")))
 QR_ACTIVE_ROI_MARGIN = float(os.getenv("QR_ACTIVE_ROI_MARGIN", "0.6"))
-QR_PYZBAR_FRAME_WIDTH = max(320, int(os.getenv("QR_PYZBAR_FRAME_WIDTH", "480")))
+QR_PYZBAR_FRAME_WIDTH = max(320, int(os.getenv("QR_PYZBAR_FRAME_WIDTH", "720")))
 QR_OPENCV_DETECT_EVERY_N_FRAMES = max(1, int(os.getenv("QR_OPENCV_DETECT_EVERY_N_FRAMES", "8")))
 QR_METRICS_WIDTH = max(160, int(os.getenv("QR_METRICS_WIDTH", "320")))
 QR_REPEAT_SUPPRESS_SECONDS = float(os.getenv("QR_REPEAT_SUPPRESS_SECONDS", "1.0"))
+QR_FAST_SHARPEN_ENABLED = os.getenv("QR_FAST_SHARPEN_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
 _IDENTITY_LOCK = threading.Lock()
 _CACHED_QR_DEVICE_ID = None
 _CACHED_QR_LOCKER_ID = None
@@ -149,6 +150,7 @@ class QrScanner:
         self._processed_frames = 0
         self._fps_window_started_at = time.monotonic()
         self._last_no_frame_log_at = 0.0
+        self._last_new_frame_at = 0.0
         self._last_focus_retry_at = 0.0
         self._last_status_log_at = 0.0
         self._saw_first_frame = False
@@ -217,6 +219,7 @@ class QrScanner:
                 continue
 
             self._last_sequence = sequence
+            self._last_new_frame_at = time.monotonic()
             if sequence % self.process_every_n_frames != 0:
                 continue
 
@@ -699,7 +702,7 @@ class QrScanner:
                 candidates.append(("bgr", small_frame, scale))
                 if not fast:
                     candidates.append(("gray", small_gray, scale))
-            if QR_SHARPEN_ENABLED and not fast:
+            if QR_SHARPEN_ENABLED and (not fast or QR_FAST_SHARPEN_ENABLED):
                 blurred = cv2.GaussianBlur(small_gray, (0, 0), 1.0)
                 candidates.append(("sharpened", cv2.addWeighted(small_gray, 1.7, blurred, -0.7, 0), scale))
             if not fast and self._decode_attempts % QR_PYZBAR_EVERY_N_FRAMES == 0:
@@ -921,6 +924,8 @@ class QrScanner:
     def _maybe_log_no_frames(self, sequence):
         now = time.monotonic()
         if now - self._last_no_frame_log_at < NO_FRAME_LOG_SECONDS:
+            return
+        if self._last_new_frame_at and now - self._last_new_frame_at < NO_FRAME_LOG_SECONDS:
             return
         self._last_no_frame_log_at = now
         if sequence == self._last_sequence and sequence >= 0:
