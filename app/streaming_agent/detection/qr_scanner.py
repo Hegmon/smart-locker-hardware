@@ -358,14 +358,17 @@ class QRScanner:
             self.metrics.last_quality = metrics
 
         attempt_index = self.metrics.detection_attempts
-        for candidate in self.preprocessor.candidates(frame, attempt_index=attempt_index):
-            decoded = self._detect_with_pyzbar(candidate.image)
-            if decoded:
-                with self._lock:
-                    self.metrics.detections += 1
-                    self.metrics.last_detection_ms = (time.perf_counter() - started_at) * 1000.0
-                self._maybe_save_debug_frame(frame, "decoded")
-                return decoded, True, metrics
+        try:
+            for candidate in self.preprocessor.candidates(frame, attempt_index=attempt_index):
+                decoded = self._detect_with_pyzbar(candidate.image)
+                if decoded:
+                    with self._lock:
+                        self.metrics.detections += 1
+                        self.metrics.last_detection_ms = (time.perf_counter() - started_at) * 1000.0
+                    self._maybe_save_debug_frame(frame, "decoded")
+                    return decoded, True, metrics
+        except Exception:
+            logger.exception("QR preprocessing failed; skipping frame")
 
         self._maybe_start_opencv_fallback(frame.copy(), attempt_index)
 
@@ -519,16 +522,23 @@ class QRScanner:
         now = time.monotonic()
         with self._lock:
             self._expire_token_cache(now)
-            if now < self._cooldown_until:
+            if debounce_key in self._processing_keys:
                 self.metrics.duplicate_suppressed += 1
+                self._log_duplicate_suppressed(debounce_key, reason="backend verification already in progress")
                 return False
-            if debounce_key in self._token_cache or debounce_key in self._processing_keys:
-                self.metrics.duplicate_suppressed += 1
-                self._log_duplicate_suppressed(debounce_key)
-                return False
+            if getattr(self.config, "local_duplicate_suppression_enabled", False):
+                if now < self._cooldown_until:
+                    self.metrics.duplicate_suppressed += 1
+                    self._log_duplicate_suppressed(debounce_key, reason="cooldown active")
+                    return False
+                if debounce_key in self._token_cache:
+                    self.metrics.duplicate_suppressed += 1
+                    self._log_duplicate_suppressed(debounce_key, reason="local duplicate cache")
+                    return False
             self._processing_keys.add(debounce_key)
-            self._token_cache[debounce_key] = now + self.config.duplicate_cache_seconds
-            self._cooldown_until = now + self.config.cooldown_seconds
+            if getattr(self.config, "local_duplicate_suppression_enabled", False):
+                self._token_cache[debounce_key] = now + self.config.duplicate_cache_seconds
+                self._cooldown_until = now + self.config.cooldown_seconds
             self._scan_session_started_at = now
             return True
 
@@ -583,16 +593,17 @@ class QRScanner:
             with self._lock:
                 self._processing_keys.discard(result.debounce_key)
 
-    def _log_duplicate_suppressed(self, debounce_key: str):
+    def _log_duplicate_suppressed(self, debounce_key: str, reason: str):
         now = time.monotonic()
         last_at = self._duplicate_log_last_at.get(debounce_key, 0.0)
         if now - last_at < 3.0:
             return
         self._duplicate_log_last_at[debounce_key] = now
         logger.info(
-            "Suppressed duplicate QR token during replay window: %s. "
-            "This token was already validated recently; set QR_DUPLICATE_CACHE_SECONDS lower for repeated lab tests.",
+            "Suppressed QR token %s because %s. "
+            "Set QR_LOCAL_DUPLICATE_SUPPRESSION_ENABLED=false to let backend handle repeated tokens.",
             debounce_key,
+            reason,
         )
 
     def _publish_result(self, result, *, backend_response, accepted, error=None):
