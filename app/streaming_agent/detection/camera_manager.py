@@ -35,7 +35,8 @@ class SharedFrameBufferCameraManager:
         self.config = config
         self._last_sequence = -1
         self._last_frame_at = 0.0
-        self._last_watchdog_log_at = 0.0
+        self._started_at = time.monotonic()
+        self._last_watchdog_log_at = self._started_at
 
     def start(self) -> bool:
         return self.frame_buffer is not None
@@ -80,6 +81,8 @@ class SharedFrameBufferCameraManager:
     def _maybe_watchdog_log(self, sequence: int) -> None:
         now = time.monotonic()
         if self._last_frame_at and now - self._last_frame_at < self.config.camera_watchdog_seconds:
+            return
+        if not self._last_frame_at and now - self._started_at < self.config.camera_watchdog_seconds:
             return
         if now - self._last_watchdog_log_at < self.config.camera_watchdog_seconds:
             return
