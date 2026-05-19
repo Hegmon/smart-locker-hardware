@@ -135,8 +135,8 @@ class QRPreprocessor:
             return frame
 
         height, width = frame.shape[:2]
-        roi_width_ratio = min(float(self._config_value("roi_width_ratio", 0.82)), 1.0)
-        roi_height_ratio = min(float(self._config_value("roi_height_ratio", 0.82)), 1.0)
+        roi_width_ratio = min(float(self._config_value("roi_width_ratio", 1.0)), 1.0)
+        roi_height_ratio = min(float(self._config_value("roi_height_ratio", 1.0)), 1.0)
         roi_width = min(width, max(1, int(width * roi_width_ratio)))
         roi_height = min(height, max(1, int(height * roi_height_ratio)))
         x0 = max(0, (width - roi_width) // 2)
