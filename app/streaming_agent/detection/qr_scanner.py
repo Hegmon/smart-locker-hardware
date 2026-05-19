@@ -19,6 +19,12 @@ except Exception:  # pragma: no cover - Raspberry Pi runtime dependency
     cv2 = None
     np = None
 
+try:
+    from pyzbar.pyzbar import ZBarSymbol, decode as pyzbar_decode
+except Exception:  # pragma: no cover - optional Pi dependency
+    ZBarSymbol = None
+    pyzbar_decode = None
+
 from app.streaming_agent.camera_controls import CameraControlManager
 from app.streaming_agent.config_loader import get_device_id
 from app.streaming_agent.detection.camera_manager import OpenCVCameraManager, SharedFrameBufferCameraManager
@@ -206,6 +212,7 @@ class QRScanner:
         self._frames_since_log = 0
         self._qr_attention_until = 0.0
         self._last_debug_frame_saved_at = 0.0
+        self._pyzbar_unavailable_logged = False
 
     @property
     def latest_result(self) -> QRScanResult | None:
@@ -240,10 +247,12 @@ class QRScanner:
         self._thread = threading.Thread(target=self._run, daemon=True, name="external-qr-scanner")
         self._thread.start()
         logger.info(
-            "QR scanner started: interval=%sms detection_width=%s preprocessing=%s cooldown=%.1fs",
+            "QR scanner started: interval=%sms detection_width=%s preprocessing=%s pyzbar=%s opencv_fallback_every=%s cooldown=%.1fs",
             self.config.scan_interval_ms,
             self.config.detection_width,
             self.config.preprocessing_enabled,
+            pyzbar_decode is not None and getattr(self.config, "pyzbar_enabled", True),
+            getattr(self.config, "opencv_fallback_every_n", 5),
             self.config.cooldown_seconds,
         )
 
@@ -319,7 +328,7 @@ class QRScanner:
 
         attempt_index = self.metrics.detection_attempts
         for candidate in self.preprocessor.candidates(frame, attempt_index=attempt_index):
-            decoded, points = self._detect_candidate(candidate.image)
+            decoded, points = self._detect_candidate(candidate.image, attempt_index=attempt_index)
             if points is not None:
                 self._mark_qr_attention()
             if decoded:
@@ -334,15 +343,14 @@ class QRScanner:
         self._maybe_save_debug_frame(frame, "latest_no_decode")
         return None, False, metrics
 
-    def _detect_candidate(self, image):
-        try:
-            decoded, points, _straight = self._detector.detectAndDecode(image)
-        except Exception:
-            logger.exception("OpenCV QR detectAndDecode failed")
-            decoded, points = "", None
-        decoded = decoded.strip() if decoded else ""
+    def _detect_candidate(self, image, attempt_index: int):
+        decoded = self._detect_with_pyzbar(image)
         if decoded:
-            return decoded, points
+            return decoded, None
+
+        opencv_every_n = max(1, int(getattr(self.config, "opencv_fallback_every_n", 5)))
+        if attempt_index % opencv_every_n != 0:
+            return None, None
 
         try:
             ok, points = self._detector.detect(image)
@@ -361,37 +369,32 @@ class QRScanner:
         if decoded:
             return decoded, points
 
-        if hasattr(self._detector, "detectAndDecodeMulti"):
-            try:
-                ok, decoded_values, multi_points, _straight = self._detector.detectAndDecodeMulti(image)
-            except Exception:
-                logger.exception("OpenCV QR detectAndDecodeMulti failed")
-                return None, points
-            if ok and decoded_values:
-                for decoded_value in decoded_values:
-                    decoded_value = decoded_value.strip() if decoded_value else ""
-                    if decoded_value:
-                        return decoded_value, multi_points
-
-        if hasattr(self._detector, "detectMulti") and hasattr(self._detector, "decodeMulti"):
-            try:
-                ok, multi_points = self._detector.detectMulti(image)
-            except Exception:
-                logger.exception("OpenCV QR detectMulti failed")
-                return None, points
-            if not ok or multi_points is None:
-                return None, points
-            try:
-                ok, decoded_values, _straight = self._detector.decodeMulti(image, multi_points)
-            except Exception:
-                logger.exception("OpenCV QR decodeMulti failed")
-                return None, multi_points
-            if ok and decoded_values:
-                for decoded_value in decoded_values:
-                    decoded_value = decoded_value.strip() if decoded_value else ""
-                    if decoded_value:
-                        return decoded_value, multi_points
         return None, points
+
+    def _detect_with_pyzbar(self, image):
+        if not getattr(self.config, "pyzbar_enabled", True):
+            return None
+        if pyzbar_decode is None:
+            if not self._pyzbar_unavailable_logged:
+                self._pyzbar_unavailable_logged = True
+                logger.warning(
+                    "pyzbar/libzbar is unavailable; install `sudo apt install -y libzbar0` "
+                    "and `pip install pyzbar` for fast phone-screen QR decoding."
+                )
+            return None
+
+        try:
+            symbols = [ZBarSymbol.QRCODE] if ZBarSymbol is not None else None
+            decoded_items = pyzbar_decode(image, symbols=symbols) if symbols else pyzbar_decode(image)
+        except Exception as exc:
+            logger.warning("pyzbar QR decode failed: %s", exc)
+            return None
+
+        for item in decoded_items:
+            value = item.data.decode("utf-8", errors="replace").strip()
+            if value:
+                return value
+        return None
 
     def _decode_qr(self, frame_bytes):
         """Compatibility helper used by integration tests."""
