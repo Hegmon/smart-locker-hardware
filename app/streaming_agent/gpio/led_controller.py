@@ -49,6 +49,7 @@ class LedController:
 
         self._gpio = GPIO
         GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
         for pin in self.pins:
             GPIO.setup(pin, GPIO.OUT)
             GPIO.output(pin, GPIO.LOW)
