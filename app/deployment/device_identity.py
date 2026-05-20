@@ -7,6 +7,7 @@ from app.deployment.runtime_config import get_path_setting
 
 
 DEFAULT_DEVICE_ID_FILE = "/etc/smartlocker/device_id"
+LOCAL_DEVICE_ID_FILE = Path(__file__).resolve().parents[1] / "config" / "device_id"
 
 
 def device_id_file() -> Path:
@@ -38,6 +39,11 @@ def ensure_device_id() -> str:
 
     generated = _generate_device_id()
     path = device_id_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{generated}\n", encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{generated}\n", encoding="utf-8")
+    except OSError:
+        path = LOCAL_DEVICE_ID_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{generated}\n", encoding="utf-8")
     return generated
