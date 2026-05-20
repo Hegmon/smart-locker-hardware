@@ -737,6 +737,7 @@ class WifiUploadAgent:
     def _build_status_payload(self, connected: dict[str, Any]) -> dict[str, Any]:
         snapshot = self._snapshot()
         return {
+            "type": "status",
             "device_id": self.config.device_id,
             "timestamp": utc_now(),
             "state": snapshot.state.value,
@@ -838,6 +839,7 @@ class WifiUploadAgent:
     def _build_wifi_scan_payload(self, networks: list[object], connected: dict[str, Any]) -> dict[str, Any]:
         connected_ssid = connected.get("connected_ssid")
         return {
+            "type": "scan",
             "device_id": self.config.device_id,
             "timestamp": utc_now(),
             "state": self._snapshot().state.value,
