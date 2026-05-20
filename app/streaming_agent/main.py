@@ -235,11 +235,9 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
-
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     try:
         agent.run_forever()
     except KeyboardInterrupt:
