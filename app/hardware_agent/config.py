@@ -62,7 +62,13 @@ def response(device_id: str, service: str):
 
 
 def event(device_id: str, event_type: str):
-    return f"devices/{device_id}/events/{event_type}"
+    if event_type in {"wifi", "state", "scan"}:
+        return f"devices/{device_id}/wifi"
+    if event_type == "stream":
+        return f"devices/{device_id}/stream/status"
+    if event_type == "logs":
+        return f"devices/{device_id}/logs"
+    return f"devices/{device_id}/{event_type}"
 
 
 # =========================================================
@@ -182,10 +188,10 @@ def load_agent_config() -> AgentConfig:
         mqtt_request_state_topic="hardware_agent/request/state",
         mqtt_response_state_topic="hardware_agent/response/state",
         # compatibility/topic aliases used by WifiUploadAgent
-        mqtt_command_topic=f"devices/{device_uuid}/command",
-        mqtt_command_result_topic=f"devices/{device_uuid}/command/result",
-        mqtt_scan_topic=mqtt_event_scan,
-        mqtt_state_topic=mqtt_event_state,
+        mqtt_command_topic=f"devices/{device_uuid}/commands",
+        mqtt_command_result_topic=f"devices/{device_uuid}/commands/result",
+        mqtt_scan_topic=f"devices/{device_uuid}/wifi",
+        mqtt_state_topic=f"devices/{device_uuid}/wifi",
 
         # -------- INTERVALS --------
         scan_interval_seconds=_clamp(QBOX_WIFI_AGENT_SCAN_INTERVAL_SECONDS, 15),
