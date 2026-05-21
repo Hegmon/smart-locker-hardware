@@ -1,0 +1,39 @@
+[Unit]
+Description=Smart Locker WiFi Agent (standalone/debug)
+After=network-online.target NetworkManager.service dbus.service bluetooth.service
+Wants=network-online.target NetworkManager.service bluetooth.service
+Conflicts=qbox-device.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__PROJECT_DIR__
+Environment=PYTHONUNBUFFERED=1
+Environment=DEVICE_MODE=production
+Environment=DJANGO_API_BASE=https://backend.qbox.sa
+
+# Standalone service for debugging. In production prefer qbox-device.service
+# so WiFi shares the single process-wide MQTT connection with all agents.
+ExecStart=__PROJECT_DIR__/.venv/bin/python -m app.agents.wifi_agent
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+ProtectSystem=false
+ProtectHome=false
+PrivateTmp=true
+PrivateDevices=false
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+DeviceAllow=/dev/rfkill rw
+DeviceAllow=/dev/ttyAMA0 rw
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
