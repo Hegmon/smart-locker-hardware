@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import signal
 import threading
+import time
 
 from app.streaming_agent.main import StreamingAgent as StreamingRuntime
 from app.utils.logger import get_logger
@@ -30,3 +32,27 @@ class StreamingAgent:
             self._thread.join(timeout=10.0)
             self._thread = None
         logger.info("Streaming agent stopped")
+
+
+def main() -> None:
+    agent = StreamingAgent()
+    stopped = threading.Event()
+
+    def _stop(signum=None, frame=None):
+        logger.info("Streaming agent stop requested")
+        stopped.set()
+        agent.stop()
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    agent.start()
+    try:
+        while not stopped.is_set():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        _stop()
+
+
+if __name__ == "__main__":
+    main()
