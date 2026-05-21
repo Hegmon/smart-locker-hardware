@@ -9,6 +9,7 @@ QR_FRAME_WIDTH = int(os.getenv("QR_FRAME_WIDTH", "960"))
 QR_FRAME_HEIGHT = int(os.getenv("QR_FRAME_HEIGHT", "540"))
 QR_FRAME_CHANNELS = int(os.getenv("QR_FRAME_CHANNELS", "3"))
 QR_FRAME_FPS = max(1, int(os.getenv("QR_FRAME_FPS", "10")))
+STREAM_VIDEO_ENCODER = os.getenv("STREAM_VIDEO_ENCODER", "libx264").strip() or "libx264"
 
 
 def build_rtsp_url(camera_role):
@@ -25,6 +26,7 @@ def build_ffmpeg_command(
     frame_height=QR_FRAME_HEIGHT,
 ):
     rtsp_url = build_rtsp_url(camera_role)
+    encoder_args = _encoder_args()
     if frame_pipe:
         return [
             "ffmpeg",
@@ -44,13 +46,7 @@ def build_ffmpeg_command(
             f"scale={frame_width}:{frame_height}:force_original_aspect_ratio=decrease,"
             f"pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2,format=bgr24[raw]",
             "-map", "[rtsp]",
-            "-c:v", "h264_v4l2m2m",
-            "-pix_fmt", "yuv420p",
-            "-b:v", "1200k",
-            "-maxrate", "1200k",
-            "-bufsize", "2400k",
-            "-g", "40",
-            "-bf", "0",
+            *encoder_args,
             "-rtsp_transport", "tcp",
             "-muxdelay", "0",
             "-muxpreload", "0",
@@ -80,20 +76,7 @@ def build_ffmpeg_command(
  
     "-an",
  
-    # Hardware encoder (IMPORTANT)
-    "-c:v", "h264_v4l2m2m",
- 
-    # Low latency tuning
-    "-pix_fmt", "yuv420p",
- 
-    # Bitrate
-    "-b:v", "1200k",
-    "-maxrate", "1200k",
-    "-bufsize", "2400k",
- 
-    # GOP
-    "-g", "40",
-    "-bf", "0",
+    *encoder_args,
  
     # RTSP output
     "-rtsp_transport", "tcp",
@@ -102,3 +85,22 @@ def build_ffmpeg_command(
     "-f", "rtsp",
     rtsp_url,
 ]
+
+
+def _encoder_args():
+    common = [
+        "-pix_fmt", "yuv420p",
+        "-b:v", "1200k",
+        "-maxrate", "1200k",
+        "-bufsize", "2400k",
+        "-g", "40",
+        "-bf", "0",
+    ]
+    if STREAM_VIDEO_ENCODER == "libx264":
+        return [
+            "-c:v", "libx264",
+            "-preset", os.getenv("STREAM_X264_PRESET", "veryfast"),
+            "-tune", "zerolatency",
+            *common,
+        ]
+    return ["-c:v", STREAM_VIDEO_ENCODER, *common]
