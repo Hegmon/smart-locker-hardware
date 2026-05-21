@@ -100,11 +100,11 @@ class QRScannerConfig:
     metrics_log_interval_seconds: float = 10.0
     backend_verify_url: str = "https://backend.qbox.sa/shipments/qr/verify/"
     backend_timeout_seconds: float = 10.0
-    success_gpio_pin: int = 15
-    failure_gpio_pin: int = 14
-    gpio_active_low: bool = False
+    success_gpio_pin: int = 20
+    failure_gpio_pin: int = 21
+    gpio_active_low: bool = True
     default_unlock_seconds: int = 5
-    failure_signal_seconds: float = 2.0
+    failure_signal_seconds: float = 15.0
     attention_hold_seconds: float = 2.5
     require_jwt_shape: bool = False
 
@@ -158,11 +158,19 @@ class QRScannerConfig:
             metrics_log_interval_seconds=_env_float("QR_METRICS_LOG_INTERVAL_SECONDS", 10.0, minimum=1.0),
             backend_verify_url=os.getenv("BACKEND_QR_VERIFY_URL", cls.backend_verify_url),
             backend_timeout_seconds=_env_float("QR_VERIFY_TIMEOUT_SECONDS", 10.0, minimum=0.5),
-            success_gpio_pin=_env_int("QR_SUCCESS_GPIO_PIN", 15),
-            failure_gpio_pin=_env_int("QR_FAILURE_GPIO_PIN", 14),
-            gpio_active_low=_env_bool("QR_GPIO_ACTIVE_LOW", False),
-            default_unlock_seconds=_env_int("QR_DEFAULT_UNLOCK_SECONDS", 5, minimum=1),
-            failure_signal_seconds=_env_float("QR_FAILURE_SIGNAL_SECONDS", 2.0, minimum=0.1),
+            success_gpio_pin=_env_int("QR_SUCCESS_GPIO_PIN", 20),
+            failure_gpio_pin=_env_int("QR_FAILURE_GPIO_PIN", 21),
+            gpio_active_low=_env_bool("QR_GPIO_ACTIVE_LOW", _env_bool("RELAY_ACTIVE_LOW", True)),
+            default_unlock_seconds=_env_int(
+                "QR_DEFAULT_UNLOCK_SECONDS",
+                _env_int("QR_SUCCESS_UNLOCK_TIME", 5, minimum=1),
+                minimum=1,
+            ),
+            failure_signal_seconds=_env_float(
+                "QR_FAILURE_SIGNAL_SECONDS",
+                _env_float("ALERT_DURATION", 15.0, minimum=0.1),
+                minimum=0.1,
+            ),
             attention_hold_seconds=_env_float("QR_ATTENTION_HOLD_SECONDS", 2.5, minimum=0.1),
             require_jwt_shape=_env_bool("QR_REQUIRE_JWT_SHAPE", False),
         )
