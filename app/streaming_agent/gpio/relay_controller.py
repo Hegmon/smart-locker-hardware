@@ -95,8 +95,11 @@ class RelayController:
             try:
                 import RPi.GPIO as GPIO
             except Exception as exc:
-                logger.warning("RPi.GPIO unavailable; relay actions disabled: %s", exc)
-                return
+                try:
+                    GPIO = _LgpioCompat()
+                except Exception as lgpio_exc:
+                    logger.warning("GPIO unavailable; relay actions disabled: RPi.GPIO=%s lgpio=%s", exc, lgpio_exc)
+                    return
 
             self._gpio = GPIO
             GPIO.setmode(GPIO.BCM)
@@ -169,12 +172,8 @@ class RelayController:
                 logger.info("Locker locked/default state confirmed")
 
     def set_person_visible(self, visible):
-        with self._lock:
-            was_visible = "person" in self._red_sources or "person" in self._buzzer_sources
-        if bool(visible) != was_visible:
-            logger.info("Person detected" if visible else "No person detected")
-        self._set_red_source("person", visible)
-        self._set_buzzer_source("person", visible)
+        if visible:
+            self.trigger_alert("person", self.alert_duration, log_name="Person detected")
 
     def set_tamper_active(self, camera_role, active):
         if active:
@@ -217,7 +216,6 @@ class RelayController:
             self._set_red_source(source, True)
             self._set_buzzer_source(source, True)
             if source in self._alert_threads:
-                logger.info("%s extended for %.1fs", log_name, duration)
                 return
             self._alert_threads.add(source)
         logger.warning("%s; red LED and buzzer ON for %.1fs", log_name, duration)
@@ -339,3 +337,56 @@ class RelayController:
         if self._gpio is None:
             return None
         return self._gpio.HIGH if self.active_low else self._gpio.LOW
+
+
+class _LgpioCompat:
+    """Small subset of RPi.GPIO backed by lgpio for newer Raspberry Pi OS."""
+
+    BCM = "BCM"
+    OUT = "OUT"
+    HIGH = 1
+    LOW = 0
+
+    def __init__(self):
+        import lgpio
+
+        self._lgpio = lgpio
+        self._chip = lgpio.gpiochip_open(0)
+        self._claimed = set()
+
+    def setmode(self, mode):
+        if mode != self.BCM:
+            raise ValueError("RelayController only supports BCM GPIO mode")
+
+    def setwarnings(self, enabled):
+        return None
+
+    def setup(self, pin, direction, initial=None):
+        if direction != self.OUT:
+            raise ValueError("RelayController only supports GPIO output pins")
+        level = self.LOW if initial is None else int(initial)
+        self._lgpio.gpio_claim_output(self._chip, int(pin), level)
+        self._claimed.add(int(pin))
+
+    def output(self, pin, state):
+        pin = int(pin)
+        if pin not in self._claimed:
+            self.setup(pin, self.OUT, initial=state)
+            return
+        self._lgpio.gpio_write(self._chip, pin, int(state))
+
+    def cleanup(self, pins=None):
+        pins = tuple(self._claimed if pins is None else pins)
+        for pin in pins:
+            pin = int(pin)
+            if pin in self._claimed:
+                try:
+                    self._lgpio.gpio_free(self._chip, pin)
+                except Exception:
+                    logger.debug("lgpio free failed for GPIO%s", pin, exc_info=True)
+                self._claimed.discard(pin)
+        if not self._claimed:
+            try:
+                self._lgpio.gpiochip_close(self._chip)
+            except Exception:
+                logger.debug("lgpio chip close failed", exc_info=True)
