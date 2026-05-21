@@ -9,7 +9,6 @@
 
 numpy>=1.26,<3.0
 opencv-python-headless>=4.9,<5.0
-lgpio>=0.2.2.0; platform_machine == "aarch64" or platform_machine == "armv7l"
 rpi-lgpio>=0.6; platform_machine == "aarch64" or platform_machine == "armv7l"
 
 # Preferred runtime for Python 3.11 and older.
