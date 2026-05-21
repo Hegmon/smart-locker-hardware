@@ -6,7 +6,7 @@ try:
 except Exception:
     cv2 = None
     np = None
-from app.streaming_agent.gpio.led_controller import LedController
+from app.streaming_agent.gpio.relay_controller import RelayController
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 logger = LoggingManager.get_logger(__name__)
 class TamperDetection:
@@ -31,7 +31,7 @@ class TamperDetection:
         self.frame_buffer = frame_buffer
         self.camera_role = camera_role
         self._owns_led_controller = led_controller is None
-        self.led_controller = led_controller or LedController()
+        self.led_controller = led_controller or RelayController()
         self.process_every_n_frames = max(1, int(process_every_n_frames))
         self.tamper_confirm_seconds = max(0.1, float(tamper_confirm_seconds))
         self.tamper_clear_seconds = max(0.1, float(tamper_clear_seconds))
