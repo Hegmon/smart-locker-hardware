@@ -30,6 +30,7 @@ from app.streaming_agent.config_loader import get_device_id
 from app.streaming_agent.detection.camera_manager import OpenCVCameraManager, SharedFrameBufferCameraManager
 from app.streaming_agent.detection.preprocessing import FrameQualityMetrics, QRPreprocessor
 from app.streaming_agent.detection.scanner_config import QRScannerConfig
+from app.streaming_agent.gpio.relay_controller import RelayController
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 
 
@@ -85,119 +86,22 @@ class QRScannerMetrics:
         }
 
 
-class QrGpioController:
-    """Independent BCM GPIO control for QR verification result pins."""
+class QrGpioController(RelayController):
+    """Backward-compatible name for the centralized relay controller."""
 
     def __init__(
         self,
-        success_pin: int = 15,
-        failure_pin: int = 14,
-        failure_signal_seconds: float = 2.0,
-        active_low: bool = False,
+        success_pin: int = 20,
+        failure_pin: int = 21,
+        failure_signal_seconds: float = 15.0,
+        active_low: bool = True,
     ):
-        self.success_pin = success_pin
-        self.failure_pin = failure_pin
-        self.failure_signal_seconds = failure_signal_seconds
-        self.active_low = active_low
-        self._gpio = None
-        self._enabled = False
-        self._lock = threading.Lock()
-        self._pulse_until = {}
-        self._pulse_running = set()
-
-    def start(self):
-        if self._enabled:
-            return
-        try:
-            import RPi.GPIO as GPIO
-        except Exception as exc:
-            logger.warning("RPi.GPIO unavailable; QR GPIO actions disabled: %s", exc)
-            return
-
-        self._gpio = GPIO
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
-        GPIO.setup(self.success_pin, GPIO.OUT, initial=self._inactive_state())
-        GPIO.setup(self.failure_pin, GPIO.OUT, initial=self._inactive_state())
-        self._enabled = True
-        logger.info(
-            "QR GPIO initialized on BCM pins success=%s failure=%s active_low=%s",
-            self.success_pin,
-            self.failure_pin,
-            self.active_low,
+        super().__init__(
+            green_led_pin=success_pin,
+            red_led_pin=failure_pin,
+            active_low=active_low,
+            alert_duration=failure_signal_seconds,
         )
-
-    def pulse_success(self, duration_seconds):
-        self._pulse(self.success_pin, duration_seconds, "success/open")
-
-    def pulse_failure(self):
-        self._pulse(self.failure_pin, self.failure_signal_seconds, "failure/deny")
-
-    def cleanup(self):
-        if not self._enabled or self._gpio is None:
-            return
-        with self._lock:
-            try:
-                self._pulse_until.clear()
-                self._pulse_running.clear()
-                self._gpio.output(self.success_pin, self._inactive_state())
-                self._gpio.output(self.failure_pin, self._inactive_state())
-                self._gpio.cleanup((self.success_pin, self.failure_pin))
-            except Exception:
-                logger.exception("QR GPIO cleanup failed")
-            finally:
-                self._enabled = False
-                self._gpio = None
-
-    def _pulse(self, pin, duration_seconds, action_name):
-        if not self._enabled or self._gpio is None:
-            logger.info("QR GPIO dry-run: %s pin=%s duration=%ss", action_name, pin, duration_seconds)
-            return
-
-        now = time.monotonic()
-        with self._lock:
-            old_until = self._pulse_until.get(pin, 0.0)
-            self._pulse_until[pin] = max(old_until, now + duration_seconds)
-            if pin in self._pulse_running:
-                logger.info("QR GPIO pulse extended: %s pin=%s duration=%ss", action_name, pin, duration_seconds)
-                return
-            self._pulse_running.add(pin)
-
-        threading.Thread(
-            target=self._pulse_worker,
-            args=(pin, action_name),
-            daemon=True,
-            name=f"qr-gpio-{action_name}",
-        ).start()
-
-    def _pulse_worker(self, pin, action_name):
-        try:
-            logger.info("QR GPIO ON: %s pin=%s", action_name, pin)
-            self._gpio.output(pin, self._active_state())
-            while True:
-                with self._lock:
-                    until = self._pulse_until.get(pin, 0.0)
-                remaining = until - time.monotonic()
-                if remaining <= 0:
-                    break
-                time.sleep(min(remaining, 0.1))
-        finally:
-            with self._lock:
-                self._pulse_until.pop(pin, None)
-                self._pulse_running.discard(pin)
-            if self._gpio is not None:
-                self._gpio.output(pin, self._inactive_state())
-            logger.info("QR GPIO OFF: %s pin=%s", action_name, pin)
-
-    def _active_state(self):
-        if self._gpio is None:
-            return None
-        return self._gpio.LOW if self.active_low else self._gpio.HIGH
-
-    def _inactive_state(self):
-        if self._gpio is None:
-            return None
-        return self._gpio.HIGH if self.active_low else self._gpio.LOW
 
 
 class BackendQRValidator:
@@ -219,7 +123,7 @@ class QRScanner:
         *,
         config: QRScannerConfig | None = None,
         video_device: str | None = None,
-        gpio_controller: QrGpioController | None = None,
+        gpio_controller: RelayController | None = None,
         camera_controls: CameraControlManager | None = None,
         process_every_n_frames: int | None = None,
         on_qr_detected: Callable[[dict], object] | None = None,
@@ -234,11 +138,10 @@ class QRScanner:
         self.frame_buffer = frame_buffer
         self.video_device = video_device
         self.camera_controls = camera_controls or CameraControlManager()
-        self.gpio_controller = gpio_controller or QrGpioController(
-            getattr(self.config, "success_gpio_pin", 15),
-            getattr(self.config, "failure_gpio_pin", 14),
-            getattr(self.config, "failure_signal_seconds", 2.0),
-            getattr(self.config, "gpio_active_low", False),
+        self.gpio_controller = gpio_controller or RelayController(
+            active_low=getattr(self.config, "gpio_active_low", True),
+            unlock_seconds=getattr(self.config, "default_unlock_seconds", 5),
+            alert_duration=getattr(self.config, "failure_signal_seconds", 15.0),
         )
         self._owns_gpio_controller = gpio_controller is None
         self.on_qr_detected = on_qr_detected
@@ -525,7 +428,7 @@ class QRScanner:
                 self.metrics.invalid_payloads += 1
             logger.warning("Invalid QR payload: %s", exc)
             self.gpio_controller.pulse_failure()
-            write_scan_log(raw_value, None, f"failure_gpio_{self.config.failure_gpio_pin}", str(exc))
+            write_scan_log(raw_value, None, "qr_failure_alert", str(exc))
             return
 
         if not self._reserve_token(debounce_key):
@@ -588,25 +491,24 @@ class QRScanner:
             duration = unlock_duration(backend_response, self.config) if accepted else 0
             if accepted:
                 logger.info(
-                    "QR backend accepted token=%s; pulsing success GPIO pin=%s duration=%ss",
+                    "QR backend accepted token=%s; turning on green LED and unlocking locker for %ss",
                     result.debounce_key,
-                    self.config.success_gpio_pin,
                     duration,
                 )
                 self.gpio_controller.pulse_success(duration)
                 with self._lock:
                     self.metrics.backend_success += 1
-                write_scan_log(result.raw_value, backend_response, f"success_gpio_{self.config.success_gpio_pin}_{duration}s")
+                write_scan_log(result.raw_value, backend_response, f"qr_success_unlock_{duration}s")
             else:
                 logger.warning(
-                    "QR backend denied token=%s; pulsing failure GPIO pin=%s",
+                    "QR backend denied token=%s; turning on red LED and buzzer for %.1fs",
                     result.debounce_key,
-                    self.config.failure_gpio_pin,
+                    getattr(self.gpio_controller, "alert_duration", self.config.failure_signal_seconds),
                 )
                 self.gpio_controller.pulse_failure()
                 with self._lock:
                     self.metrics.backend_failure += 1
-                write_scan_log(result.raw_value, backend_response, f"failure_gpio_{self.config.failure_gpio_pin}")
+                write_scan_log(result.raw_value, backend_response, "qr_failure_alert")
             self._publish_result(result, backend_response=backend_response, accepted=accepted)
         except Exception as exc:
             error = str(exc)
@@ -614,7 +516,7 @@ class QRScanner:
             self.gpio_controller.pulse_failure()
             with self._lock:
                 self.metrics.backend_failure += 1
-            write_scan_log(result.raw_value, backend_response, f"failure_gpio_{self.config.failure_gpio_pin}", error)
+            write_scan_log(result.raw_value, backend_response, "qr_failure_alert", error)
             self._publish_result(result, backend_response=backend_response, accepted=False, error=error)
         finally:
             with self._lock:
