@@ -40,14 +40,29 @@ class DeviceApplication:
         self.telemetry.start()
         self.heartbeat.start()
 
-        from app.agents.wifi_agent import WifiAgent
-        from app.agents.streaming_agent import StreamingAgent
-
-        self.wifi_agent = WifiAgent()
-        self.streaming_agent = StreamingAgent()
-        self.wifi_agent.start()
-        self.streaming_agent.start()
+        self._start_wifi_agent()
+        self._start_streaming_agent()
         logger.info("Smart Locker device runtime started")
+
+    def _start_wifi_agent(self) -> None:
+        try:
+            from app.agents.wifi_agent import WifiAgent
+
+            self.wifi_agent = WifiAgent()
+            self.wifi_agent.start()
+        except Exception:
+            self.wifi_agent = None
+            logger.exception("WiFi agent failed to start; continuing device runtime")
+
+    def _start_streaming_agent(self) -> None:
+        try:
+            from app.agents.streaming_agent import StreamingAgent
+
+            self.streaming_agent = StreamingAgent()
+            self.streaming_agent.start()
+        except Exception:
+            self.streaming_agent = None
+            logger.exception("Streaming agent failed to start; continuing device runtime")
 
     def stop(self) -> None:
         logger.info("Stopping Smart Locker device runtime")
