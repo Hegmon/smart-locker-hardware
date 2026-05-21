@@ -19,9 +19,15 @@ class StreamingAgent:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._thread = threading.Thread(target=self._agent.run_forever, daemon=True, name="streaming-agent")
+        self._thread = threading.Thread(target=self._run, daemon=True, name="streaming-agent")
         self._thread.start()
         logger.info("Streaming agent started")
+
+    def _run(self) -> None:
+        try:
+            self._agent.run_forever()
+        except Exception:
+            logger.exception("Streaming agent runtime failed")
 
     def stop(self) -> None:
         try:
