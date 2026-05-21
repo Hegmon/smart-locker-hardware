@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import signal
 import threading
+import time
 
 from app.hardware_agent.config import load_agent_config
 from app.hardware_agent.main import WifiUploadAgent
@@ -30,3 +32,27 @@ class WifiAgent:
             self._thread.join(timeout=5.0)
             self._thread = None
         logger.info("WiFi agent stopped")
+
+
+def main() -> None:
+    agent = WifiAgent()
+    stopped = threading.Event()
+
+    def _stop(signum=None, frame=None):
+        logger.info("WiFi agent stop requested")
+        stopped.set()
+        agent.stop()
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    agent.start()
+    try:
+        while not stopped.is_set():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        _stop()
+
+
+if __name__ == "__main__":
+    main()
