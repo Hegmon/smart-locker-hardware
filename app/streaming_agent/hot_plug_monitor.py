@@ -27,9 +27,14 @@ class HotPlugMonitor:
         self.context = None
         self.monitor = None
         if pyudev is not None:
-            self.context = pyudev.Context()
-            self.monitor = pyudev.Monitor.from_netlink(self.context)
-            self.monitor.filter_by(subsystem="video4linux")
+            try:
+                self.context = pyudev.Context()
+                self.monitor = pyudev.Monitor.from_netlink(self.context)
+                self.monitor.filter_by(subsystem="video4linux")
+            except Exception as exc:
+                self.context = None
+                self.monitor = None
+                logger.warning("Hot plug monitor disabled; could not create udev monitor: %s", exc)
         self.last_event_time = 0
 
     def start(self):
