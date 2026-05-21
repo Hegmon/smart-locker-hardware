@@ -11,7 +11,7 @@ except Exception:
     cv2 = None
     np = None
 
-from app.streaming_agent.gpio.led_controller import LedController
+from app.streaming_agent.gpio.relay_controller import RelayController
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 
 
@@ -46,7 +46,7 @@ class PersonDetector:
         self.process_every_n_frames = max(1, int(process_every_n_frames))
         self.led_off_delay_seconds = led_off_delay_seconds
         self._owns_led_controller = led_controller is None
-        self.led_controller = led_controller or LedController()
+        self.led_controller = led_controller or RelayController()
 
         self._running = False
         self._thread = None
@@ -102,6 +102,7 @@ class PersonDetector:
         if self._thread:
             self._thread.join(timeout=2)
             self._thread = None
+        self.led_controller.set_person_visible(False)
         if self._owns_led_controller:
             self.led_controller.cleanup()
         logger.info("Person detector stopped")
