@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import signal
+import threading
+import time
+
 from app.core.mqtt_manager import MQTTManager
 from app.utils.logger import get_logger
 
@@ -26,3 +30,32 @@ class ControlAgent:
     def _handle_command(self, topic: str, payload: bytes) -> None:
         command = self.mqtt.loads(payload)
         logger.info("Received device command on %s: %s", topic, command)
+
+
+def main() -> None:
+    from app.core.mqtt_manager import get_shared_mqtt_manager
+
+    mqtt = get_shared_mqtt_manager()
+    agent = ControlAgent(mqtt)
+    stopped = threading.Event()
+
+    def _stop(signum=None, frame=None):
+        logger.info("Control agent stop requested")
+        stopped.set()
+        agent.stop()
+        mqtt.stop(publish_offline=True)
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    mqtt.start()
+    agent.start()
+    try:
+        while not stopped.is_set():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        _stop()
+
+
+if __name__ == "__main__":
+    main()
