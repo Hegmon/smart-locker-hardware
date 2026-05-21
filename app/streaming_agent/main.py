@@ -13,7 +13,7 @@ from app.streaming_agent.detection.person_detector import PersonDetector
 from app.streaming_agent.detection.qr_scanner import BackendQRValidator, QrScanner, summarize_qr_value
 from app.streaming_agent.detection.scanner_config import QRScannerConfig
 from app.streaming_agent.detection.tamper_detection import TamperDetection
-from app.streaming_agent.gpio.led_controller import LedController
+from app.streaming_agent.gpio.relay_controller import RelayController
 from app.streaming_agent.health_monitor import HealthMonitor
 from app.streaming_agent.hot_plug_monitor import HotPlugMonitor
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
@@ -23,7 +23,7 @@ from app.streaming_agent.streaming_manager import StreamingManager
 
 logger = LoggingManager.get_logger(__name__)
 
-DETECTION_LED_HOLD_SECONDS = float(os.getenv("DETECTION_LED_HOLD_SECONDS", "3"))
+DETECTION_LED_HOLD_SECONDS = float(os.getenv("DETECTION_LED_HOLD_SECONDS", "0"))
 
 
 class StreamingAgent:
@@ -36,7 +36,7 @@ class StreamingAgent:
         self.qr_scanner = None
         self.qr_scanner_config = QRScannerConfig.from_env()
         self.tamper_detectors = []
-        self.led_controller = LedController()
+        self.relay_controller = RelayController()
         self.keyboard_thread = None
         self.running = False
         self._stopping = False
@@ -50,7 +50,7 @@ class StreamingAgent:
         self.stream_manager.initialize()
         self.person_detector = PersonDetector(
             self.stream_manager.get_frame_buffer("internal"),
-            led_controller=self.led_controller,
+            led_controller=self.relay_controller,
             led_off_delay_seconds=DETECTION_LED_HOLD_SECONDS,
         )
         self.qr_scanner = QrScanner(
@@ -58,10 +58,10 @@ class StreamingAgent:
             video_device=self.stream_manager.get_camera_device("external"),
             camera_controls=self.stream_manager.camera_controls,
             config=self.qr_scanner_config,
+            gpio_controller=self.relay_controller,
             on_qr_detected=self._handle_qr_detected,
             backend_validator=self._validate_qr_with_backend,
         )
-        self._warn_if_gpio_pins_overlap()
         self.tamper_detectors = []
         for role, frame_buffer in self.stream_manager.frame_buffers.items():
             if role == "external" and os.getenv("EXTERNAL_TAMPER_DETECTION_ENABLED", "true").strip().lower() not in {
@@ -77,7 +77,7 @@ class StreamingAgent:
                 TamperDetection(
                     frame_buffer,
                     camera_role=role,
-                    led_controller=self.led_controller,
+                    led_controller=self.relay_controller,
                     tamper_clear_seconds=DETECTION_LED_HOLD_SECONDS,
                     skip_when=skip_when,
                 )
@@ -93,32 +93,6 @@ class StreamingAgent:
             password=MQTT_PASSWORD,
         )
         logger.info("Streaming agent initialized successfully")
-
-    def _warn_if_gpio_pins_overlap(self):
-        if not self.qr_scanner:
-            return
-
-        detection_pins = set(getattr(self.led_controller, "pins", ()))
-        qr_pins = {
-            getattr(self.qr_scanner.gpio_controller, "success_pin", None),
-            getattr(self.qr_scanner.gpio_controller, "failure_pin", None),
-        }
-        overlap = sorted(pin for pin in detection_pins.intersection(qr_pins) if pin is not None)
-        if overlap:
-            if os.getenv("QR_GPIO_EXCLUSIVE", "false").strip().lower() in {"1", "true", "yes", "on"}:
-                logger.warning(
-                    "QR GPIO pins overlap with detection LED pins: %s. "
-                    "QR_GPIO_EXCLUSIVE=true, so overlapping pins are removed from detection LEDs.",
-                    overlap,
-                )
-                self.led_controller.pins = tuple(pin for pin in self.led_controller.pins if pin not in overlap)
-                return
-            logger.warning(
-                "QR GPIO pins overlap with detection LED pins: %s. "
-                "Both QR and person/tamper detection LEDs will drive these pins. "
-                "For independent wiring, set DETECTION_LED_PINS or QR_SUCCESS_GPIO_PIN/QR_FAILURE_GPIO_PIN differently.",
-                overlap,
-            )
 
     def _handle_qr_detected(self, payload):
         """One-time scan event hook for telemetry, MQTT fanout, or local audit actions."""
@@ -149,7 +123,7 @@ class StreamingAgent:
         logger.info("Starting streaming agent")
         self.running = True
         self.stream_manager.start_all()
-        self.led_controller.start()
+        self.relay_controller.start()
         if self.person_detector:
             self.person_detector.start()
         if self.qr_scanner:
@@ -183,9 +157,9 @@ class StreamingAgent:
                 self.person_detector.stop()
             for tamper_detector in self.tamper_detectors:
                 tamper_detector.stop()
-            self.led_controller.cleanup()
             if self.qr_scanner:
                 self.qr_scanner.stop()
+            self.relay_controller.cleanup()
             if self.stream_manager:
                 self.stream_manager.stop_all()
             if self._lock_file:
