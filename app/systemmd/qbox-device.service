@@ -36,12 +36,16 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 DeviceAllow=/dev/rfkill rw
 DeviceAllow=/dev/ttyAMA0 rw
+DeviceAllow=/dev/mem rw
 DeviceAllow=/dev/gpiomem rw
 DeviceAllow=/dev/gpiochip0 rw
 DeviceAllow=/dev/gpiochip1 rw
 DeviceAllow=/dev/gpiochip2 rw
 DeviceAllow=/dev/gpiochip3 rw
 DeviceAllow=/dev/gpiochip4 rw
+DeviceAllow=/dev/gpiochip5 rw
+DeviceAllow=/dev/gpiochip6 rw
+DeviceAllow=/dev/gpiochip7 rw
 DeviceAllow=/dev/video0 rw
 DeviceAllow=/dev/video1 rw
 DeviceAllow=/dev/video2 rw
