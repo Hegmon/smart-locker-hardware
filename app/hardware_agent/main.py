@@ -15,7 +15,6 @@ from app.deployment.validation import validate_runtime_configuration
 from app.hardware_agent.config import AgentConfig, load_agent_config
 from app.hardware_agent.connectivity import ConnectivityConfig, InternetConnectivityChecker
 from app.hardware_agent.mqtt_client import MqttClient
-from app.hardware_agent.provisioning.ble.server import BLEServer
 from app.hardware_agent.reconnect_policy import ReconnectPolicy, ReconnectPolicyConfig
 from app.hardware_agent.saved_networks import SavedNetworkManager
 from app.hardware_agent.wifi_responses import build_wifi_connect_failure, build_wifi_connect_success
@@ -36,6 +35,50 @@ from app.utils.logger import get_logger
 
 
 logger = get_logger(__name__)
+
+try:
+    from app.hardware_agent.provisioning.ble.server import BLEServer
+except Exception as exc:  # pragma: no cover - depends on Pi system packages
+    BLEServer = None
+    BLE_IMPORT_ERROR = exc
+else:
+    BLE_IMPORT_ERROR = None
+
+
+class UnavailableBLEServer:
+    """No-op BLE adapter used when PyGObject/BlueZ bindings are unavailable."""
+
+    def __init__(self, interface: str, on_wifi_connected=None, reason: Exception | None = None):
+        self.interface = interface
+        self.reason = reason
+        self._logged = False
+
+    def start_async(self) -> bool:
+        if not self._logged:
+            logger.warning(
+                "BLE provisioning disabled because required system bindings are unavailable: %s",
+                self.reason,
+            )
+            self._logged = True
+        return False
+
+    def stop(self) -> bool:
+        return False
+
+    def is_running(self) -> bool:
+        return False
+
+    def is_bluetooth_enabled(self) -> bool:
+        return False
+
+    def is_advertising(self) -> bool:
+        return False
+
+    def startup_failed(self) -> bool:
+        return True
+
+    def connected_devices(self) -> list[str]:
+        return []
 
 
 def utc_now() -> str:
@@ -109,9 +152,11 @@ class WifiUploadAgent:
                 switch_cooldown_seconds=config.switch_cooldown_seconds,
             )
         )
-        self.ble = BLEServer(
+        ble_server_class = BLEServer or UnavailableBLEServer
+        self.ble = ble_server_class(
             config.interface,
             on_wifi_connected=self._handle_ble_wifi_connected,
+            **({"reason": BLE_IMPORT_ERROR} if ble_server_class is UnavailableBLEServer else {}),
         )
 
         self._running = False
@@ -529,12 +574,14 @@ class WifiUploadAgent:
         with self._ble_gate:
             if self._ble_active:
                 return
-            self._ble_active = True
 
         logger.info("BLE provisioning enabled")
+        started = self.ble.start_async()
         with self._state_lock:
-            self._ble_started_at = time.monotonic()
-        self.ble.start_async()
+            self._ble_active = bool(started)
+            self._ble_started_at = time.monotonic() if started else 0.0
+        if not started:
+            logger.warning("BLE provisioning is unavailable; continuing without BLE")
 
     def _stop_ble(self):
         with self._ble_gate:
