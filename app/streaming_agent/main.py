@@ -9,6 +9,8 @@ except Exception:
     fcntl = None
 
 from app.core.config import MQTT_HOST, MQTT_PASSWORD, MQTT_PORT, MQTT_USERNAME
+from app.streaming_agent.detection import person_detector as person_detector_module
+from app.streaming_agent.detection import qr_scanner as qr_scanner_module
 from app.streaming_agent.detection.person_detector import PersonDetector
 from app.streaming_agent.detection.qr_scanner import BackendQRValidator, QrScanner, summarize_qr_value
 from app.streaming_agent.detection.scanner_config import QRScannerConfig
@@ -45,6 +47,7 @@ class StreamingAgent:
 
     def initialize(self):
         logger.info("Initializing streaming agent")
+        self._log_detection_runtime_diagnostics()
         self._acquire_single_instance_lock()
         self.stream_manager = StreamingManager()
         self.stream_manager.initialize()
@@ -94,6 +97,45 @@ class StreamingAgent:
         )
         logger.info("Streaming agent initialized successfully")
 
+    def _log_detection_runtime_diagnostics(self):
+        model_path = PersonDetector._resolve_model_path(person_detector_module.DEFAULT_MODEL_PATH)
+        logger.info(
+            "Detection runtime diagnostics: cv2=%s numpy=%s qr_cv2=%s qr_numpy=%s model_exists=%s model_path=%s",
+            bool(person_detector_module.cv2),
+            bool(person_detector_module.np),
+            bool(qr_scanner_module.cv2),
+            bool(qr_scanner_module.np),
+            model_path.exists(),
+            model_path,
+        )
+        try:
+            import RPi.GPIO  # noqa: F401
+
+            gpio_status = "RPi.GPIO"
+        except Exception as rpi_exc:
+            try:
+                import lgpio  # noqa: F401
+
+                gpio_status = "lgpio"
+            except Exception as lgpio_exc:
+                gpio_status = f"unavailable RPi.GPIO={rpi_exc} lgpio={lgpio_exc}"
+        logger.info("Detection GPIO diagnostics: %s", gpio_status)
+        try:
+            from ai_edge_litert.interpreter import Interpreter  # noqa: F401
+
+            logger.info("Detection TFLite runtime diagnostics: ai-edge-litert available")
+        except Exception as litert_exc:
+            try:
+                from tflite_runtime.interpreter import Interpreter  # noqa: F401
+
+                logger.info("Detection TFLite runtime diagnostics: tflite-runtime available")
+            except Exception as tflite_exc:
+                logger.warning(
+                    "Detection TFLite runtime unavailable: ai-edge-litert=%s tflite-runtime=%s",
+                    litert_exc,
+                    tflite_exc,
+                )
+
     def _handle_qr_detected(self, payload):
         """One-time scan event hook for telemetry, MQTT fanout, or local audit actions."""
         logger.info("QR scan event received: payload_keys=%s", sorted(payload.keys()))
@@ -125,11 +167,27 @@ class StreamingAgent:
         self.stream_manager.start_all()
         self.relay_controller.start()
         if self.person_detector:
-            self.person_detector.start()
+            try:
+                self.person_detector.start()
+                logger.info("Person detector running=%s", getattr(self.person_detector, "_running", False))
+            except Exception:
+                logger.exception("Person detector startup failed")
         if self.qr_scanner:
-            self.qr_scanner.start()
+            try:
+                self.qr_scanner.start()
+                logger.info("QR scanner running=%s", getattr(self.qr_scanner, "_running", False))
+            except Exception:
+                logger.exception("QR scanner startup failed")
         for tamper_detector in self.tamper_detectors:
-            tamper_detector.start()
+            try:
+                tamper_detector.start()
+                logger.info(
+                    "Tamper detector running=%s camera=%s",
+                    getattr(tamper_detector, "_running", False),
+                    getattr(tamper_detector, "camera_role", "unknown"),
+                )
+            except Exception:
+                logger.exception("Tamper detector startup failed for %s", getattr(tamper_detector, "camera_role", "unknown"))
         self.health_monitor.start()
         self.mqtt_publisher.start()
         self.hot_plug_monitor.start()
