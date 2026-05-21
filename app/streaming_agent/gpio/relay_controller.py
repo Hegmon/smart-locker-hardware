@@ -3,6 +3,10 @@ import threading
 import time
 
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
+from app.utils.python_path import add_system_dist_packages
+
+
+add_system_dist_packages()
 
 
 logger = LoggingManager.get_logger(__name__)
