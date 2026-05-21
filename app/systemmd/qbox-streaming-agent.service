@@ -1,0 +1,38 @@
+[Unit]
+Description=Smart Locker Streaming Agent (standalone/debug)
+After=network-online.target mediamtx.service
+Wants=network-online.target mediamtx.service
+Conflicts=qbox-device.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__PROJECT_DIR__
+
+Environment=PYTHONUNBUFFERED=1
+Environment=STREAM_AUTO_START=true
+Environment=MEDIAMTX_HOST=backend.qbox.sa
+Environment=MEDIAMTX_RTSP_PORT=8554
+Environment=STREAM_PUBLIC_BASE_URL=https://backend.qbox.sa
+
+# Standalone service for debugging. In production prefer qbox-device.service
+# so streaming shares the single process-wide MQTT connection with all agents.
+ExecStart=__PROJECT_DIR__/.venv/bin/python -m app.agents.streaming_agent
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+DeviceAllow=/dev/video0 rw
+DeviceAllow=/dev/video1 rw
+DeviceAllow=/dev/video2 rw
+DeviceAllow=/dev/video3 rw
+
+CPUQuota=80%
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
