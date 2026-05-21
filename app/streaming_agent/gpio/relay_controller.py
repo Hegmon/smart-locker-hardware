@@ -380,7 +380,19 @@ class _LgpioCompat:
         import lgpio
 
         self._lgpio = lgpio
-        self._chip = lgpio.gpiochip_open(0)
+        self._chip_number = None
+        self._chip = None
+        last_error = None
+        for chip_number in (0, 1, 2, 3, 4, 5):
+            try:
+                self._chip = lgpio.gpiochip_open(chip_number)
+                self._chip_number = chip_number
+                logger.info("lgpio opened /dev/gpiochip%s", chip_number)
+                break
+            except Exception as exc:
+                last_error = exc
+        if self._chip is None:
+            raise RuntimeError(f"could not open any gpiochip 0-5: {last_error}")
         self._claimed = set()
 
     def setmode(self, mode):
