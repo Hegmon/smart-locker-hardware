@@ -1,12 +1,18 @@
 import threading
 import time
 
-import pyudev
-
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 
 
 logger = LoggingManager.get_logger(__name__)
+
+try:
+    import pyudev
+except Exception as exc:  # pragma: no cover - optional Pi dependency
+    pyudev = None
+    PYUDEV_IMPORT_ERROR = exc
+else:
+    PYUDEV_IMPORT_ERROR = None
 
 
 class HotPlugMonitor:
@@ -18,15 +24,21 @@ class HotPlugMonitor:
         self.running = False
         self.thread = None
         self.lock = threading.Lock()
-        self.context = pyudev.Context()
-        self.monitor = pyudev.Monitor.from_netlink(self.context)
-        self.monitor.filter_by(subsystem="video4linux")
+        self.context = None
+        self.monitor = None
+        if pyudev is not None:
+            self.context = pyudev.Context()
+            self.monitor = pyudev.Monitor.from_netlink(self.context)
+            self.monitor.filter_by(subsystem="video4linux")
         self.last_event_time = 0
 
     def start(self):
         with self.lock:
             if self.running:
                 logger.info("Hot plug monitor is already running")
+                return
+            if self.monitor is None:
+                logger.warning("Hot plug monitor disabled because pyudev is unavailable: %s", PYUDEV_IMPORT_ERROR)
                 return
 
             logger.info("Starting hot plug monitor")
