@@ -1,5 +1,10 @@
 import threading
 import time
+
+from app.utils.python_path import add_system_dist_packages
+
+add_system_dist_packages()
+
 try:
     import cv2
     import numpy as np
