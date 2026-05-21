@@ -1,0 +1,341 @@
+import os
+import threading
+import time
+
+from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
+
+
+logger = LoggingManager.get_logger(__name__)
+
+RED_LED_PIN = 21
+GREEN_LED_PIN = 20
+LOCKER_PIN = 16
+BUZZER_PIN = 12
+
+QR_SUCCESS_UNLOCK_TIME = 5
+ALERT_DURATION = 15
+
+
+def _env_bool(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name, default, minimum=None):
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+class RelayController:
+    """Thread-safe BCM GPIO controller for the four-channel relay board.
+
+    Most Raspberry Pi relay boards used with IN1-IN4 are active-low. The
+    default follows that wiring and can be overridden with RELAY_ACTIVE_LOW.
+    """
+
+    def __init__(
+        self,
+        *,
+        red_led_pin=RED_LED_PIN,
+        green_led_pin=GREEN_LED_PIN,
+        locker_pin=LOCKER_PIN,
+        buzzer_pin=BUZZER_PIN,
+        active_low=None,
+        unlock_seconds=None,
+        alert_duration=None,
+    ):
+        self.red_led_pin = int(red_led_pin)
+        self.green_led_pin = int(green_led_pin)
+        self.locker_pin = int(locker_pin)
+        self.buzzer_pin = int(buzzer_pin)
+        self.active_low = _env_bool("RELAY_ACTIVE_LOW", True) if active_low is None else bool(active_low)
+        self.unlock_seconds = _env_float("QR_SUCCESS_UNLOCK_TIME", QR_SUCCESS_UNLOCK_TIME, minimum=0.1)
+        self.alert_duration = _env_float("ALERT_DURATION", ALERT_DURATION, minimum=0.1)
+        if unlock_seconds is not None:
+            self.unlock_seconds = max(0.1, float(unlock_seconds))
+        if alert_duration is not None:
+            self.alert_duration = max(0.1, float(alert_duration))
+
+        self._gpio = None
+        self._enabled = False
+        self._lock = threading.RLock()
+        self._red_sources = set()
+        self._buzzer_sources = set()
+        self._alert_until = {}
+        self._alert_threads = set()
+        self._qr_success_running = False
+        self._red_on = False
+        self._buzzer_on = False
+        self._green_on = False
+        self._locker_unlocked = False
+
+    @property
+    def pins(self):
+        return (self.red_led_pin, self.green_led_pin, self.locker_pin, self.buzzer_pin)
+
+    @property
+    def success_pin(self):
+        return self.green_led_pin
+
+    @property
+    def failure_pin(self):
+        return self.red_led_pin
+
+    def start(self):
+        with self._lock:
+            if self._enabled:
+                return
+            try:
+                import RPi.GPIO as GPIO
+            except Exception as exc:
+                logger.warning("RPi.GPIO unavailable; relay actions disabled: %s", exc)
+                return
+
+            self._gpio = GPIO
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setwarnings(False)
+            for pin in self.pins:
+                GPIO.setup(pin, GPIO.OUT, initial=self._inactive_state())
+            self._enabled = True
+            self._red_sources.clear()
+            self._buzzer_sources.clear()
+            self._red_on = False
+            self._buzzer_on = False
+            self._green_on = False
+            self._locker_unlocked = False
+            self.lock_locker()
+            self.red_led_off()
+            self.green_led_off()
+            self.buzzer_off()
+            logger.info(
+                "Relay controller initialized in BCM mode: red=%s green=%s locker=%s buzzer=%s active_low=%s",
+                self.red_led_pin,
+                self.green_led_pin,
+                self.locker_pin,
+                self.buzzer_pin,
+                self.active_low,
+            )
+
+    def red_led_on(self):
+        self._set_red_source("manual", True)
+
+    def red_led_off(self):
+        self._set_red_source("manual", False)
+
+    def green_led_on(self):
+        with self._lock:
+            if self._green_on:
+                return
+            self._green_on = True
+            self._write(self.green_led_pin, True, "Green LED")
+
+    def green_led_off(self):
+        with self._lock:
+            if not self._green_on:
+                self._write(self.green_led_pin, False, "Green LED")
+                return
+            self._green_on = False
+            self._write(self.green_led_pin, False, "Green LED")
+
+    def buzzer_on(self):
+        self._set_buzzer_source("manual", True)
+
+    def buzzer_off(self):
+        self._set_buzzer_source("manual", False)
+
+    def unlock_locker(self):
+        with self._lock:
+            if self._locker_unlocked:
+                return
+            self._locker_unlocked = True
+            self._write(self.locker_pin, True, "Locker relay")
+            logger.info("Locker unlocked")
+
+    def lock_locker(self):
+        with self._lock:
+            was_unlocked = self._locker_unlocked
+            self._locker_unlocked = False
+            self._write(self.locker_pin, False, "Locker relay")
+            if was_unlocked:
+                logger.info("Locker locked")
+            else:
+                logger.info("Locker locked/default state confirmed")
+
+    def set_person_visible(self, visible):
+        with self._lock:
+            was_visible = "person" in self._red_sources or "person" in self._buzzer_sources
+        if bool(visible) != was_visible:
+            logger.info("Person detected" if visible else "No person detected")
+        self._set_red_source("person", visible)
+        self._set_buzzer_source("person", visible)
+
+    def set_tamper_active(self, camera_role, active):
+        if active:
+            self.trigger_alert(f"tamper:{camera_role}", self.alert_duration, log_name="Tamper detected")
+
+    def trigger_tamper_alert(self, camera_role="camera"):
+        self.trigger_alert(f"tamper:{camera_role}", self.alert_duration, log_name="Tamper detected")
+
+    def qr_success(self, duration_seconds=None):
+        duration = self.unlock_seconds if duration_seconds is None else max(0.1, float(duration_seconds))
+        with self._lock:
+            if self._qr_success_running:
+                logger.info("QR success ignored because locker unlock cycle is already running")
+                return
+            self._qr_success_running = True
+
+        threading.Thread(
+            target=self._qr_success_worker,
+            args=(duration,),
+            daemon=True,
+            name="relay-qr-success",
+        ).start()
+
+    def qr_failure(self):
+        logger.warning("QR failure")
+        self.trigger_alert("qr_failure", self.alert_duration, log_name="QR failure")
+
+    def pulse_success(self, duration_seconds=None):
+        self.qr_success(duration_seconds)
+
+    def pulse_failure(self):
+        self.qr_failure()
+
+    def trigger_alert(self, source, duration_seconds=None, *, log_name="Relay alert"):
+        source = str(source or "alert")
+        duration = self.alert_duration if duration_seconds is None else max(0.1, float(duration_seconds))
+        until = time.monotonic() + duration
+        with self._lock:
+            self._alert_until[source] = until
+            self._set_red_source(source, True)
+            self._set_buzzer_source(source, True)
+            if source in self._alert_threads:
+                logger.info("%s extended for %.1fs", log_name, duration)
+                return
+            self._alert_threads.add(source)
+        logger.warning("%s; red LED and buzzer ON for %.1fs", log_name, duration)
+        threading.Thread(
+            target=self._alert_worker,
+            args=(source,),
+            daemon=True,
+            name=f"relay-alert-{source}",
+        ).start()
+
+    def cleanup(self):
+        with self._lock:
+            self._red_sources.clear()
+            self._buzzer_sources.clear()
+            self._alert_until.clear()
+            self._alert_threads.clear()
+            self._qr_success_running = False
+            try:
+                self.lock_locker()
+                self.green_led_off()
+                self._apply_red_locked()
+                self._apply_buzzer_locked()
+                if self._enabled and self._gpio is not None:
+                    self._gpio.cleanup(self.pins)
+            except Exception:
+                logger.exception("Relay GPIO cleanup failed")
+            finally:
+                self._enabled = False
+                self._gpio = None
+
+    def _qr_success_worker(self, duration):
+        try:
+            logger.info("QR success; unlocking locker for %.1fs", duration)
+            with self._lock:
+                self._clear_alert_source_locked("qr_failure")
+            self.green_led_on()
+            self.unlock_locker()
+            time.sleep(duration)
+        except Exception:
+            logger.exception("QR success relay operation failed")
+        finally:
+            try:
+                self.lock_locker()
+                self.green_led_off()
+            finally:
+                with self._lock:
+                    self._qr_success_running = False
+
+    def _alert_worker(self, source):
+        try:
+            while True:
+                with self._lock:
+                    until = self._alert_until.get(source, 0.0)
+                remaining = until - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(remaining, 0.1))
+        finally:
+            with self._lock:
+                self._alert_until.pop(source, None)
+                self._alert_threads.discard(source)
+                self._set_red_source(source, False)
+                self._set_buzzer_source(source, False)
+            logger.info("Relay alert cleared for source=%s", source)
+
+    def _set_red_source(self, source, active):
+        with self._lock:
+            source = str(source or "manual")
+            if active:
+                self._red_sources.add(source)
+            else:
+                self._red_sources.discard(source)
+            self._apply_red_locked()
+
+    def _set_buzzer_source(self, source, active):
+        with self._lock:
+            source = str(source or "manual")
+            if active:
+                self._buzzer_sources.add(source)
+            else:
+                self._buzzer_sources.discard(source)
+            self._apply_buzzer_locked()
+
+    def _clear_alert_source_locked(self, source):
+        self._alert_until.pop(source, None)
+        self._red_sources.discard(source)
+        self._buzzer_sources.discard(source)
+        self._apply_red_locked()
+        self._apply_buzzer_locked()
+
+    def _apply_red_locked(self):
+        active = bool(self._red_sources)
+        if self._red_on == active:
+            return
+        self._red_on = active
+        self._write(self.red_led_pin, active, "Red LED")
+
+    def _apply_buzzer_locked(self):
+        active = bool(self._buzzer_sources)
+        if self._buzzer_on == active:
+            return
+        self._buzzer_on = active
+        self._write(self.buzzer_pin, active, "Buzzer")
+
+    def _write(self, pin, active, label):
+        if not self._enabled or self._gpio is None:
+            logger.info("Relay dry-run: %s %s on BCM GPIO%s", label, "ON" if active else "OFF", pin)
+            return
+        state = self._active_state() if active else self._inactive_state()
+        self._gpio.output(pin, state)
+        logger.info("%s %s on BCM GPIO%s", label, "ON" if active else "OFF", pin)
+
+    def _active_state(self):
+        if self._gpio is None:
+            return None
+        return self._gpio.LOW if self.active_low else self._gpio.HIGH
+
+    def _inactive_state(self):
+        if self._gpio is None:
+            return None
+        return self._gpio.HIGH if self.active_low else self._gpio.LOW
