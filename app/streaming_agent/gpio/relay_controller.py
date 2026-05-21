@@ -96,20 +96,31 @@ class RelayController:
         with self._lock:
             if self._enabled:
                 return
+            gpio_source = "RPi.GPIO"
             try:
                 import RPi.GPIO as GPIO
             except Exception as exc:
                 try:
                     GPIO = _LgpioCompat()
+                    gpio_source = "lgpio"
                 except Exception as lgpio_exc:
                     logger.warning("GPIO unavailable; relay actions disabled: RPi.GPIO=%s lgpio=%s", exc, lgpio_exc)
                     return
 
-            self._gpio = GPIO
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setwarnings(False)
-            for pin in self.pins:
-                GPIO.setup(pin, GPIO.OUT, initial=self._inactive_state())
+            try:
+                self._configure_gpio(GPIO)
+            except Exception as gpio_exc:
+                logger.warning("%s GPIO setup failed, trying lgpio fallback: %s", gpio_source, gpio_exc)
+                self._cleanup_gpio_object(GPIO)
+                try:
+                    GPIO = _LgpioCompat()
+                    gpio_source = "lgpio"
+                    self._configure_gpio(GPIO)
+                except Exception as lgpio_exc:
+                    logger.warning("GPIO unavailable; relay actions disabled: %s", lgpio_exc)
+                    self._gpio = None
+                    return
+
             self._enabled = True
             self._red_sources.clear()
             self._buzzer_sources.clear()
@@ -129,6 +140,7 @@ class RelayController:
                 self.buzzer_pin,
                 self.active_low,
             )
+            logger.info("Relay GPIO backend: %s", gpio_source)
 
     def red_led_on(self):
         self._set_red_source("manual", True)
@@ -331,6 +343,19 @@ class RelayController:
         state = self._active_state() if active else self._inactive_state()
         self._gpio.output(pin, state)
         logger.info("%s %s on BCM GPIO%s", label, "ON" if active else "OFF", pin)
+
+    def _configure_gpio(self, gpio):
+        self._gpio = gpio
+        gpio.setmode(gpio.BCM)
+        gpio.setwarnings(False)
+        for pin in self.pins:
+            gpio.setup(pin, gpio.OUT, initial=self._inactive_state())
+
+    def _cleanup_gpio_object(self, gpio):
+        try:
+            gpio.cleanup(self.pins)
+        except Exception:
+            logger.debug("GPIO cleanup after setup failure failed", exc_info=True)
 
     def _active_state(self):
         if self._gpio is None:
