@@ -85,7 +85,7 @@ class PersonDetector:
         labels_path=DEFAULT_LABELS_PATH,
         confidence_threshold=None,
         process_every_n_frames=None,
-        led_off_delay_seconds=3.0,
+        led_off_delay_seconds=0.0,
         led_controller=None,
     ):
         self.frame_buffer = frame_buffer
@@ -108,8 +108,8 @@ class PersonDetector:
         self._top_detection_log_seconds = _env_float("PERSON_DETECTOR_LOG_TOP_SECONDS", 10.0, minimum=0.0)
         self._required_detection_frames = _env_int("PERSON_DETECTION_CONFIRM_FRAMES", 2, minimum=1)
         self._required_clear_frames = _env_int("PERSON_DETECTION_CLEAR_FRAMES", 2, minimum=1)
-        self._clear_seconds = _env_float("PERSON_DETECTION_CLEAR_SECONDS", 0.0, minimum=0.0)
-        self._stale_clear_seconds = _env_float("PERSON_DETECTION_STALE_CLEAR_SECONDS", 1.0, minimum=0.05)
+        self._clear_seconds = _env_float("PERSON_DETECTION_CLEAR_SECONDS", led_off_delay_seconds, minimum=0.0)
+        self._stale_clear_seconds = _env_float("PERSON_DETECTION_STALE_CLEAR_SECONDS", 0.35, minimum=0.05)
         self._min_box_area = _env_float("PERSON_DETECTION_MIN_BOX_AREA", 0.04, minimum=0.0, maximum=1.0)
         self._max_box_area = _env_float("PERSON_DETECTION_MAX_BOX_AREA", 0.95, minimum=0.01, maximum=1.0)
         self._near_object_enabled = os.getenv("PERSON_NEAR_OBJECT_ENABLED", "true").strip().lower() in {
@@ -258,10 +258,7 @@ class PersonDetector:
         if time.monotonic() - self._last_person_seen_at < self._stale_clear_seconds:
             return
         logger.info("No fresh person detection; GPIO LEDs OFF")
-        self.led_controller.set_person_visible(False)
-        self._led_visible = False
-        self._detection_streak = 0
-        self._clear_streak = 0
+        self._clear_person_state()
 
     def _detect_person(self, frame_bytes, sequence):
         frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
@@ -390,6 +387,18 @@ class PersonDetector:
                 f"largest_area={largest_area:.3f} roi={self._motion_roi}"
             )
         return False, ""
+
+    def _reset_presence_baselines(self):
+        self._near_baseline_gray = None
+        self._near_baseline_brightness = None
+        self._motion_baseline_gray = None
+
+    def _clear_person_state(self):
+        self.led_controller.set_person_visible(False)
+        self._led_visible = False
+        self._detection_streak = 0
+        self._clear_streak = 0
+        self._reset_presence_baselines()
 
     def _prepare_input(self, rgb_frame):
         tensor = np.expand_dims(rgb_frame, axis=0)
@@ -538,14 +547,12 @@ class PersonDetector:
         self._clear_streak += 1
         self._detection_streak = 0
         clear_age = now - self._last_person_seen_at
-        if (
-            self._led_visible
-            and self._clear_streak >= self._required_clear_frames
-            and clear_age >= self._clear_seconds
-        ):
-            logger.info("No person detected; GPIO LEDs OFF")
-            self.led_controller.set_person_visible(False)
-            self._led_visible = False
+        if self._clear_streak >= self._required_clear_frames and clear_age >= self._clear_seconds:
+            if self._led_visible:
+                logger.info("No person detected; GPIO LEDs OFF")
+                self._clear_person_state()
+            else:
+                self.led_controller.set_person_visible(False)
 
     def _log_fps(self):
         self._processed_frames += 1
