@@ -19,7 +19,8 @@ class PersonDetectorStateTests(unittest.TestCase):
         detector._update_led_state(True, "body_motion")
         detector._update_led_state(False, "")
 
-        self.assertEqual(led.visible_calls, [True, False])
+        # detectors no longer directly drive relays (state manager is authoritative)
+        self.assertEqual(led.visible_calls, [])
         self.assertFalse(detector._led_visible)
 
     def test_update_led_state_holds_relay_until_clear_timeout(self) -> None:
@@ -35,7 +36,8 @@ class PersonDetectorStateTests(unittest.TestCase):
         detector._update_led_state(True, "body_motion")
         detector._update_led_state(False, "")
 
-        self.assertEqual(led.visible_calls, [True])
+        # detectors no longer directly drive relays (state manager is authoritative)
+        self.assertEqual(led.visible_calls, [])
         self.assertTrue(detector._led_visible)
 
     def test_update_led_state_sends_defensive_off_when_local_state_is_clear(self) -> None:
@@ -49,7 +51,8 @@ class PersonDetectorStateTests(unittest.TestCase):
 
         detector._update_led_state(False, "")
 
-        self.assertEqual(led.visible_calls, [False])
+        # detectors no longer directly drive relays (state manager is authoritative)
+        self.assertEqual(led.visible_calls, [])
 
     def test_near_object_detection_is_disabled_by_default(self) -> None:
         detector = PersonDetector(None, led_controller=_Led())
