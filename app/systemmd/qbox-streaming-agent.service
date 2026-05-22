@@ -14,6 +14,24 @@ Environment=STREAM_AUTO_START=true
 Environment=MEDIAMTX_HOST=backend.qbox.sa
 Environment=MEDIAMTX_RTSP_PORT=8554
 Environment=STREAM_PUBLIC_BASE_URL=https://backend.qbox.sa
+Environment=DETECTION_RELAY_SOURCE_TTL_SECONDS=0
+Environment=DETECTION_LED_HOLD_SECONDS=0
+Environment=PERSON_DETECTOR_EVERY_N_FRAMES=1
+Environment=PERSON_DETECTION_CONFIRM_FRAMES=1
+Environment=PERSON_DETECTION_CLEAR_FRAMES=1
+Environment=PERSON_DETECTION_CLEAR_SECONDS=0
+Environment=PERSON_DETECTION_STALE_CLEAR_SECONDS=0.35
+Environment=PERSON_NEAR_OBJECT_ENABLED=false
+Environment=PERSON_MOTION_ENABLED=true
+Environment=PERSON_MOTION_REBASELINE_SECONDS=1.5
+Environment=TAMPER_DETECTOR_EVERY_N_FRAMES=1
+Environment=TAMPER_CONFIRM_SECONDS=0.2
+Environment=TAMPER_CONFIRM_FRAMES=2
+Environment=TAMPER_CLEAR_SECONDS=0
+Environment=TAMPER_CLEAR_FRAMES=1
+Environment=TAMPER_STALE_CLEAR_SECONDS=0.5
+Environment=TAMPER_BASELINE_FRAMES=5
+Environment=TAMPER_SCENE_CHANGE_ENABLED=false
 
 # Standalone service for debugging. In production prefer qbox-device.service
 # so streaming shares the single process-wide MQTT connection with all agents.
