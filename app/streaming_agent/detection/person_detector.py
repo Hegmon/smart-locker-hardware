@@ -85,7 +85,7 @@ class PersonDetector:
         self.model_path = self._resolve_model_path(model_path)
         self.labels_path = Path(labels_path)
         self.confidence_threshold = (
-            _env_float("PERSON_DETECTION_CONFIDENCE", 0.4, minimum=0.05, maximum=0.95)
+            _env_float("PERSON_DETECTION_CONFIDENCE", 0.65, minimum=0.05, maximum=0.95)
             if confidence_threshold is None
             else float(confidence_threshold)
         )
@@ -101,18 +101,18 @@ class PersonDetector:
         self._required_detection_frames = _env_int("PERSON_DETECTION_CONFIRM_FRAMES", 2, minimum=1)
         self._required_clear_frames = _env_int("PERSON_DETECTION_CLEAR_FRAMES", 2, minimum=1)
         self._clear_seconds = _env_float("PERSON_DETECTION_CLEAR_SECONDS", 0.5, minimum=0.0)
-        self._min_box_area = _env_float("PERSON_DETECTION_MIN_BOX_AREA", 0.02, minimum=0.0, maximum=1.0)
-        self._max_box_area = _env_float("PERSON_DETECTION_MAX_BOX_AREA", 0.90, minimum=0.01, maximum=1.0)
+        self._min_box_area = _env_float("PERSON_DETECTION_MIN_BOX_AREA", 0.04, minimum=0.0, maximum=1.0)
+        self._max_box_area = _env_float("PERSON_DETECTION_MAX_BOX_AREA", 0.95, minimum=0.01, maximum=1.0)
         self._near_object_enabled = os.getenv("PERSON_NEAR_OBJECT_ENABLED", "true").strip().lower() in {
             "1",
             "true",
             "yes",
             "on",
         }
-        self._near_change_threshold = _env_float("PERSON_NEAR_CHANGE_THRESHOLD", 0.65, minimum=0.01, maximum=1.0)
-        self._near_brightness_delta = _env_float("PERSON_NEAR_BRIGHTNESS_DELTA", 45.0, minimum=0.0, maximum=255.0)
-        self._near_edge_density_min = _env_float("PERSON_NEAR_EDGE_DENSITY_MIN", 0.018, minimum=0.0, maximum=1.0)
-        self._near_roi = _env_roi("PERSON_NEAR_ROI", "0.25,0.25,0.75,0.75")
+        self._near_change_threshold = _env_float("PERSON_NEAR_CHANGE_THRESHOLD", 0.30, minimum=0.01, maximum=1.0)
+        self._near_brightness_delta = _env_float("PERSON_NEAR_BRIGHTNESS_DELTA", 10.0, minimum=0.0, maximum=255.0)
+        self._near_edge_density_min = _env_float("PERSON_NEAR_EDGE_DENSITY_MIN", 0.006, minimum=0.0, maximum=1.0)
+        self._near_roi = _env_roi("PERSON_NEAR_ROI", "0.15,0.15,0.85,0.85")
         self._baseline_learning_rate = _env_float("PERSON_BASELINE_LEARNING_RATE", 0.01, minimum=0.0, maximum=1.0)
         self._near_baseline_gray = None
         self._near_baseline_brightness = None
