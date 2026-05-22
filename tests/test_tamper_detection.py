@@ -16,6 +16,7 @@ class TamperDetectionTests(unittest.TestCase):
             tamper_confirm_seconds=0.1,
         )
         detector._tamper_started_at = 0.0
+        detector._required_tamper_frames = 1
 
         detector._update_tamper_state(True, "covered")
 
@@ -32,6 +33,7 @@ class TamperDetectionTests(unittest.TestCase):
         )
         detector._tamper_active = True
         detector._last_tamper_seen_at = 0.0
+        detector._required_clear_frames = 1
 
         detector._update_tamper_state(False, "")
 
@@ -46,6 +48,7 @@ class TamperDetectionTests(unittest.TestCase):
             led_controller=led,
         )
         detector._tamper_active = True
+        detector._required_clear_frames = 1
 
         detector._update_tamper_state(False, "")
 
@@ -61,6 +64,7 @@ class TamperDetectionTests(unittest.TestCase):
             tamper_clear_seconds=0.0,
         )
         detector._tamper_active = True
+        detector._required_clear_frames = 1
 
         detector._update_tamper_state(False, "")
 
