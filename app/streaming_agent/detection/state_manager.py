@@ -203,7 +203,7 @@ class DetectionStateManager:
             for state in self.camera_state.values()
         )
 
-        # periodic debug logging for easier diagnosis
+        # periodic debug logging for easier diagnosis of stuck relays
         try:
             if now - self._last_debug_log_at >= DEBUG_LOG_INTERVAL:
                 parts = []
@@ -214,6 +214,21 @@ class DetectionStateManager:
                 logger.info(
                     "Security state: %s security=%s",
                     " | ".join(parts),
+                    bool(security_event_active),
+                )
+                # flat summary matching required debug format
+                person_active = any(bool(s.get("person_detected")) for s in self.camera_state.values())
+                motion_active = any(bool(s.get("motion_detected")) for s in self.camera_state.values())
+                face_active = any(bool(s.get("face_detected")) for s in self.camera_state.values())
+                hand_active = any(bool(s.get("hand_detected")) for s in self.camera_state.values())
+                tamper_active = any(bool(s.get("tamper_detected")) for s in self.camera_state.values())
+                logger.info(
+                    "Security state: person=%s motion=%s face=%s hand=%s tamper=%s security=%s",
+                    person_active,
+                    motion_active,
+                    face_active,
+                    hand_active,
+                    tamper_active,
                     bool(security_event_active),
                 )
                 self._last_debug_log_at = now
