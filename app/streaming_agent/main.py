@@ -169,6 +169,12 @@ class StreamingAgent:
         self.running = True
         self.stream_manager.start_all()
         self.relay_controller.start()
+        # Ensure any stuck hardware state is cleared on startup
+        try:
+            self.relay_controller.force_security_relays_off()
+            logger.info("RelayController: forced security relays OFF at startup")
+        except Exception:
+            logger.exception("Failed to force security relays OFF on startup")
         if self.person_detector:
             try:
                 self.person_detector.start()
