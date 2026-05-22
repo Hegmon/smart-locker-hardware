@@ -5,10 +5,7 @@ Run on the device where the relays are connected.
 """
 import pprint
 import time
-
 from app.streaming_agent.gpio.relay_controller import RelayController
-
-
 def main():
     rc = RelayController()
     rc.start()
