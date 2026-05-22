@@ -57,7 +57,7 @@ class TamperDetection:
         led_controller=None,
         process_every_n_frames=None,
         tamper_confirm_seconds=None,
-        tamper_clear_seconds=3.0,
+        tamper_clear_seconds=None,
         dark_brightness_threshold=None,
         bright_brightness_threshold=None,
         blur_threshold=None,
@@ -70,16 +70,20 @@ class TamperDetection:
         self._owns_led_controller = led_controller is None
         self.led_controller = led_controller or RelayController()
         self.process_every_n_frames = (
-            _env_int("TAMPER_DETECTOR_EVERY_N_FRAMES", 2, minimum=1)
+            _env_int("TAMPER_DETECTOR_EVERY_N_FRAMES", 1, minimum=1)
             if process_every_n_frames is None
             else max(1, int(process_every_n_frames))
         )
         self.tamper_confirm_seconds = (
-            _env_float("TAMPER_CONFIRM_SECONDS", 0.5, minimum=0.0)
+            _env_float("TAMPER_CONFIRM_SECONDS", 0.2, minimum=0.0)
             if tamper_confirm_seconds is None
             else max(0.0, float(tamper_confirm_seconds))
         )
-        self.tamper_clear_seconds = max(0.1, float(tamper_clear_seconds))
+        self.tamper_clear_seconds = (
+            _env_float("TAMPER_CLEAR_SECONDS", 0.0, minimum=0.0)
+            if tamper_clear_seconds is None
+            else max(0.0, float(tamper_clear_seconds))
+        )
         self.dark_brightness_threshold = (
             _env_float("TAMPER_DARK_BRIGHTNESS_THRESHOLD", 28.0, minimum=0.0, maximum=255.0)
             if dark_brightness_threshold is None
@@ -109,7 +113,7 @@ class TamperDetection:
         self.change_brightness_delta = _env_float("TAMPER_CHANGE_BRIGHTNESS_DELTA", 28.0, minimum=0.0, maximum=255.0)
         self.scene_change_tamper_enabled = _env_bool("TAMPER_SCENE_CHANGE_ENABLED", True)
         confirm_frame_default = 1 if tamper_confirm_seconds is not None else 2
-        clear_frame_default = 1 if tamper_clear_seconds != 3.0 else 2
+        clear_frame_default = 1
         self._required_tamper_frames = _env_int("TAMPER_CONFIRM_FRAMES", confirm_frame_default, minimum=1)
         self._required_clear_frames = _env_int("TAMPER_CLEAR_FRAMES", clear_frame_default, minimum=1)
         self.skip_when = skip_when
