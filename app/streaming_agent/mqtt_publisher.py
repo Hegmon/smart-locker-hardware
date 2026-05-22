@@ -120,12 +120,17 @@ class MQTTPublisher:
             payload.setdefault("health", self.health_monitor.get_metrics())
             payload.setdefault("timestamp", int(time.time()))
         self._publish(topic, payload)
+        if isinstance(payload, dict):
+            for role in ("internal", "external"):
+                role_payload = payload.get(role)
+                if isinstance(role_payload, dict):
+                    self._publish(f"devices/{self.device_id}/stream/{role}/status", role_payload)
 
     def publish_health_metrics(self):
         self.publish_stream_status()
 
     def _publish(self, topic, payload):
-        retain = topic.endswith("/stream/status")
+        retain = "/stream/" in topic or topic.endswith("/stream/status")
         published = self.mqtt.publish_json(topic, payload, qos=1, retain=retain)
         if published:
             logger.info("Published MQTT message to topic %s", topic)
