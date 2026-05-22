@@ -80,7 +80,7 @@ class TamperDetection:
             else max(0.0, float(tamper_confirm_seconds))
         )
         self.tamper_clear_seconds = (
-            _env_float("TAMPER_CLEAR_SECONDS", 0.0, minimum=0.0)
+            _env_float("TAMPER_CLEAR_SECONDS", 2.5, minimum=0.0)
             if tamper_clear_seconds is None
             else max(0.0, float(tamper_clear_seconds))
         )
@@ -307,7 +307,7 @@ class TamperDetection:
             self._clear_streak = 0
             if self._tamper_started_at is None:
                 self._tamper_started_at = now
-                logger.warning("Possible tamper on %s camera: %s", self.camera_role, reason)
+                logger.warning("Tamper detection candidate start on %s camera: %s", self.camera_role, reason)
             if (
                 not self._tamper_active
                 and self._tamper_streak >= self._required_tamper_frames
@@ -315,7 +315,7 @@ class TamperDetection:
             ):
                 self._tamper_active = True
                 self.led_controller.set_tamper_active(self.camera_role, True)
-                logger.warning("Tamper confirmed on %s camera; GPIO LEDs ON: %s", self.camera_role, reason)
+                logger.warning("Tamper confirmed on %s camera; Relay 4 ON: %s", self.camera_role, reason)
             return
 
         self._tamper_started_at = None
@@ -328,7 +328,8 @@ class TamperDetection:
         ):
             self._tamper_active = False
             self.led_controller.set_tamper_active(self.camera_role, False)
-            logger.info("Tamper cleared on %s camera; GPIO LEDs may turn OFF if no other detection is active", self.camera_role)
+            clear_age = now - self._last_tamper_seen_at
+            logger.info("Tamper cleared on %s camera for %.2fs; Relay 4 OFF", self.camera_role, clear_age)
 
     def _log_fps(self):
         self._processed_frames += 1
