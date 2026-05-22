@@ -85,7 +85,7 @@ class PersonDetector:
         self.model_path = self._resolve_model_path(model_path)
         self.labels_path = Path(labels_path)
         self.confidence_threshold = (
-            _env_float("PERSON_DETECTION_CONFIDENCE", 0.65, minimum=0.05, maximum=0.95)
+            _env_float("PERSON_DETECTION_CONFIDENCE", 0.55, minimum=0.05, maximum=0.95)
             if confidence_threshold is None
             else float(confidence_threshold)
         )
@@ -94,7 +94,7 @@ class PersonDetector:
             if process_every_n_frames is None
             else max(1, int(process_every_n_frames))
         )
-        self._model_every_n_frames = _env_int("PERSON_MODEL_EVERY_N_FRAMES", 5, minimum=1)
+        self._model_every_n_frames = _env_int("PERSON_MODEL_EVERY_N_FRAMES", 3, minimum=1)
         self.led_off_delay_seconds = led_off_delay_seconds
         self._owns_led_controller = led_controller is None
         self.led_controller = led_controller or RelayController()
@@ -110,10 +110,10 @@ class PersonDetector:
             "yes",
             "on",
         }
-        self._near_change_threshold = _env_float("PERSON_NEAR_CHANGE_THRESHOLD", 0.30, minimum=0.01, maximum=1.0)
-        self._near_brightness_delta = _env_float("PERSON_NEAR_BRIGHTNESS_DELTA", 10.0, minimum=0.0, maximum=255.0)
-        self._near_edge_density_min = _env_float("PERSON_NEAR_EDGE_DENSITY_MIN", 0.006, minimum=0.0, maximum=1.0)
-        self._near_roi = _env_roi("PERSON_NEAR_ROI", "0.15,0.15,0.85,0.85")
+        self._near_change_threshold = _env_float("PERSON_NEAR_CHANGE_THRESHOLD", 0.22, minimum=0.01, maximum=1.0)
+        self._near_brightness_delta = _env_float("PERSON_NEAR_BRIGHTNESS_DELTA", 6.0, minimum=0.0, maximum=255.0)
+        self._near_edge_density_min = _env_float("PERSON_NEAR_EDGE_DENSITY_MIN", 0.004, minimum=0.0, maximum=1.0)
+        self._near_roi = _env_roi("PERSON_NEAR_ROI", "0.10,0.10,0.90,0.90")
         self._baseline_learning_rate = _env_float("PERSON_BASELINE_LEARNING_RATE", 0.01, minimum=0.0, maximum=1.0)
         self._near_baseline_gray = None
         self._near_baseline_brightness = None
