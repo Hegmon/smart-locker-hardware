@@ -51,6 +51,22 @@ def _env_int(name, default, minimum=None):
     return value
 
 
+def _env_roi(name, default):
+    raw = os.getenv(name, default)
+    try:
+        values = [float(part.strip()) for part in raw.split(",")]
+    except (AttributeError, ValueError):
+        values = [float(part) for part in default.split(",")]
+    if len(values) != 4:
+        values = [float(part) for part in default.split(",")]
+    left, top, right, bottom = values
+    left = min(max(left, 0.0), 0.95)
+    top = min(max(top, 0.0), 0.95)
+    right = min(max(right, left + 0.05), 1.0)
+    bottom = min(max(bottom, top + 0.05), 1.0)
+    return left, top, right, bottom
+
+
 class PersonDetector:
     """Run lightweight person detection from the streaming agent's shared frame buffer."""
 
@@ -92,10 +108,11 @@ class PersonDetector:
             "yes",
             "on",
         }
-        self._near_change_threshold = _env_float("PERSON_NEAR_CHANGE_THRESHOLD", 0.22, minimum=0.01, maximum=1.0)
-        self._near_brightness_delta = _env_float("PERSON_NEAR_BRIGHTNESS_DELTA", 12.0, minimum=0.0, maximum=255.0)
-        self._near_edge_density_min = _env_float("PERSON_NEAR_EDGE_DENSITY_MIN", 0.006, minimum=0.0, maximum=1.0)
-        self._baseline_learning_rate = _env_float("PERSON_BASELINE_LEARNING_RATE", 0.02, minimum=0.0, maximum=1.0)
+        self._near_change_threshold = _env_float("PERSON_NEAR_CHANGE_THRESHOLD", 0.45, minimum=0.01, maximum=1.0)
+        self._near_brightness_delta = _env_float("PERSON_NEAR_BRIGHTNESS_DELTA", 28.0, minimum=0.0, maximum=255.0)
+        self._near_edge_density_min = _env_float("PERSON_NEAR_EDGE_DENSITY_MIN", 0.012, minimum=0.0, maximum=1.0)
+        self._near_roi = _env_roi("PERSON_NEAR_ROI", "0.20,0.20,0.80,0.80")
+        self._baseline_learning_rate = _env_float("PERSON_BASELINE_LEARNING_RATE", 0.01, minimum=0.0, maximum=1.0)
         self._near_baseline_gray = None
         self._near_baseline_brightness = None
 
@@ -252,7 +269,14 @@ class PersonDetector:
         if not self._near_object_enabled:
             return False, ""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        small = cv2.resize(gray, (160, 120), interpolation=cv2.INTER_AREA)
+        left, top, right, bottom = self._near_roi
+        height, width = gray.shape[:2]
+        x1 = int(width * left)
+        y1 = int(height * top)
+        x2 = max(x1 + 1, int(width * right))
+        y2 = max(y1 + 1, int(height * bottom))
+        roi = gray[y1:y2, x1:x2]
+        small = cv2.resize(roi, (120, 90), interpolation=cv2.INTER_AREA)
         brightness = float(np.mean(small))
 
         if self._near_baseline_gray is None:
@@ -262,7 +286,7 @@ class PersonDetector:
 
         baseline_u8 = cv2.convertScaleAbs(self._near_baseline_gray)
         delta = cv2.absdiff(small, baseline_u8)
-        changed_fraction = float(np.mean(delta > 35))
+        changed_fraction = float(np.mean(delta > 45))
         brightness_delta = abs(brightness - float(self._near_baseline_brightness or brightness))
         edges = cv2.Canny(small, 80, 160)
         edge_density = float(np.count_nonzero(edges)) / float(edges.size)
@@ -281,7 +305,7 @@ class PersonDetector:
         if near_detected:
             return True, (
                 f"near_object change={changed_fraction:.2f} "
-                f"brightness_delta={brightness_delta:.1f} edges={edge_density:.4f}"
+                f"brightness_delta={brightness_delta:.1f} edges={edge_density:.4f} roi={self._near_roi}"
             )
         return False, ""
 
