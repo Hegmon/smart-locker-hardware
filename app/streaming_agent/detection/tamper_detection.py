@@ -81,31 +81,33 @@ class TamperDetection:
         )
         self.tamper_clear_seconds = max(0.1, float(tamper_clear_seconds))
         self.dark_brightness_threshold = (
-            _env_float("TAMPER_DARK_BRIGHTNESS_THRESHOLD", 15.0, minimum=0.0, maximum=255.0)
+            _env_float("TAMPER_DARK_BRIGHTNESS_THRESHOLD", 28.0, minimum=0.0, maximum=255.0)
             if dark_brightness_threshold is None
             else float(dark_brightness_threshold)
         )
         self.bright_brightness_threshold = (
-            _env_float("TAMPER_BRIGHT_BRIGHTNESS_THRESHOLD", 250.0, minimum=0.0, maximum=255.0)
+            _env_float("TAMPER_BRIGHT_BRIGHTNESS_THRESHOLD", 242.0, minimum=0.0, maximum=255.0)
             if bright_brightness_threshold is None
             else float(bright_brightness_threshold)
         )
         self.blur_threshold = (
-            _env_float("TAMPER_BLUR_THRESHOLD", 6.0, minimum=0.0)
+            _env_float("TAMPER_BLUR_THRESHOLD", 12.0, minimum=0.0)
             if blur_threshold is None
             else float(blur_threshold)
         )
         self.edge_density_threshold = (
-            _env_float("TAMPER_EDGE_DENSITY_THRESHOLD", 0.0025, minimum=0.0, maximum=1.0)
+            _env_float("TAMPER_EDGE_DENSITY_THRESHOLD", 0.005, minimum=0.0, maximum=1.0)
             if edge_density_threshold is None
             else float(edge_density_threshold)
         )
         self.large_change_threshold = (
-            _env_float("TAMPER_LARGE_CHANGE_THRESHOLD", 0.92, minimum=0.0, maximum=1.0)
+            _env_float("TAMPER_LARGE_CHANGE_THRESHOLD", 0.58, minimum=0.0, maximum=1.0)
             if large_change_threshold is None
             else float(large_change_threshold)
         )
-        self.scene_change_tamper_enabled = _env_bool("TAMPER_SCENE_CHANGE_ENABLED", False)
+        self.hard_change_threshold = _env_float("TAMPER_HARD_CHANGE_THRESHOLD", 0.82, minimum=0.0, maximum=1.0)
+        self.change_brightness_delta = _env_float("TAMPER_CHANGE_BRIGHTNESS_DELTA", 28.0, minimum=0.0, maximum=255.0)
+        self.scene_change_tamper_enabled = _env_bool("TAMPER_SCENE_CHANGE_ENABLED", True)
         confirm_frame_default = 1 if tamper_confirm_seconds is not None else 2
         clear_frame_default = 1 if tamper_clear_seconds != 3.0 else 2
         self._required_tamper_frames = _env_int("TAMPER_CONFIRM_FRAMES", confirm_frame_default, minimum=1)
@@ -116,6 +118,7 @@ class TamperDetection:
         self._thread = None
         self._last_sequence = -1
         self._baseline_gray = None
+        self._baseline_brightness = None
         self._tamper_started_at = None
         self._last_tamper_seen_at = time.monotonic()
         self._tamper_active = False
@@ -216,23 +219,41 @@ class TamperDetection:
 
         if self._baseline_gray is None and not dark_or_covered and not overexposed:
             self._baseline_gray = small.astype(np.float32)
+            self._baseline_brightness = brightness
             return False, ""
 
         scene_change = 0.0
+        brightness_delta = 0.0
         if self._baseline_gray is not None:
             delta = cv2.absdiff(small, cv2.convertScaleAbs(self._baseline_gray))
             scene_change = float(np.mean(delta > 45))
+            brightness_delta = abs(brightness - float(self._baseline_brightness or brightness))
             if not dark_or_covered and not overexposed and not texture_missing:
                 cv2.accumulateWeighted(small.astype(np.float32), self._baseline_gray, 0.02)
+                self._baseline_brightness = (
+                    0.98 * float(self._baseline_brightness or brightness)
+                    + 0.02 * brightness
+                )
 
-        self._maybe_log_metrics(brightness, blur_score, edge_density, scene_change)
+        self._maybe_log_metrics(brightness, blur_score, edge_density, scene_change, brightness_delta)
 
         if dark_or_covered:
             return True, f"covered/dark brightness={brightness:.1f} blur={blur_score:.1f} edges={edge_density:.4f}"
         if overexposed:
             return True, f"covered/bright brightness={brightness:.1f} blur={blur_score:.1f} edges={edge_density:.4f}"
-        if self.scene_change_tamper_enabled and scene_change >= self.large_change_threshold and texture_missing:
-            return True, f"blocked scene_change={scene_change:.2f} blur={blur_score:.1f} edges={edge_density:.4f}"
+        hard_scene_change = (
+            scene_change >= self.hard_change_threshold
+            or (
+                self.scene_change_tamper_enabled
+                and scene_change >= self.large_change_threshold
+                and brightness_delta >= self.change_brightness_delta
+            )
+        )
+        if hard_scene_change:
+            return True, (
+                f"hard scene change={scene_change:.2f} brightness_delta={brightness_delta:.1f} "
+                f"blur={blur_score:.1f} edges={edge_density:.4f}"
+            )
         return False, ""
 
     def _update_tamper_state(self, tampered, reason):
@@ -276,16 +297,17 @@ class TamperDetection:
         self._processed_frames = 0
         self._fps_window_started_at = now
 
-    def _maybe_log_metrics(self, brightness, blur_score, edge_density, scene_change):
+    def _maybe_log_metrics(self, brightness, blur_score, edge_density, scene_change, brightness_delta):
         now = time.monotonic()
         if now - self._last_metrics_log_at < 5:
             return
         self._last_metrics_log_at = now
         logger.info(
-            "Tamper metrics for %s camera: brightness=%.1f blur=%.1f edges=%.4f scene_change=%.2f",
+            "Tamper metrics for %s camera: brightness=%.1f blur=%.1f edges=%.4f scene_change=%.2f brightness_delta=%.1f",
             self.camera_role,
             brightness,
             blur_score,
             edge_density,
             scene_change,
+            brightness_delta,
         )
