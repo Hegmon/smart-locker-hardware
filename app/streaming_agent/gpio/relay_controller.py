@@ -15,6 +15,12 @@ RED_LED_PIN = 21
 GREEN_LED_PIN = 20
 LOCKER_PIN = 16
 BUZZER_PIN = 12
+RELAY_INPUTS = {
+    "IN1": "Red LED",
+    "IN2": "Green LED",
+    "IN3": "Locker relay",
+    "IN4": "Buzzer",
+}
 
 QR_SUCCESS_UNLOCK_TIME = 5
 ALERT_DURATION = 15
@@ -37,6 +43,13 @@ def _env_float(name, default, minimum=None):
     return value
 
 
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 class RelayController:
     """Thread-safe BCM GPIO controller for the four-channel relay board.
 
@@ -55,10 +68,10 @@ class RelayController:
         unlock_seconds=None,
         alert_duration=None,
     ):
-        self.red_led_pin = int(red_led_pin)
-        self.green_led_pin = int(green_led_pin)
-        self.locker_pin = int(locker_pin)
-        self.buzzer_pin = int(buzzer_pin)
+        self.red_led_pin = _env_int("RELAY_RED_LED_PIN", red_led_pin)
+        self.green_led_pin = _env_int("RELAY_GREEN_LED_PIN", green_led_pin)
+        self.locker_pin = _env_int("RELAY_LOCKER_PIN", locker_pin)
+        self.buzzer_pin = _env_int("RELAY_BUZZER_PIN", buzzer_pin)
         self.active_low = _env_bool("RELAY_ACTIVE_LOW", True) if active_low is None else bool(active_low)
         self.unlock_seconds = _env_float("QR_SUCCESS_UNLOCK_TIME", QR_SUCCESS_UNLOCK_TIME, minimum=0.1)
         self.alert_duration = _env_float("ALERT_DURATION", ALERT_DURATION, minimum=0.1)
@@ -133,12 +146,19 @@ class RelayController:
             self.green_led_off()
             self.buzzer_off()
             logger.info(
-                "Relay controller initialized in BCM mode: red=%s green=%s locker=%s buzzer=%s active_low=%s",
+                "Relay controller initialized in BCM mode: IN1 red=%s IN2 green=%s IN3 locker=%s IN4 buzzer=%s active_low=%s",
                 self.red_led_pin,
                 self.green_led_pin,
                 self.locker_pin,
                 self.buzzer_pin,
                 self.active_low,
+            )
+            logger.info(
+                "Relay mapping: IN1->GPIO%s red, IN2->GPIO%s green, IN3->GPIO%s locker, IN4->GPIO%s buzzer",
+                self.red_led_pin,
+                self.green_led_pin,
+                self.locker_pin,
+                self.buzzer_pin,
             )
             logger.info("Relay GPIO backend: %s", gpio_source)
 
