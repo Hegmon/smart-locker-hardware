@@ -11,6 +11,7 @@ QR_FRAME_WIDTH = int(os.getenv("QR_FRAME_WIDTH", "960"))
 QR_FRAME_HEIGHT = int(os.getenv("QR_FRAME_HEIGHT", "540"))
 QR_FRAME_CHANNELS = int(os.getenv("QR_FRAME_CHANNELS", "3"))
 QR_FRAME_FPS = max(1, int(os.getenv("QR_FRAME_FPS", "10")))
+INTERNAL_FRAME_FPS = max(1, int(os.getenv("INTERNAL_FRAME_FPS", "10")))
 STREAM_VIDEO_ENCODER = os.getenv("STREAM_VIDEO_ENCODER", "libx264").strip() or "libx264"
 STREAM_INPUT_FORMAT = os.getenv("STREAM_INPUT_FORMAT", "mjpeg").strip() or "mjpeg"
 STREAM_INPUT_SIZE = os.getenv("STREAM_INPUT_SIZE", "1280x720").strip() or "1280x720"
@@ -53,6 +54,7 @@ def build_ffmpeg_command(
 ):
     rtsp_url = build_rtsp_url(camera_role)
     encoder_args = _encoder_args()
+    detection_fps = QR_FRAME_FPS if camera_role == "external" else INTERNAL_FRAME_FPS
     if frame_pipe:
         return [
             "ffmpeg",
@@ -64,7 +66,7 @@ def build_ffmpeg_command(
             "[0:v]split=2[rtsp][detect];"
             f"[rtsp]scale={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,"
             f"pad={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p[rtspout];"
-            f"[detect]fps={QR_FRAME_FPS},"
+            f"[detect]fps={detection_fps},"
             f"scale={frame_width}:{frame_height}:force_original_aspect_ratio=decrease,"
             f"pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2,format=bgr24[raw]",
             "-map", "[rtspout]",
