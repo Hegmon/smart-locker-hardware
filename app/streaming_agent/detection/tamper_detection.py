@@ -39,6 +39,13 @@ def _env_int(name, default, minimum=None):
     return value
 
 
+def _env_bool(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class TamperDetection:
     """Detect camera tampering from an existing shared stream frame buffer."""
 
@@ -74,30 +81,31 @@ class TamperDetection:
         )
         self.tamper_clear_seconds = max(0.1, float(tamper_clear_seconds))
         self.dark_brightness_threshold = (
-            _env_float("TAMPER_DARK_BRIGHTNESS_THRESHOLD", 25.0, minimum=0.0, maximum=255.0)
+            _env_float("TAMPER_DARK_BRIGHTNESS_THRESHOLD", 15.0, minimum=0.0, maximum=255.0)
             if dark_brightness_threshold is None
             else float(dark_brightness_threshold)
         )
         self.bright_brightness_threshold = (
-            _env_float("TAMPER_BRIGHT_BRIGHTNESS_THRESHOLD", 245.0, minimum=0.0, maximum=255.0)
+            _env_float("TAMPER_BRIGHT_BRIGHTNESS_THRESHOLD", 250.0, minimum=0.0, maximum=255.0)
             if bright_brightness_threshold is None
             else float(bright_brightness_threshold)
         )
         self.blur_threshold = (
-            _env_float("TAMPER_BLUR_THRESHOLD", 10.0, minimum=0.0)
+            _env_float("TAMPER_BLUR_THRESHOLD", 6.0, minimum=0.0)
             if blur_threshold is None
             else float(blur_threshold)
         )
         self.edge_density_threshold = (
-            _env_float("TAMPER_EDGE_DENSITY_THRESHOLD", 0.004, minimum=0.0, maximum=1.0)
+            _env_float("TAMPER_EDGE_DENSITY_THRESHOLD", 0.0025, minimum=0.0, maximum=1.0)
             if edge_density_threshold is None
             else float(edge_density_threshold)
         )
         self.large_change_threshold = (
-            _env_float("TAMPER_LARGE_CHANGE_THRESHOLD", 0.70, minimum=0.0, maximum=1.0)
+            _env_float("TAMPER_LARGE_CHANGE_THRESHOLD", 0.92, minimum=0.0, maximum=1.0)
             if large_change_threshold is None
             else float(large_change_threshold)
         )
+        self.scene_change_tamper_enabled = _env_bool("TAMPER_SCENE_CHANGE_ENABLED", False)
         confirm_frame_default = 1 if tamper_confirm_seconds is not None else 2
         clear_frame_default = 1 if tamper_clear_seconds != 3.0 else 2
         self._required_tamper_frames = _env_int("TAMPER_CONFIRM_FRAMES", confirm_frame_default, minimum=1)
@@ -202,9 +210,9 @@ class TamperDetection:
         edges = cv2.Canny(small, 80, 160)
         edge_density = float(np.count_nonzero(edges)) / float(edges.size)
 
-        dark_or_covered = brightness <= self.dark_brightness_threshold
-        overexposed = brightness >= self.bright_brightness_threshold
         texture_missing = blur_score <= self.blur_threshold or edge_density <= self.edge_density_threshold
+        dark_or_covered = brightness <= self.dark_brightness_threshold and texture_missing
+        overexposed = brightness >= self.bright_brightness_threshold and texture_missing
 
         if self._baseline_gray is None and not dark_or_covered and not overexposed:
             self._baseline_gray = small.astype(np.float32)
@@ -223,7 +231,7 @@ class TamperDetection:
             return True, f"covered/dark brightness={brightness:.1f} blur={blur_score:.1f} edges={edge_density:.4f}"
         if overexposed:
             return True, f"covered/bright brightness={brightness:.1f} blur={blur_score:.1f} edges={edge_density:.4f}"
-        if scene_change >= self.large_change_threshold and texture_missing:
+        if self.scene_change_tamper_enabled and scene_change >= self.large_change_threshold and texture_missing:
             return True, f"blocked scene_change={scene_change:.2f} blur={blur_score:.1f} edges={edge_density:.4f}"
         return False, ""
 
