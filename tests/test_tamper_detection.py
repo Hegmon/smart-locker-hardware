@@ -38,12 +38,27 @@ class TamperDetectionTests(unittest.TestCase):
         self.assertFalse(led.active)
         self.assertEqual(led.role, "external")
 
-    def test_update_tamper_state_clears_immediately_by_default(self) -> None:
+    def test_update_tamper_state_waits_for_default_clear_timeout(self) -> None:
         led = _Led()
         detector = TamperDetection(
             None,
             camera_role="internal",
             led_controller=led,
+        )
+        detector._tamper_active = True
+
+        detector._update_tamper_state(False, "")
+
+        self.assertIsNone(led.active)
+        self.assertTrue(detector._tamper_active)
+
+    def test_update_tamper_state_can_clear_immediately_when_configured(self) -> None:
+        led = _Led()
+        detector = TamperDetection(
+            None,
+            camera_role="internal",
+            led_controller=led,
+            tamper_clear_seconds=0.0,
         )
         detector._tamper_active = True
 
