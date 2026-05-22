@@ -85,7 +85,7 @@ class PersonDetector:
         labels_path=DEFAULT_LABELS_PATH,
         confidence_threshold=None,
         process_every_n_frames=None,
-        led_off_delay_seconds=0.0,
+        led_off_delay_seconds=2.5,
         led_controller=None,
     ):
         self.frame_buffer = frame_buffer
@@ -102,13 +102,13 @@ class PersonDetector:
             else max(1, int(process_every_n_frames))
         )
         self._model_every_n_frames = _env_int("PERSON_MODEL_EVERY_N_FRAMES", 3, minimum=1)
-        self.led_off_delay_seconds = led_off_delay_seconds
+        self.led_off_delay_seconds = max(0.0, float(led_off_delay_seconds))
         self._owns_led_controller = led_controller is None
         self.led_controller = led_controller or RelayController()
         self._top_detection_log_seconds = _env_float("PERSON_DETECTOR_LOG_TOP_SECONDS", 10.0, minimum=0.0)
         self._required_detection_frames = _env_int("PERSON_DETECTION_CONFIRM_FRAMES", 2, minimum=1)
         self._required_clear_frames = _env_int("PERSON_DETECTION_CLEAR_FRAMES", 2, minimum=1)
-        self._clear_seconds = _env_float("PERSON_DETECTION_CLEAR_SECONDS", led_off_delay_seconds, minimum=0.0)
+        self._clear_seconds = _env_float("PERSON_DETECTION_CLEAR_SECONDS", self.led_off_delay_seconds, minimum=0.0)
         self._stale_clear_seconds = _env_float("PERSON_DETECTION_STALE_CLEAR_SECONDS", 0.35, minimum=0.05)
         self._min_box_area = _env_float("PERSON_DETECTION_MIN_BOX_AREA", 0.04, minimum=0.0, maximum=1.0)
         self._max_box_area = _env_float("PERSON_DETECTION_MAX_BOX_AREA", 0.95, minimum=0.01, maximum=1.0)
@@ -568,20 +568,20 @@ class PersonDetector:
             if self._detection_streak < self._required_detection_frames:
                 return
             if not self._led_visible:
-                logger.info("Person detected; GPIO LEDs ON: %s", reason or "person")
+                logger.info("Person/body movement confirmed; Relay 1 ON: %s", reason or "person")
             self.led_controller.set_person_visible(True)
             self._led_visible = True
             return
 
         self._clear_streak += 1
         self._detection_streak = 0
+        if not self._led_visible:
+            self.led_controller.set_person_visible(False)
+            return
         clear_age = now - self._last_person_seen_at if self._last_person_seen_at else 0.0
         if self._clear_streak >= self._required_clear_frames and clear_age >= self._clear_seconds:
-            if self._led_visible:
-                logger.info("No person detected; GPIO LEDs OFF")
-                self._clear_person_state()
-            else:
-                self.led_controller.set_person_visible(False)
+            logger.info("No person detected for %.2fs; Relay 1 OFF", clear_age)
+            self._clear_person_state()
 
     def _log_fps(self):
         self._processed_frames += 1
