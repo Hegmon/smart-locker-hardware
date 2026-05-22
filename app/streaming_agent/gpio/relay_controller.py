@@ -261,31 +261,48 @@ class RelayController:
         This method attempts a graceful clear of known security-related sources
         and will write the GPIO pins directly if needed to guarantee an OFF state.
         """
-        with self._lock:
-            # remove security-related detection sources so apply_* will clear outputs
-            try:
-                keys = list(self._detection_source_until.keys())
-            except Exception:
-                keys = []
-            for k in keys:
-                if k == "security_event" or k == "person" or k.startswith("person") or k.startswith("tamper"):
-                    self._detection_source_until.pop(k, None)
-            for src in list(self._red_sources):
-                if src == "security_event" or src == "person" or src.startswith("person") or src.startswith("tamper"):
-                    self._red_sources.discard(src)
-            for src in list(self._buzzer_sources):
-                if src == "security_event" or src == "person" or src.startswith("person") or src.startswith("tamper"):
-                    self._buzzer_sources.discard(src)
-            # apply the logical state; this will call _write if flags change
-            self._apply_red_locked()
-            self._apply_buzzer_locked()
-            # if outputs still report ON, force a GPIO write and update flags
-            if self._red_on:
-                self._red_on = False
-                self._write(self.red_led_pin, False, "Red LED (force)")
-            if self._buzzer_on:
-                self._buzzer_on = False
-                self._write(self.buzzer_pin, False, "Buzzer (force)")
+        # Ensure GPIO backend is initialized so direct writes will actually toggle hardware
+        try:
+            if not self._enabled or self._gpio is None:
+                # attempt to start/configure GPIO backend
+                try:
+                    self.start()
+                except Exception:
+                    logger.exception("Failed to initialize GPIO backend while forcing relays off")
+
+            with self._lock:
+                # remove security-related detection sources so apply_* will clear outputs
+                try:
+                    keys = list(self._detection_source_until.keys())
+                except Exception:
+                    keys = []
+                for k in keys:
+                    if k == "security_event" or k == "person" or k.startswith("person") or k.startswith("tamper"):
+                        self._detection_source_until.pop(k, None)
+                for src in list(self._red_sources):
+                    if src == "security_event" or src == "person" or src.startswith("person") or src.startswith("tamper"):
+                        self._red_sources.discard(src)
+                for src in list(self._buzzer_sources):
+                    if src == "security_event" or src == "person" or src.startswith("person") or src.startswith("tamper"):
+                        self._buzzer_sources.discard(src)
+                # apply the logical state; this will call _write if flags change
+                self._apply_red_locked()
+                self._apply_buzzer_locked()
+                # if outputs still report ON, force a GPIO write and update flags
+                if self._red_on:
+                    self._red_on = False
+                    try:
+                        self._write(self.red_led_pin, False, "Red LED (force)")
+                    except Exception:
+                        logger.exception("Failed to force Red LED OFF via GPIO write")
+                if self._buzzer_on:
+                    self._buzzer_on = False
+                    try:
+                        self._write(self.buzzer_pin, False, "Buzzer (force)")
+                    except Exception:
+                        logger.exception("Failed to force Buzzer OFF via GPIO write")
+        except Exception:
+            logger.exception("force_security_relays_off failed")
 
     def trigger_tamper_alert(self, camera_role="camera"):
         self.trigger_alert(f"tamper:{camera_role}", self.alert_duration, log_name="Tamper detected")
@@ -576,6 +593,18 @@ class _LgpioCompat:
             self.setup(pin, self.OUT, initial=state)
             return
         self._lgpio.gpio_write(self._chip, pin, int(state))
+
+    def input(self, pin):
+        pin = int(pin)
+        # Attempt to read the pin level. If not claimed, return HIGH as safe default.
+        try:
+            if pin not in self._claimed:
+                return self.HIGH
+            val = self._lgpio.gpio_read(self._chip, pin)
+            return self.HIGH if int(val) else self.LOW
+        except Exception:
+            # If read fails, raise so caller can fallback
+            raise
 
     def cleanup(self, pins=None):
         pins = tuple(self._claimed if pins is None else pins)
