@@ -100,6 +100,7 @@ class PersonDetector:
         self._top_detection_log_seconds = _env_float("PERSON_DETECTOR_LOG_TOP_SECONDS", 10.0, minimum=0.0)
         self._required_detection_frames = _env_int("PERSON_DETECTION_CONFIRM_FRAMES", 2, minimum=1)
         self._required_clear_frames = _env_int("PERSON_DETECTION_CLEAR_FRAMES", 2, minimum=1)
+        self._clear_seconds = _env_float("PERSON_DETECTION_CLEAR_SECONDS", 0.5, minimum=0.0)
         self._min_box_area = _env_float("PERSON_DETECTION_MIN_BOX_AREA", 0.02, minimum=0.0, maximum=1.0)
         self._max_box_area = _env_float("PERSON_DETECTION_MAX_BOX_AREA", 0.90, minimum=0.01, maximum=1.0)
         self._near_object_enabled = os.getenv("PERSON_NEAR_OBJECT_ENABLED", "true").strip().lower() in {
@@ -108,10 +109,10 @@ class PersonDetector:
             "yes",
             "on",
         }
-        self._near_change_threshold = _env_float("PERSON_NEAR_CHANGE_THRESHOLD", 0.45, minimum=0.01, maximum=1.0)
-        self._near_brightness_delta = _env_float("PERSON_NEAR_BRIGHTNESS_DELTA", 28.0, minimum=0.0, maximum=255.0)
-        self._near_edge_density_min = _env_float("PERSON_NEAR_EDGE_DENSITY_MIN", 0.012, minimum=0.0, maximum=1.0)
-        self._near_roi = _env_roi("PERSON_NEAR_ROI", "0.20,0.20,0.80,0.80")
+        self._near_change_threshold = _env_float("PERSON_NEAR_CHANGE_THRESHOLD", 0.65, minimum=0.01, maximum=1.0)
+        self._near_brightness_delta = _env_float("PERSON_NEAR_BRIGHTNESS_DELTA", 45.0, minimum=0.0, maximum=255.0)
+        self._near_edge_density_min = _env_float("PERSON_NEAR_EDGE_DENSITY_MIN", 0.018, minimum=0.0, maximum=1.0)
+        self._near_roi = _env_roi("PERSON_NEAR_ROI", "0.25,0.25,0.75,0.75")
         self._baseline_learning_rate = _env_float("PERSON_BASELINE_LEARNING_RATE", 0.01, minimum=0.0, maximum=1.0)
         self._near_baseline_gray = None
         self._near_baseline_brightness = None
@@ -218,6 +219,7 @@ class PersonDetector:
         while self._running:
             frame_bytes, sequence, _ = self.frame_buffer.latest()
             if frame_bytes is None or sequence == self._last_sequence:
+                self._clear_stale_led_state()
                 time.sleep(0.01)
                 continue
 
@@ -234,6 +236,17 @@ class PersonDetector:
 
             self._update_led_state(person_detected, reason)
             self._log_fps()
+
+    def _clear_stale_led_state(self):
+        if not self._led_visible or self._clear_seconds <= 0:
+            return
+        if time.monotonic() - self._last_person_seen_at < self._clear_seconds:
+            return
+        logger.info("No fresh person detection; GPIO LEDs OFF")
+        self.led_controller.set_person_visible(False)
+        self._led_visible = False
+        self._detection_streak = 0
+        self._clear_streak = 0
 
     def _detect_person(self, frame_bytes):
         frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
@@ -440,8 +453,9 @@ class PersonDetector:
         return area if area > 0 else None
 
     def _update_led_state(self, person_detected, reason=""):
+        now = time.monotonic()
         if person_detected:
-            self._last_person_seen_at = time.monotonic()
+            self._last_person_seen_at = now
             self._detection_streak += 1
             self._clear_streak = 0
             if self._detection_streak < self._required_detection_frames:
@@ -454,7 +468,12 @@ class PersonDetector:
 
         self._clear_streak += 1
         self._detection_streak = 0
-        if self._led_visible and self._clear_streak >= self._required_clear_frames:
+        clear_age = now - self._last_person_seen_at
+        if (
+            self._led_visible
+            and self._clear_streak >= self._required_clear_frames
+            and clear_age >= self._clear_seconds
+        ):
             logger.info("No person detected; GPIO LEDs OFF")
             self.led_controller.set_person_visible(False)
             self._led_visible = False
