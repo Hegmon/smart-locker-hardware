@@ -17,8 +17,5 @@ class LedController(RelayController):
         self._set_red_source(source, active)
         self._set_buzzer_source(source, active)
 
-    def set_person_visible(self, visible):
-        super().set_person_visible(visible)
-
-    def set_tamper_active(self, camera_role, active):
-        super().set_tamper_active(camera_role, active)
+    # set_person_visible and set_tamper_active removed — legacy bypass paths deleted.
+    # All detection security now goes through DetectionStateManager.set_security_relays().
