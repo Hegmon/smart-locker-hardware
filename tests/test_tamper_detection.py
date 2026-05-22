@@ -20,8 +20,10 @@ class TamperDetectionTests(unittest.TestCase):
 
         detector._update_tamper_state(True, "covered")
 
-        self.assertTrue(led.active)
-        self.assertEqual(led.role, "internal")
+        # direct led calls removed; tamper state is now reported via detection_state_manager when present
+        self.assertTrue(detector._tamper_active)
+        self.assertIsNone(led.active)  # no direct call in new architecture
+        self.assertIsNone(led.role)
 
     def test_update_tamper_state_turns_led_off_after_clear_window(self) -> None:
         led = _Led()
@@ -37,8 +39,9 @@ class TamperDetectionTests(unittest.TestCase):
 
         detector._update_tamper_state(False, "")
 
-        self.assertFalse(led.active)
-        self.assertEqual(led.role, "external")
+        self.assertFalse(detector._tamper_active)
+        self.assertIsNone(led.active)  # no direct call
+        self.assertIsNone(led.role)
 
     def test_update_tamper_state_waits_for_default_clear_timeout(self) -> None:
         led = _Led()
@@ -68,8 +71,9 @@ class TamperDetectionTests(unittest.TestCase):
 
         detector._update_tamper_state(False, "")
 
-        self.assertFalse(led.active)
-        self.assertEqual(led.role, "internal")
+        self.assertFalse(detector._tamper_active)
+        self.assertIsNone(led.active)
+        self.assertIsNone(led.role)
 
     @unittest.skipIf(tamper_detection.np is None, "numpy unavailable")
     def test_dark_frame_is_tamper(self) -> None:
