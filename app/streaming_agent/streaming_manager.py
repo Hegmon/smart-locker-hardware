@@ -125,11 +125,15 @@ class StreamingManager:
     def get_stream_status(self):
         status = {}
         for role, stream in self.streams.items():
+            urls = build_public_stream_urls(role)
             status[role] = {
                 "running": stream.is_running(),
                 "name": stream.name,
                 "pid": stream.process.pid if stream.process else None,
                 "rtsp_url": stream.rtsp_url,
-                "urls": build_public_stream_urls(role),
+                "stream_url": stream.rtsp_url,
+                "hls_url": urls.get("hls"),
+                "webrtc_url": urls.get("webrtc"),
+                "urls": urls,
             }
         return status
