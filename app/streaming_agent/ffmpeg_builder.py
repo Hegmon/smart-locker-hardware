@@ -1,10 +1,12 @@
 import os
+from urllib.parse import urljoin
 
 from app.streaming_agent.config_loader import get_device_id
 
 
-MEDIAMTX_HOST = "69.62.125.223"
-MEDIAMTX_RTSP_PORT = 8554
+MEDIAMTX_HOST = os.getenv("MEDIAMTX_HOST", "69.62.125.223").strip() or "69.62.125.223"
+MEDIAMTX_RTSP_PORT = int(os.getenv("MEDIAMTX_RTSP_PORT", "8554"))
+STREAM_PUBLIC_BASE_URL = os.getenv("STREAM_PUBLIC_BASE_URL", "").strip().rstrip("/")
 QR_FRAME_WIDTH = int(os.getenv("QR_FRAME_WIDTH", "960"))
 QR_FRAME_HEIGHT = int(os.getenv("QR_FRAME_HEIGHT", "540"))
 QR_FRAME_CHANNELS = int(os.getenv("QR_FRAME_CHANNELS", "3"))
@@ -26,6 +28,19 @@ STREAM_GOP = max(1, int(os.getenv("STREAM_GOP", str(STREAM_OUTPUT_FPS))))
 def build_rtsp_url(camera_role):
     device_id = get_device_id()
     return f"rtsp://{MEDIAMTX_HOST}:{MEDIAMTX_RTSP_PORT}/{device_id}/{camera_role}"
+
+
+def build_public_stream_urls(camera_role):
+    device_id = get_device_id()
+    path = f"{device_id}/{camera_role}"
+    urls = {
+        "rtsp": build_rtsp_url(camera_role),
+    }
+    if STREAM_PUBLIC_BASE_URL:
+        base = STREAM_PUBLIC_BASE_URL + "/"
+        urls["hls"] = urljoin(base, f"{path}/index.m3u8")
+        urls["webrtc"] = urljoin(base, path)
+    return urls
 
 
 def build_ffmpeg_command(
