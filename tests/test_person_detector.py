@@ -22,6 +22,22 @@ class PersonDetectorStateTests(unittest.TestCase):
         self.assertEqual(led.visible_calls, [True, False])
         self.assertFalse(detector._led_visible)
 
+    def test_update_led_state_holds_relay_until_clear_timeout(self) -> None:
+        led = _Led()
+        detector = PersonDetector(
+            None,
+            led_controller=led,
+            led_off_delay_seconds=5.0,
+        )
+        detector._required_detection_frames = 1
+        detector._required_clear_frames = 1
+
+        detector._update_led_state(True, "body_motion")
+        detector._update_led_state(False, "")
+
+        self.assertEqual(led.visible_calls, [True])
+        self.assertTrue(detector._led_visible)
+
     def test_update_led_state_sends_defensive_off_when_local_state_is_clear(self) -> None:
         led = _Led()
         detector = PersonDetector(
