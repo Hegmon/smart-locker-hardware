@@ -47,8 +47,7 @@ def build_ffmpeg_command(
             "-an",
             "-filter_complex",
             "[0:v]split=2[rtsp][detect];"
-            f"[rtsp]fps={STREAM_OUTPUT_FPS},"
-            f"scale={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,"
+            f"[rtsp]scale={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,"
             f"pad={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p[rtspout];"
             f"[detect]fps={QR_FRAME_FPS},"
             f"scale={frame_width}:{frame_height}:force_original_aspect_ratio=decrease,"
@@ -71,7 +70,6 @@ def build_ffmpeg_command(
     "-i", video_device,
     "-an",
     "-vf",
-    f"fps={STREAM_OUTPUT_FPS},"
     f"scale={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,"
     f"pad={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
     *encoder_args,
@@ -98,7 +96,6 @@ def _input_low_latency_args():
     return [
         "-thread_queue_size", os.getenv("STREAM_THREAD_QUEUE_SIZE", "1"),
         "-rtbufsize", os.getenv("STREAM_RTBUF_SIZE", "256k"),
-        "-use_wallclock_as_timestamps", "1",
         "-f", "v4l2",
         "-input_format", STREAM_INPUT_FORMAT,
         "-video_size", STREAM_INPUT_SIZE,
