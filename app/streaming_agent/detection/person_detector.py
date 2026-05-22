@@ -188,7 +188,6 @@ class PersonDetector:
 
             self._last_sequence = sequence
             if sequence % self.process_every_n_frames != 0:
-                self._update_led_state(False)
                 continue
 
             person_detected = False
