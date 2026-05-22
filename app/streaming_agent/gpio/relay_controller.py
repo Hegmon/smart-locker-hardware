@@ -214,24 +214,24 @@ class RelayController:
     def set_person_visible(self, visible):
         source = "person"
         if visible:
-            changed = self._set_detection_source(source, True)
+            changed = self._set_detection_source(source, True, red=True, buzzer=False)
             if changed:
-                logger.info("Person detected; red LED and buzzer active while detection is active")
+                logger.info("Person/body movement detection start; Relay 1 ON while detection is active")
         else:
-            changed = self._set_detection_source(source, False)
+            changed = self._set_detection_source(source, False, red=True, buzzer=False)
             if changed:
-                logger.info("Person cleared; person relay source OFF")
+                logger.info("Person/body movement detection end; Relay 1 OFF")
 
     def set_tamper_active(self, camera_role, active):
         source = f"tamper:{camera_role}"
         if active:
-            changed = self._set_detection_source(source, True)
+            changed = self._set_detection_source(source, True, red=False, buzzer=True)
             if changed:
-                logger.warning("Tamper detected on %s; red LED and buzzer active while tamper is active", camera_role)
+                logger.warning("Tamper detection start on %s camera; Relay 4 ON while tamper is active", camera_role)
         else:
-            changed = self._set_detection_source(source, False)
+            changed = self._set_detection_source(source, False, red=False, buzzer=True)
             if changed:
-                logger.info("Tamper cleared on %s; tamper relay source OFF", camera_role)
+                logger.info("Tamper detection end on %s camera; Relay 4 OFF", camera_role)
 
     def trigger_tamper_alert(self, camera_role="camera"):
         self.trigger_alert(f"tamper:{camera_role}", self.alert_duration, log_name="Tamper detected")
@@ -336,28 +336,38 @@ class RelayController:
                 self._set_buzzer_source(source, False)
             logger.info("Relay alert cleared for source=%s", source)
 
-    def _set_detection_source(self, source, active):
+    def _set_detection_source(self, source, active, *, red=True, buzzer=True):
         source = str(source or "detection")
         ttl = _env_float("DETECTION_RELAY_SOURCE_TTL_SECONDS", DETECTION_SOURCE_TTL_SECONDS, minimum=0.0)
         with self._lock:
             if active:
-                changed = source not in self._red_sources or source not in self._buzzer_sources
+                changed = (
+                    (red and source not in self._red_sources)
+                    or (buzzer and source not in self._buzzer_sources)
+                )
                 if ttl > 0:
                     self._detection_source_until[source] = time.monotonic() + ttl
                 else:
                     self._detection_source_until.pop(source, None)
-                self._red_sources.add(source)
-                self._buzzer_sources.add(source)
+                if red:
+                    self._red_sources.add(source)
+                if buzzer:
+                    self._buzzer_sources.add(source)
                 self._apply_red_locked()
                 self._apply_buzzer_locked()
                 if ttl > 0:
                     self._ensure_detection_expiry_thread_locked()
                 return changed
 
-            changed = source in self._red_sources or source in self._buzzer_sources
+            changed = (
+                (red and source in self._red_sources)
+                or (buzzer and source in self._buzzer_sources)
+            )
             self._detection_source_until.pop(source, None)
-            self._red_sources.discard(source)
-            self._buzzer_sources.discard(source)
+            if red:
+                self._red_sources.discard(source)
+            if buzzer:
+                self._buzzer_sources.discard(source)
             self._apply_red_locked()
             self._apply_buzzer_locked()
             return changed
