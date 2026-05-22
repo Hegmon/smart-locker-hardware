@@ -111,7 +111,8 @@ class TamperDetection:
         )
         self.hard_change_threshold = _env_float("TAMPER_HARD_CHANGE_THRESHOLD", 0.82, minimum=0.0, maximum=1.0)
         self.change_brightness_delta = _env_float("TAMPER_CHANGE_BRIGHTNESS_DELTA", 28.0, minimum=0.0, maximum=255.0)
-        self.scene_change_tamper_enabled = _env_bool("TAMPER_SCENE_CHANGE_ENABLED", True)
+        self.scene_change_tamper_enabled = _env_bool("TAMPER_SCENE_CHANGE_ENABLED", False)
+        self._stale_clear_seconds = _env_float("TAMPER_STALE_CLEAR_SECONDS", 0.5, minimum=0.05)
         confirm_frame_default = 1 if tamper_confirm_seconds is not None else 2
         clear_frame_default = 1
         self._required_tamper_frames = _env_int("TAMPER_CONFIRM_FRAMES", confirm_frame_default, minimum=1)
@@ -167,6 +168,7 @@ class TamperDetection:
         while self._running:
             frame_bytes, sequence, _ = self.frame_buffer.latest()
             if frame_bytes is None or sequence == self._last_sequence:
+                self._clear_stale_tamper_state()
                 time.sleep(0.02)
                 continue
 
@@ -202,6 +204,18 @@ class TamperDetection:
             self._tamper_active = False
             self.led_controller.set_tamper_active(self.camera_role, False)
             logger.info("Tamper paused for %s camera while %s", self.camera_role, reason)
+
+    def _clear_stale_tamper_state(self):
+        if not self._tamper_active:
+            return
+        if time.monotonic() - self._last_tamper_seen_at < self._stale_clear_seconds:
+            return
+        self._tamper_active = False
+        self._tamper_started_at = None
+        self._tamper_streak = 0
+        self._clear_streak = 0
+        self.led_controller.set_tamper_active(self.camera_role, False)
+        logger.info("No fresh tamper detection on %s camera; GPIO LEDs OFF", self.camera_role)
 
     def _detect_tamper(self, frame_bytes):
         frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
@@ -245,15 +259,14 @@ class TamperDetection:
             return True, f"covered/dark brightness={brightness:.1f} blur={blur_score:.1f} edges={edge_density:.4f}"
         if overexposed:
             return True, f"covered/bright brightness={brightness:.1f} blur={blur_score:.1f} edges={edge_density:.4f}"
-        hard_scene_change = (
+        scene_change_tamper = self.scene_change_tamper_enabled and (
             scene_change >= self.hard_change_threshold
             or (
-                self.scene_change_tamper_enabled
-                and scene_change >= self.large_change_threshold
+                scene_change >= self.large_change_threshold
                 and brightness_delta >= self.change_brightness_delta
             )
         )
-        if hard_scene_change:
+        if scene_change_tamper:
             return True, (
                 f"hard scene change={scene_change:.2f} brightness_delta={brightness_delta:.1f} "
                 f"blur={blur_score:.1f} edges={edge_density:.4f}"
