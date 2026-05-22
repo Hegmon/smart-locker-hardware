@@ -86,6 +86,18 @@ class PersonDetector:
         self._required_clear_frames = _env_int("PERSON_DETECTION_CLEAR_FRAMES", 2, minimum=1)
         self._min_box_area = _env_float("PERSON_DETECTION_MIN_BOX_AREA", 0.02, minimum=0.0, maximum=1.0)
         self._max_box_area = _env_float("PERSON_DETECTION_MAX_BOX_AREA", 0.90, minimum=0.01, maximum=1.0)
+        self._near_object_enabled = os.getenv("PERSON_NEAR_OBJECT_ENABLED", "true").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._near_change_threshold = _env_float("PERSON_NEAR_CHANGE_THRESHOLD", 0.22, minimum=0.01, maximum=1.0)
+        self._near_brightness_delta = _env_float("PERSON_NEAR_BRIGHTNESS_DELTA", 12.0, minimum=0.0, maximum=255.0)
+        self._near_edge_density_min = _env_float("PERSON_NEAR_EDGE_DENSITY_MIN", 0.006, minimum=0.0, maximum=1.0)
+        self._baseline_learning_rate = _env_float("PERSON_BASELINE_LEARNING_RATE", 0.02, minimum=0.0, maximum=1.0)
+        self._near_baseline_gray = None
+        self._near_baseline_brightness = None
 
         self._running = False
         self._thread = None
@@ -197,12 +209,13 @@ class PersonDetector:
                 continue
 
             person_detected = False
+            reason = ""
             try:
-                person_detected = self._detect_person(frame_bytes)
+                person_detected, reason = self._detect_person(frame_bytes)
             except Exception:
                 logger.exception("Person detection failed")
 
-            self._update_led_state(person_detected)
+            self._update_led_state(person_detected, reason)
             self._log_fps()
 
     def _detect_person(self, frame_bytes):
@@ -220,12 +233,57 @@ class PersonDetector:
 
         scores, classes, boxes = self._read_detection_outputs()
         self._maybe_log_top_detection(scores, classes, boxes)
+        model_detected = False
         for index, (score, class_id) in enumerate(zip(scores, classes)):
             if float(score) >= self.confidence_threshold and int(class_id) in self._person_class_ids:
                 if not self._box_area_is_valid(boxes, index):
                     continue
-                return True
-        return False
+                model_detected = True
+                break
+
+        near_detected, near_reason = self._detect_near_object(frame)
+        if model_detected:
+            return True, "person_model"
+        if near_detected:
+            return True, near_reason
+        return False, ""
+
+    def _detect_near_object(self, frame):
+        if not self._near_object_enabled:
+            return False, ""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        small = cv2.resize(gray, (160, 120), interpolation=cv2.INTER_AREA)
+        brightness = float(np.mean(small))
+
+        if self._near_baseline_gray is None:
+            self._near_baseline_gray = small.astype(np.float32)
+            self._near_baseline_brightness = brightness
+            return False, ""
+
+        baseline_u8 = cv2.convertScaleAbs(self._near_baseline_gray)
+        delta = cv2.absdiff(small, baseline_u8)
+        changed_fraction = float(np.mean(delta > 35))
+        brightness_delta = abs(brightness - float(self._near_baseline_brightness or brightness))
+        edges = cv2.Canny(small, 80, 160)
+        edge_density = float(np.count_nonzero(edges)) / float(edges.size)
+
+        near_detected = (
+            changed_fraction >= self._near_change_threshold
+            and brightness_delta >= self._near_brightness_delta
+            and edge_density >= self._near_edge_density_min
+        )
+        if not near_detected and self._baseline_learning_rate > 0:
+            cv2.accumulateWeighted(small.astype(np.float32), self._near_baseline_gray, self._baseline_learning_rate)
+            self._near_baseline_brightness = (
+                (1.0 - self._baseline_learning_rate) * float(self._near_baseline_brightness or brightness)
+                + self._baseline_learning_rate * brightness
+            )
+        if near_detected:
+            return True, (
+                f"near_object change={changed_fraction:.2f} "
+                f"brightness_delta={brightness_delta:.1f} edges={edge_density:.4f}"
+            )
+        return False, ""
 
     def _prepare_input(self, rgb_frame):
         tensor = np.expand_dims(rgb_frame, axis=0)
@@ -357,36 +415,25 @@ class PersonDetector:
         area = width * height
         return area if area > 0 else None
 
-    def _update_led_state(self, person_detected):
-        now = time.monotonic()
+    def _update_led_state(self, person_detected, reason=""):
         if person_detected:
-            self._last_person_seen_at = now
+            self._last_person_seen_at = time.monotonic()
             self._detection_streak += 1
             self._clear_streak = 0
             if self._detection_streak < self._required_detection_frames:
                 return
             if not self._led_visible:
-                logger.info("Person detected; GPIO LEDs ON")
+                logger.info("Person detected; GPIO LEDs ON: %s", reason or "person")
             self.led_controller.set_person_visible(True)
             self._led_visible = True
             return
 
-        if self._last_person_seen_at and now - self._last_person_seen_at >= self.led_off_delay_seconds:
-            self._clear_streak += 1
-            self._detection_streak = 0
-            if self._clear_streak < self._required_clear_frames:
-                return
-            if self._led_visible:
-                logger.info("No person detected for %.1f seconds; GPIO LEDs OFF", self.led_off_delay_seconds)
+        self._clear_streak += 1
+        self._detection_streak = 0
+        if self._led_visible and self._clear_streak >= self._required_clear_frames:
+            logger.info("No person detected; GPIO LEDs OFF")
             self.led_controller.set_person_visible(False)
             self._led_visible = False
-        elif not person_detected:
-            self._clear_streak += 1
-            self._detection_streak = 0
-            if self._led_visible and self._clear_streak >= self._required_clear_frames:
-                logger.info("No person detected; GPIO LEDs OFF")
-                self.led_controller.set_person_visible(False)
-                self._led_visible = False
 
     def _log_fps(self):
         self._processed_frames += 1
