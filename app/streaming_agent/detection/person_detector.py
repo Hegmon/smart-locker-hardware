@@ -67,6 +67,13 @@ def _env_roi(name, default):
     return left, top, right, bottom
 
 
+def _env_bool(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class PersonDetector:
     """Run lightweight person detection from the streaming agent's shared frame buffer."""
 
@@ -117,6 +124,12 @@ class PersonDetector:
         self._baseline_learning_rate = _env_float("PERSON_BASELINE_LEARNING_RATE", 0.01, minimum=0.0, maximum=1.0)
         self._near_baseline_gray = None
         self._near_baseline_brightness = None
+        self._motion_enabled = _env_bool("PERSON_MOTION_ENABLED", True)
+        self._motion_threshold = _env_float("PERSON_MOTION_THRESHOLD", 0.025, minimum=0.001, maximum=1.0)
+        self._motion_min_contour_area = _env_float("PERSON_MOTION_MIN_CONTOUR_AREA", 0.006, minimum=0.0001, maximum=1.0)
+        self._motion_pixel_delta = _env_int("PERSON_MOTION_PIXEL_DELTA", 28, minimum=1)
+        self._motion_roi = _env_roi("PERSON_MOTION_ROI", "0.05,0.05,0.95,0.95")
+        self._motion_baseline_gray = None
 
         self._running = False
         self._thread = None
@@ -258,6 +271,9 @@ class PersonDetector:
         near_detected, near_reason = self._detect_near_object(frame)
         if near_detected:
             return True, near_reason
+        motion_detected, motion_reason = self._detect_motion(frame)
+        if motion_detected:
+            return True, motion_reason
 
         if sequence % self._model_every_n_frames != 0:
             return False, ""
@@ -324,6 +340,53 @@ class PersonDetector:
             return True, (
                 f"near_object change={changed_fraction:.2f} "
                 f"brightness_delta={brightness_delta:.1f} edges={edge_density:.4f} roi={self._near_roi}"
+            )
+        return False, ""
+
+    def _detect_motion(self, frame):
+        if not self._motion_enabled:
+            return False, ""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        left, top, right, bottom = self._motion_roi
+        height, width = gray.shape[:2]
+        x1 = int(width * left)
+        y1 = int(height * top)
+        x2 = max(x1 + 1, int(width * right))
+        y2 = max(y1 + 1, int(height * bottom))
+        roi = gray[y1:y2, x1:x2]
+        small = cv2.resize(roi, (160, 120), interpolation=cv2.INTER_AREA)
+        blurred = cv2.GaussianBlur(small, (5, 5), 0)
+
+        if self._motion_baseline_gray is None:
+            self._motion_baseline_gray = blurred.astype(np.float32)
+            return False, ""
+
+        baseline_u8 = cv2.convertScaleAbs(self._motion_baseline_gray)
+        delta = cv2.absdiff(blurred, baseline_u8)
+        _, mask = cv2.threshold(delta, self._motion_pixel_delta, 255, cv2.THRESH_BINARY)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8))
+        mask = cv2.dilate(mask, None, iterations=2)
+
+        changed_fraction = float(np.count_nonzero(mask)) / float(mask.size)
+        largest_area = 0.0
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            largest_area = max(float(cv2.contourArea(contour)) for contour in contours) / float(mask.size)
+
+        motion_detected = (
+            changed_fraction >= self._motion_threshold
+            and largest_area >= self._motion_min_contour_area
+        )
+        if not motion_detected and self._baseline_learning_rate > 0:
+            cv2.accumulateWeighted(
+                blurred.astype(np.float32),
+                self._motion_baseline_gray,
+                self._baseline_learning_rate,
+            )
+        if motion_detected:
+            return True, (
+                f"body_motion change={changed_fraction:.3f} "
+                f"largest_area={largest_area:.3f} roi={self._motion_roi}"
             )
         return False, ""
 
