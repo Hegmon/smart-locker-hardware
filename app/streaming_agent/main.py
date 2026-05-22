@@ -81,7 +81,6 @@ class StreamingAgent:
                     frame_buffer,
                     camera_role=role,
                     led_controller=self.relay_controller,
-                    tamper_clear_seconds=DETECTION_LED_HOLD_SECONDS,
                     skip_when=skip_when,
                 )
             )
