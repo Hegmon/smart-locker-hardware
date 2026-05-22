@@ -32,6 +32,10 @@ PERSON_TRIGGER_FRAMES = 3
 PERSON_CLEAR_FRAMES = 10
 MOTION_TRIGGER_FRAMES = 2
 MOTION_CLEAR_FRAMES = 8
+FACE_TRIGGER_FRAMES = 2
+FACE_CLEAR_FRAMES = 6
+HAND_TRIGGER_FRAMES = 2
+HAND_CLEAR_FRAMES = 6
 
 
 def _env_float(name, default, minimum=None, maximum=None):
@@ -117,6 +121,10 @@ class PersonDetector:
         self._required_clear_frames = _env_int("PERSON_CLEAR_FRAMES", PERSON_CLEAR_FRAMES, minimum=1)
         self._motion_trigger_frames = _env_int("MOTION_TRIGGER_FRAMES", MOTION_TRIGGER_FRAMES, minimum=1)
         self._motion_clear_frames = _env_int("MOTION_CLEAR_FRAMES", MOTION_CLEAR_FRAMES, minimum=1)
+        self._face_trigger_frames = _env_int("FACE_TRIGGER_FRAMES", FACE_TRIGGER_FRAMES, minimum=1)
+        self._face_clear_frames = _env_int("FACE_CLEAR_FRAMES", FACE_CLEAR_FRAMES, minimum=1)
+        self._hand_trigger_frames = _env_int("HAND_TRIGGER_FRAMES", HAND_TRIGGER_FRAMES, minimum=1)
+        self._hand_clear_frames = _env_int("HAND_CLEAR_FRAMES", HAND_CLEAR_FRAMES, minimum=1)
         self._clear_seconds = _env_float("PERSON_DETECTION_CLEAR_SECONDS", self.led_off_delay_seconds, minimum=0.0)
         self._confidence_smoothing_alpha = _env_float(
             "PERSON_CONFIDENCE_SMOOTHING_ALPHA",
@@ -179,8 +187,18 @@ class PersonDetector:
         self._clear_streak = 0
         self._motion_streak = 0
         self._motion_clear_streak = 0
+        self._face_streak = 0
+        self._face_clear_streak = 0
+        self._hand_streak = 0
+        self._hand_clear_streak = 0
         self._face_active = False
         self._hand_active = False
+        self._person_active = False
+        self._motion_active = False
+        self._face_streak = 0
+        self._face_clear_streak = 0
+        self._hand_streak = 0
+        self._hand_clear_streak = 0
         self._person_active = False
         self._motion_active = False
         self._person_confidence_ema = 0.0
@@ -587,6 +605,10 @@ class PersonDetector:
         self._clear_streak = 0
         self._motion_streak = 0
         self._motion_clear_streak = 0
+        self._face_streak = 0
+        self._face_clear_streak = 0
+        self._hand_streak = 0
+        self._hand_clear_streak = 0
         self._person_active = False
         self._motion_active = False
         self._face_active = False
@@ -746,8 +768,33 @@ class PersonDetector:
         if motion_detected is None:
             motion_detected = bool(detected)
 
-        self._face_active = bool(face_detected)
-        self._hand_active = bool(hand_detected)
+        # face debouncing (prevents flicker from Haar false positives)
+        if face_detected:
+            self._face_streak += 1
+            self._face_clear_streak = 0
+            if not self._face_active and self._face_streak >= self._face_trigger_frames:
+                self._face_active = True
+                logger.info("Face detected on internal camera: %s", reason or "face")
+        else:
+            self._face_clear_streak += 1
+            self._face_streak = 0
+            if self._face_active and self._face_clear_streak >= self._face_clear_frames:
+                self._face_active = False
+                logger.info("Face detection cleared after consecutive misses")
+
+        # hand debouncing (color blob can flicker)
+        if hand_detected:
+            self._hand_streak += 1
+            self._hand_clear_streak = 0
+            if not self._hand_active and self._hand_streak >= self._hand_trigger_frames:
+                self._hand_active = True
+                logger.info("Hand detected on internal camera: %s", reason or "hand")
+        else:
+            self._hand_clear_streak += 1
+            self._hand_streak = 0
+            if self._hand_active and self._hand_clear_streak >= self._hand_clear_frames:
+                self._hand_active = False
+                logger.info("Hand detection cleared after consecutive misses")
 
         if person_detected:
             self._last_person_seen_at = now
