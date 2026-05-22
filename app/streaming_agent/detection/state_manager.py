@@ -235,21 +235,44 @@ class DetectionStateManager:
         except Exception:
             logger.exception("Failed while logging security debug state")
 
-        # synchronize relays; refresh TTL while active to avoid relay controller expiry
+        # compute independent signals for the two physical relays
+        internal = self.camera_state.get("internal", {})
+        human_active = bool(
+            internal.get("person_detected")
+            or internal.get("motion_detected")
+            or internal.get("face_detected")
+            or internal.get("hand_detected")
+        )
+        tamper_active = any(
+            bool(state.get("tamper_detected")) for state in self.camera_state.values()
+        )
+        combined_active = human_active or tamper_active
+
+        # synchronize relays independently (Relay 1 = human on internal, Relay 4 = any tamper)
+        # this matches the required mapping and prevents cross-triggering
         try:
-            if force or security_event_active != self._security_event_active:
-                self._security_event_active = security_event_active
-                if security_event_active:
+            if force or combined_active != self._security_event_active:
+                self._security_event_active = combined_active
+                if combined_active:
                     logger.warning("Unified security event ACTIVE")
                 else:
                     logger.info("Unified security event CLEARED")
-                logger.info("Relays synchronized %s", "ON" if security_event_active else "OFF")
-                self.relay_controller.set_security_relays(security_event_active)
+                self.relay_controller.set_person_visible(human_active)
+                self.relay_controller.set_tamper_active("any", tamper_active)
+                logger.info(
+                    "Relays synchronized: relay1(human)=%s relay4(tamper)=%s",
+                    "ON" if human_active else "OFF",
+                    "ON" if tamper_active else "OFF",
+                )
 
-            # refresh TTL periodically while active so relay controller doesn't expire the source
-            if security_event_active:
+            # refresh the individual sources so their TTLs don't expire while active
+            if human_active:
                 if now - self._last_relay_refresh_at >= RELAY_REFRESH_INTERVAL:
-                    self.relay_controller.set_security_relays(True)
+                    self.relay_controller.set_person_visible(True)
+                    self._last_relay_refresh_at = now
+            if tamper_active:
+                if now - self._last_relay_refresh_at >= RELAY_REFRESH_INTERVAL:
+                    self.relay_controller.set_tamper_active("any", True)
                     self._last_relay_refresh_at = now
         except Exception:
             logger.exception("Failed to synchronize relays with detection state manager")
