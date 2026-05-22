@@ -232,6 +232,11 @@ class RelayController:
             if changed:
                 logger.info("Tamper detection end on %s camera; Relay 4 OFF", camera_role)
 
+    def set_security_relays(self, active):
+        changed = self._set_detection_source("security_event", active, red=True, buzzer=True)
+        if changed:
+            logger.info("Relays synchronized %s", "ON" if active else "OFF")
+
     def trigger_tamper_alert(self, camera_role="camera"):
         self.trigger_alert(f"tamper:{camera_role}", self.alert_duration, log_name="Tamper detected")
 
