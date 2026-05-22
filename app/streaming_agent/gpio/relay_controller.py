@@ -288,19 +288,19 @@ class RelayController:
                 # apply the logical state; this will call _write if flags change
                 self._apply_red_locked()
                 self._apply_buzzer_locked()
-                # if outputs still report ON, force a GPIO write and update flags
-                if self._red_on:
-                    self._red_on = False
-                    try:
-                        self._write(self.red_led_pin, False, "Red LED (force)")
-                    except Exception:
-                        logger.exception("Failed to force Red LED OFF via GPIO write")
-                if self._buzzer_on:
-                    self._buzzer_on = False
-                    try:
-                        self._write(self.buzzer_pin, False, "Buzzer (force)")
-                    except Exception:
-                        logger.exception("Failed to force Buzzer OFF via GPIO write")
+                # Ultimate recovery: unconditionally drive the two security pins to their inactive level.
+                # This is the final hammer that guarantees Relay 1 and Relay 4 are physically OFF
+                # even if every other mechanism failed or a race left a source behind.
+                self._red_on = False
+                self._buzzer_on = False
+                try:
+                    self._write(self.red_led_pin, False, "Red LED (force-off)")
+                except Exception:
+                    logger.exception("Failed direct Red LED force-off write")
+                try:
+                    self._write(self.buzzer_pin, False, "Buzzer (force-off)")
+                except Exception:
+                    logger.exception("Failed direct Buzzer force-off write")
         except Exception:
             logger.exception("force_security_relays_off failed")
 
