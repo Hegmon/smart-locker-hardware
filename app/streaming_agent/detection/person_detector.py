@@ -851,15 +851,27 @@ class PersonDetector:
     def _load_face_cascade():
         if cv2 is None:
             return None
-        cascade_path = Path(getattr(cv2.data, "haarcascades", "")) / "haarcascade_frontalface_default.xml"
-        if not cascade_path.exists():
-            logger.warning("Face cascade not found; face signal disabled")
-            return None
-        cascade = cv2.CascadeClassifier(str(cascade_path))
-        if cascade.empty():
-            logger.warning("Face cascade failed to load; face signal disabled")
-            return None
-        return cascade
+        cascade_candidates = []
+        data_module = getattr(cv2, "data", None)
+        haar_dir = getattr(data_module, "haarcascades", "") if data_module is not None else ""
+        if haar_dir:
+            cascade_candidates.append(Path(haar_dir) / "haarcascade_frontalface_default.xml")
+        cascade_candidates.extend(
+            [
+                Path("/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"),
+                Path("/usr/share/opencv/haarcascades/haarcascade_frontalface_default.xml"),
+                Path("/usr/local/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"),
+            ]
+        )
+        for cascade_path in cascade_candidates:
+            if not cascade_path.exists():
+                continue
+            cascade = cv2.CascadeClassifier(str(cascade_path))
+            if not cascade.empty():
+                logger.info("Face cascade loaded from %s", cascade_path)
+                return cascade
+        logger.warning("Face cascade not found; face signal disabled")
+        return None
 
     def _install_missing_model(self):
         if os.environ.get("PERSON_DETECTOR_AUTO_INSTALL_MODEL", "true").strip().lower() in {"0", "false", "no"}:
