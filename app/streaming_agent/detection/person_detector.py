@@ -98,7 +98,7 @@ class PersonDetector:
         self.model_path = self._resolve_model_path(model_path)
         self.labels_path = Path(labels_path)
         self.confidence_threshold = (
-            _env_float("PERSON_CONFIDENCE_THRESHOLD", _env_float("PERSON_DETECTION_CONFIDENCE", 0.45, minimum=0.05, maximum=0.95), minimum=0.05, maximum=0.95)
+            _env_float("PERSON_CONFIDENCE_THRESHOLD", 0.45, minimum=0.05, maximum=0.95)
             if confidence_threshold is None
             else float(confidence_threshold)
         )
