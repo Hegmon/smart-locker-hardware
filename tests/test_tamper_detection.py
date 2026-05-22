@@ -74,6 +74,18 @@ class TamperDetectionTests(unittest.TestCase):
         self.assertTrue(tampered)
         self.assertIn("covered/bright", reason)
 
+    @unittest.skipIf(tamper_detection.np is None, "numpy unavailable")
+    def test_scene_change_is_not_tamper_by_default(self) -> None:
+        buffer = _Buffer()
+        detector = TamperDetection(buffer, camera_role="external")
+        detector._baseline_gray = tamper_detection.np.zeros((120, 160), dtype=tamper_detection.np.float32)
+        detector._baseline_brightness = 0.0
+        frame = bytes([120, 80, 40]) * buffer.frame_size
+
+        tampered, _ = detector._detect_tamper(frame)
+
+        self.assertFalse(tampered)
+
 
 class _Led:
     def __init__(self):
