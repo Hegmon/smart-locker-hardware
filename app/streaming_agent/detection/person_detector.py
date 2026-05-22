@@ -239,8 +239,7 @@ class PersonDetector:
             self._thread = None
         if self.detection_state_manager is not None:
             self.detection_state_manager.clear_presence("internal")
-        else:
-            self.led_controller.set_person_visible(False)
+        # detectors do not directly control relays
         if self._owns_led_controller:
             self.led_controller.cleanup()
         logger.info("Person detector stopped")
@@ -582,8 +581,7 @@ class PersonDetector:
     def _clear_person_state(self):
         if self.detection_state_manager is not None:
             self.detection_state_manager.clear_presence("internal")
-        else:
-            self.led_controller.set_person_visible(False)
+        # detectors do not directly control relays
         self._led_visible = False
         self._detection_streak = 0
         self._clear_streak = 0
@@ -791,25 +789,19 @@ class PersonDetector:
 
         relay_active = self._face_active or self._hand_active or self._person_active or self._motion_active
         if self.detection_state_manager is not None:
-            self.detection_state_manager.update_presence(
-                "internal",
-                face_detected=self._face_active,
-                hand_detected=self._hand_active,
-                person_detected=person_detected and self._person_active,
-                motion_detected=motion_detected and self._motion_active,
-                human_score=human_score,
-                reason=reason,
-            )
-        elif relay_active:
-            if not self._led_visible:
-                logger.info("Person/body movement confirmed; Relay 1 ON: %s", reason or "person")
-                self.led_controller.set_person_visible(True)
-        elif self._led_visible:
-            clear_age = now - self._last_person_seen_at if self._last_person_seen_at else 0.0
-            logger.info("No person/body movement detected for %.2fs; Relay 1 OFF", clear_age)
-            self.led_controller.set_person_visible(False)
-        else:
-            self.led_controller.set_person_visible(False)
+            if detected:
+                self.detection_state_manager.update_presence(
+                    "internal",
+                    face_detected=self._face_active,
+                    hand_detected=self._hand_active,
+                    person_detected=person_detected and self._person_active,
+                    motion_detected=motion_detected and self._motion_active,
+                    human_score=human_score,
+                    reason=reason,
+                )
+            else:
+                self.detection_state_manager.check_timeouts()
+        # detectors never directly drive security relays; DetectionStateManager is authoritative
 
         self._led_visible = relay_active
 
