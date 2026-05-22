@@ -35,6 +35,30 @@ class RelayControllerTests(unittest.TestCase):
         self.assertEqual(gpio.outputs[20], gpio.HIGH)
         self.assertEqual(gpio.outputs[16], gpio.HIGH)
 
+    def test_person_detection_clears_red_led_and_buzzer_without_timer(self) -> None:
+        gpio = _FakeGPIO()
+        controller = RelayController(active_low=True)
+        with patch.dict(sys.modules, {"RPi": types.SimpleNamespace(GPIO=gpio), "RPi.GPIO": gpio}):
+            controller.start()
+            controller.set_person_visible(True)
+            controller.set_person_visible(False)
+
+        self.assertEqual(gpio.outputs[21], gpio.HIGH)
+        self.assertEqual(gpio.outputs[12], gpio.HIGH)
+        self.assertEqual(controller._alert_threads, set())
+
+    def test_tamper_detection_clears_red_led_and_buzzer_without_timer(self) -> None:
+        gpio = _FakeGPIO()
+        controller = RelayController(active_low=True)
+        with patch.dict(sys.modules, {"RPi": types.SimpleNamespace(GPIO=gpio), "RPi.GPIO": gpio}):
+            controller.start()
+            controller.set_tamper_active("internal", True)
+            controller.set_tamper_active("internal", False)
+
+        self.assertEqual(gpio.outputs[21], gpio.HIGH)
+        self.assertEqual(gpio.outputs[12], gpio.HIGH)
+        self.assertEqual(controller._alert_threads, set())
+
     def test_lock_locker_uses_inactive_relay_state(self) -> None:
         gpio = _FakeGPIO()
         controller = RelayController(active_low=True)
