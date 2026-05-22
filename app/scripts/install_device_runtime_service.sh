@@ -24,7 +24,7 @@ echo "Removing stale qbox-device.service drop-in overrides so every device uses 
 sudo rm -rf /etc/systemd/system/qbox-device.service.d
 
 echo "Clearing Python bytecode caches so the runtime uses the current source files"
-find "$PROJECT_DIR/app" -type d -name __pycache__ -prune -exec rm -rf {} +
+sudo find "$PROJECT_DIR/app" -type d -name __pycache__ -prune -exec rm -rf {} +
 
 sudo cp "$GLOBAL_SERVICE_TMP" /etc/systemd/system/qbox-device.service
 
