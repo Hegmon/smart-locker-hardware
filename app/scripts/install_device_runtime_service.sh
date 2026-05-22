@@ -20,6 +20,8 @@ fi
 sed "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$GLOBAL_SERVICE_SRC" > "$GLOBAL_SERVICE_TMP"
 
 echo "Installing qbox-device.service for project: $PROJECT_DIR"
+echo "Removing stale qbox-device.service drop-in overrides so every device uses the repo service template"
+sudo rm -rf /etc/systemd/system/qbox-device.service.d
 sudo cp "$GLOBAL_SERVICE_TMP" /etc/systemd/system/qbox-device.service
 
 echo "Disabling old split agent services so the device keeps one MQTT connection"
