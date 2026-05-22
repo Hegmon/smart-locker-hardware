@@ -25,7 +25,7 @@ from app.streaming_agent.streaming_manager import StreamingManager
 
 logger = LoggingManager.get_logger(__name__)
 
-DETECTION_LED_HOLD_SECONDS = float(os.getenv("DETECTION_LED_HOLD_SECONDS", "0"))
+DETECTION_LED_HOLD_SECONDS = float(os.getenv("DETECTION_LED_HOLD_SECONDS", "2.5"))
 
 
 class StreamingAgent:
@@ -67,6 +67,9 @@ class StreamingAgent:
         )
         self.tamper_detectors = []
         for role, frame_buffer in self.stream_manager.frame_buffers.items():
+            if role != "external":
+                logger.info("Skipping tamper detector for %s camera; tamper relay is external-camera only", role)
+                continue
             if role == "external" and os.getenv("EXTERNAL_TAMPER_DETECTION_ENABLED", "true").strip().lower() not in {
                 "1",
                 "true",
