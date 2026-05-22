@@ -11,6 +11,31 @@ add_system_dist_packages()
 
 logger = LoggingManager.get_logger(__name__)
 
+# =============================================================================
+# ARCHITECTURE (Security Relays for Surveillance)
+# =============================================================================
+# For the person / motion / face / hand / tamper detection feature:
+#
+#   • DetectionStateManager is the SINGLE SOURCE OF TRUTH.
+#   • It computes one boolean: security_active = person or motion or face or hand or tamper
+#   • It is the ONLY code allowed to call:
+#         relay_controller.set_security_relays(security_active)
+#   • This call drives BOTH Relay 1 (Red LED / IN1) and Relay 4 (Buzzer / IN4) together.
+#
+# Detectors (PersonDetector, TamperDetection) MUST NEVER call any set_* method
+# on the relay controller. They only ever report observations to the state manager.
+#
+# Legacy bypass methods (set_person_visible / set_tamper_active) have been
+# completely removed. Only set_security_relays() (via DetectionStateManager)
+# is allowed to control the security relays (IN1 + IN4).
+#
+# All "stuck ON" problems are prevented by:
+#   - strict hold + stale watchdog in DetectionStateManager
+#   - hysteresis in PersonDetector (0.60 activate / 0.40 clear)
+#   - the verifier thread that calls set_security_relays(False) + force_security_relays_off()
+#     every single second whenever security_active is False.
+# =============================================================================
+
 RED_LED_PIN = 21
 GREEN_LED_PIN = 20
 LOCKER_PIN = 16
@@ -210,27 +235,10 @@ class RelayController:
             self._write(self.locker_pin, False, "Locker relay")
             logger.info("Locker locked")
 
-    def set_person_visible(self, visible):
-        source = "person"
-        if visible:
-            changed = self._set_detection_source(source, True, red=True, buzzer=False)
-            if changed:
-                logger.info("Person/body movement detection start; Relay 1 ON while detection is active")
-        else:
-            changed = self._set_detection_source(source, False, red=True, buzzer=False)
-            if changed:
-                logger.info("Person/body movement detection end; Relay 1 OFF")
-
-    def set_tamper_active(self, camera_role, active):
-        source = f"tamper:{camera_role}"
-        if active:
-            changed = self._set_detection_source(source, True, red=False, buzzer=True)
-            if changed:
-                logger.warning("Tamper detection start on %s camera; Relay 4 ON while tamper is active", camera_role)
-        else:
-            changed = self._set_detection_source(source, False, red=False, buzzer=True)
-            if changed:
-                logger.info("Tamper detection end on %s camera; Relay 4 OFF", camera_role)
+    # NOTE: set_person_visible and set_tamper_active have been removed.
+    # All surveillance security relay control (person + tamper + face + hand + motion)
+    # now goes exclusively through DetectionStateManager → set_security_relays().
+    # The two methods above were the old bypass paths that caused stuck relays.
 
     def set_security_relays(self, active):
         changed = self._set_detection_source("security_event", active, red=True, buzzer=True)
@@ -276,14 +284,15 @@ class RelayController:
                     keys = list(self._detection_source_until.keys())
                 except Exception:
                     keys = []
+                # Only "security_event" is the authoritative source for surveillance security relays now.
                 for k in keys:
-                    if k == "security_event" or k == "person" or k.startswith("person") or k.startswith("tamper"):
+                    if k == "security_event":
                         self._detection_source_until.pop(k, None)
                 for src in list(self._red_sources):
-                    if src == "security_event" or src == "person" or src.startswith("person") or src.startswith("tamper"):
+                    if src == "security_event":
                         self._red_sources.discard(src)
                 for src in list(self._buzzer_sources):
-                    if src == "security_event" or src == "person" or src.startswith("person") or src.startswith("tamper"):
+                    if src == "security_event":
                         self._buzzer_sources.discard(src)
                 # apply the logical state; this will call _write if flags change
                 self._apply_red_locked()
