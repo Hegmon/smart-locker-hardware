@@ -1,6 +1,12 @@
 from app.streaming_agent.camera_roles import assign_camera_roles
 from app.streaming_agent.camera_controls import CameraControlManager
-from app.streaming_agent.ffmpeg_builder import QR_FRAME_CHANNELS, QR_FRAME_HEIGHT, QR_FRAME_WIDTH, build_ffmpeg_command
+from app.streaming_agent.ffmpeg_builder import (
+    QR_FRAME_CHANNELS,
+    QR_FRAME_HEIGHT,
+    QR_FRAME_WIDTH,
+    build_ffmpeg_command,
+    build_public_stream_urls,
+)
 from app.streaming_agent.frame_buffer import SharedFrameBuffer
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 from app.streaming_agent.stream_process import StreamProcess
@@ -124,5 +130,6 @@ class StreamingManager:
                 "name": stream.name,
                 "pid": stream.process.pid if stream.process else None,
                 "rtsp_url": stream.rtsp_url,
+                "urls": build_public_stream_urls(role),
             }
         return status
