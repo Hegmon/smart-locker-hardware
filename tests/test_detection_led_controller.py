@@ -1,30 +1,25 @@
 from __future__ import annotations
 
-import os
 import unittest
-from unittest.mock import patch
 
 from app.streaming_agent.gpio.led_controller import LedController
 
 
 class DetectionLedControllerTests(unittest.TestCase):
-    def test_defaults_to_gpio_14_and_15(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            controller = LedController()
+    def test_legacy_led_controller_uses_relay_mapping(self) -> None:
+        controller = LedController(active_low=True)
 
-        self.assertEqual(controller.pins, (14, 15))
+        self.assertEqual(controller.pins, (21, 20, 16, 12))
+        self.assertEqual(controller.success_pin, 20)
+        self.assertEqual(controller.failure_pin, 21)
 
-    def test_empty_env_disables_detection_leds(self) -> None:
-        with patch.dict(os.environ, {"DETECTION_LED_PINS": ""}, clear=True):
-            controller = LedController()
+    def test_set_active_tracks_red_and_buzzer_sources(self) -> None:
+        controller = LedController(active_low=True)
 
-        self.assertEqual(controller.pins, ())
+        controller.set_active("person", True)
 
-    def test_env_overrides_detection_led_pins(self) -> None:
-        with patch.dict(os.environ, {"DETECTION_LED_PINS": "20,21"}, clear=True):
-            controller = LedController()
-
-        self.assertEqual(controller.pins, (20, 21))
+        self.assertIn("person", controller._red_sources)
+        self.assertIn("person", controller._buzzer_sources)
 
 
 if __name__ == "__main__":
