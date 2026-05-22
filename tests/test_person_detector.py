@@ -56,6 +56,17 @@ class PersonDetectorStateTests(unittest.TestCase):
 
         self.assertFalse(detector._near_object_enabled)
 
+    def test_human_score_fuses_partial_signals(self) -> None:
+        self.assertGreaterEqual(
+            PersonDetector._human_score(
+                face_detected=True,
+                hand_detected=False,
+                person_detected=False,
+                motion_detected=True,
+            ),
+            0.5,
+        )
+
 
 class _Led:
     def __init__(self):
