@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -23,7 +24,7 @@ class RelayControllerTests(unittest.TestCase):
         self.assertEqual(gpio.outputs[16], gpio.HIGH)
         self.assertEqual(gpio.outputs[12], gpio.HIGH)
 
-    def test_person_detection_drives_red_led_and_buzzer_only(self) -> None:
+    def test_person_detection_drives_relay_1_only(self) -> None:
         gpio = _FakeGPIO()
         controller = RelayController(active_low=True)
         with patch.dict(sys.modules, {"RPi": types.SimpleNamespace(GPIO=gpio), "RPi.GPIO": gpio}):
@@ -31,7 +32,7 @@ class RelayControllerTests(unittest.TestCase):
             controller.set_person_visible(True)
 
         self.assertEqual(gpio.outputs[21], gpio.LOW)
-        self.assertEqual(gpio.outputs[12], gpio.LOW)
+        self.assertEqual(gpio.outputs[12], gpio.HIGH)
         self.assertEqual(gpio.outputs[20], gpio.HIGH)
         self.assertEqual(gpio.outputs[16], gpio.HIGH)
 
@@ -47,17 +48,32 @@ class RelayControllerTests(unittest.TestCase):
         self.assertEqual(gpio.outputs[12], gpio.HIGH)
         self.assertEqual(controller._alert_threads, set())
 
-    def test_tamper_detection_clears_red_led_and_buzzer_without_timer(self) -> None:
+    def test_tamper_detection_drives_and_clears_relay_4_only(self) -> None:
         gpio = _FakeGPIO()
         controller = RelayController(active_low=True)
         with patch.dict(sys.modules, {"RPi": types.SimpleNamespace(GPIO=gpio), "RPi.GPIO": gpio}):
             controller.start()
             controller.set_tamper_active("internal", True)
+            self.assertEqual(gpio.outputs[21], gpio.HIGH)
+            self.assertEqual(gpio.outputs[12], gpio.LOW)
             controller.set_tamper_active("internal", False)
 
         self.assertEqual(gpio.outputs[21], gpio.HIGH)
         self.assertEqual(gpio.outputs[12], gpio.HIGH)
         self.assertEqual(controller._alert_threads, set())
+
+    def test_detection_ttl_turns_relay_off_if_detector_stops_refreshing(self) -> None:
+        gpio = _FakeGPIO()
+        controller = RelayController(active_low=True)
+        with patch.dict(sys.modules, {"RPi": types.SimpleNamespace(GPIO=gpio), "RPi.GPIO": gpio}):
+            with patch.dict("os.environ", {"DETECTION_RELAY_SOURCE_TTL_SECONDS": "0.05"}):
+                controller.start()
+                controller.set_person_visible(True)
+                self.assertEqual(gpio.outputs[21], gpio.LOW)
+                time.sleep(0.15)
+
+        self.assertEqual(gpio.outputs[21], gpio.HIGH)
+        self.assertNotIn("person", controller._red_sources)
 
     def test_lock_locker_uses_inactive_relay_state(self) -> None:
         gpio = _FakeGPIO()
