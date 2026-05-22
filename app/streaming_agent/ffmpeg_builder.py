@@ -10,6 +10,14 @@ QR_FRAME_HEIGHT = int(os.getenv("QR_FRAME_HEIGHT", "540"))
 QR_FRAME_CHANNELS = int(os.getenv("QR_FRAME_CHANNELS", "3"))
 QR_FRAME_FPS = max(1, int(os.getenv("QR_FRAME_FPS", "10")))
 STREAM_VIDEO_ENCODER = os.getenv("STREAM_VIDEO_ENCODER", "libx264").strip() or "libx264"
+STREAM_INPUT_FORMAT = os.getenv("STREAM_INPUT_FORMAT", "mjpeg").strip() or "mjpeg"
+STREAM_INPUT_SIZE = os.getenv("STREAM_INPUT_SIZE", "1280x720").strip() or "1280x720"
+STREAM_INPUT_FPS = max(1, int(os.getenv("STREAM_INPUT_FPS", "20")))
+STREAM_RTSP_TRANSPORT = os.getenv("STREAM_RTSP_TRANSPORT", "tcp").strip() or "tcp"
+STREAM_BITRATE = os.getenv("STREAM_VIDEO_BITRATE", "1200k").strip() or "1200k"
+STREAM_MAXRATE = os.getenv("STREAM_VIDEO_MAXRATE", STREAM_BITRATE).strip() or STREAM_BITRATE
+STREAM_BUFSIZE = os.getenv("STREAM_VIDEO_BUFSIZE", "600k").strip() or "600k"
+STREAM_GOP = max(1, int(os.getenv("STREAM_GOP", str(STREAM_INPUT_FPS))))
 
 
 def build_rtsp_url(camera_role):
@@ -30,14 +38,8 @@ def build_ffmpeg_command(
     if frame_pipe:
         return [
             "ffmpeg",
-            "-loglevel", "warning",
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
-            "-thread_queue_size", "2",
-            "-f", "v4l2",
-            "-input_format", "mjpeg",
-            "-video_size", "1280x720",
-            "-framerate", "20",
+            *_global_low_latency_args(),
+            *_input_low_latency_args(),
             "-i", video_device,
             "-an",
             "-filter_complex",
@@ -47,9 +49,7 @@ def build_ffmpeg_command(
             f"pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2,format=bgr24[raw]",
             "-map", "[rtsp]",
             *encoder_args,
-            "-rtsp_transport", "tcp",
-            "-muxdelay", "0",
-            "-muxpreload", "0",
+            *_rtsp_low_latency_args(),
             "-f", "rtsp",
             rtsp_url,
             "-map", "[raw]",
@@ -60,47 +60,67 @@ def build_ffmpeg_command(
 
     return  [
     "ffmpeg",
-    "-loglevel", "warning",
- 
-    # Low latency
-    "-fflags", "nobuffer",
-    "-flags", "low_delay",
-    "-thread_queue_size", "2",
- 
-    # Camera input
-    "-f", "v4l2",
-    "-input_format", "mjpeg",
-    "-video_size", "1280x720",
-    "-framerate", "20",
+    *_global_low_latency_args(),
+    *_input_low_latency_args(),
     "-i", video_device,
- 
     "-an",
- 
     *encoder_args,
- 
-    # RTSP output
-    "-rtsp_transport", "tcp",
-    "-muxdelay", "0",
-    "-muxpreload", "0",
+    *_rtsp_low_latency_args(),
     "-f", "rtsp",
     rtsp_url,
 ]
 
 
+def _global_low_latency_args():
+    return [
+        "-hide_banner",
+        "-loglevel", os.getenv("STREAM_FFMPEG_LOGLEVEL", "warning"),
+        "-nostdin",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-avioflags", "direct",
+        "-probesize", os.getenv("STREAM_PROBESIZE", "32"),
+        "-analyzeduration", os.getenv("STREAM_ANALYZEDURATION", "0"),
+    ]
+
+
+def _input_low_latency_args():
+    return [
+        "-thread_queue_size", os.getenv("STREAM_THREAD_QUEUE_SIZE", "1"),
+        "-rtbufsize", os.getenv("STREAM_RTBUF_SIZE", "256k"),
+        "-use_wallclock_as_timestamps", "1",
+        "-f", "v4l2",
+        "-input_format", STREAM_INPUT_FORMAT,
+        "-video_size", STREAM_INPUT_SIZE,
+        "-framerate", str(STREAM_INPUT_FPS),
+    ]
+
+
+def _rtsp_low_latency_args():
+    return [
+        "-rtsp_transport", STREAM_RTSP_TRANSPORT,
+        "-muxdelay", "0",
+        "-muxpreload", "0",
+        "-flush_packets", "1",
+        "-max_delay", "0",
+    ]
+
+
 def _encoder_args():
     common = [
         "-pix_fmt", "yuv420p",
-        "-b:v", "1200k",
-        "-maxrate", "1200k",
-        "-bufsize", "2400k",
-        "-g", "40",
+        "-b:v", STREAM_BITRATE,
+        "-maxrate", STREAM_MAXRATE,
+        "-bufsize", STREAM_BUFSIZE,
+        "-g", str(STREAM_GOP),
         "-bf", "0",
     ]
     if STREAM_VIDEO_ENCODER == "libx264":
         return [
             "-c:v", "libx264",
-            "-preset", os.getenv("STREAM_X264_PRESET", "veryfast"),
+            "-preset", os.getenv("STREAM_X264_PRESET", "ultrafast"),
             "-tune", "zerolatency",
+            "-x264-params", f"keyint={STREAM_GOP}:min-keyint={STREAM_GOP}:scenecut=0",
             *common,
         ]
     return ["-c:v", STREAM_VIDEO_ENCODER, *common]
