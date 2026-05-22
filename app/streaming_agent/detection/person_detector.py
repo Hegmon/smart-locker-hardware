@@ -37,6 +37,10 @@ FACE_CLEAR_FRAMES = 6
 HAND_TRIGGER_FRAMES = 2
 HAND_CLEAR_FRAMES = 6
 
+# Hysteresis thresholds to eliminate oscillation around the decision boundary
+HUMAN_ACTIVATE_THRESHOLD = 0.60
+HUMAN_CLEAR_THRESHOLD = 0.40
+
 
 def _env_float(name, default, minimum=None, maximum=None):
     try:
@@ -166,6 +170,10 @@ class PersonDetector:
         self._hand_min_area = _env_float("HAND_MIN_AREA", 0.015, minimum=0.0001, maximum=1.0)
         self._human_score_threshold = _env_float("HUMAN_SCORE_THRESHOLD", 0.5, minimum=0.1, maximum=1.0)
 
+        # hysteresis to kill oscillation when score hovers around the old hard threshold
+        self._human_activate_threshold = _env_float("HUMAN_ACTIVATE_THRESHOLD", HUMAN_ACTIVATE_THRESHOLD, minimum=0.1, maximum=0.95)
+        self._human_clear_threshold = _env_float("HUMAN_CLEAR_THRESHOLD", HUMAN_CLEAR_THRESHOLD, minimum=0.05, maximum=0.9)
+
         self._running = False
         self._thread = None
         self._interpreter = None
@@ -195,6 +203,14 @@ class PersonDetector:
         self._hand_active = False
         self._person_active = False
         self._motion_active = False
+        self._human_presence_active = False
+        self._face_streak = 0
+        self._face_clear_streak = 0
+        self._hand_streak = 0
+        self._hand_clear_streak = 0
+        self._person_active = False
+        self._motion_active = False
+        self._human_presence_active = False  # hysteretic overall presence (prevents 0.55-0.65 chatter)
         self._face_streak = 0
         self._face_clear_streak = 0
         self._hand_streak = 0
@@ -338,8 +354,17 @@ class PersonDetector:
             except Exception:
                 logger.exception("Person detection failed")
 
+            # Hysteresis: once presence activates at 0.60 it stays active until score drops to 0.40.
+            # This completely eliminates the 0.55-0.65 oscillation that was causing rapid relay chatter.
+            if not self._human_presence_active:
+                if human_score >= self._human_activate_threshold:
+                    self._human_presence_active = True
+            else:
+                if human_score <= self._human_clear_threshold:
+                    self._human_presence_active = False
+
             self._update_led_state(
-                human_score >= self._human_score_threshold,
+                self._human_presence_active,  # stable latched value instead of raw threshold comparison
                 reason,
                 face_detected=face_detected,
                 hand_detected=hand_detected,
