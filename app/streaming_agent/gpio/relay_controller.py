@@ -237,6 +237,43 @@ class RelayController:
         if changed:
             logger.info("Relays synchronized %s", "ON" if active else "OFF")
 
+    def is_security_relays_on(self):
+        """Return True if either the red LED or buzzer is currently on."""
+        with self._lock:
+            return bool(self._red_on or self._buzzer_on)
+
+    def force_security_relays_off(self):
+        """Force the security relays (red LED/buzzer) to OFF.
+
+        This method attempts a graceful clear of known security-related sources
+        and will write the GPIO pins directly if needed to guarantee an OFF state.
+        """
+        with self._lock:
+            # remove security-related detection sources so apply_* will clear outputs
+            try:
+                keys = list(self._detection_source_until.keys())
+            except Exception:
+                keys = []
+            for k in keys:
+                if k == "security_event" or k == "person" or k.startswith("person") or k.startswith("tamper"):
+                    self._detection_source_until.pop(k, None)
+            for src in list(self._red_sources):
+                if src == "security_event" or src == "person" or src.startswith("person") or src.startswith("tamper"):
+                    self._red_sources.discard(src)
+            for src in list(self._buzzer_sources):
+                if src == "security_event" or src == "person" or src.startswith("person") or src.startswith("tamper"):
+                    self._buzzer_sources.discard(src)
+            # apply the logical state; this will call _write if flags change
+            self._apply_red_locked()
+            self._apply_buzzer_locked()
+            # if outputs still report ON, force a GPIO write and update flags
+            if self._red_on:
+                self._red_on = False
+                self._write(self.red_led_pin, False, "Red LED (force)")
+            if self._buzzer_on:
+                self._buzzer_on = False
+                self._write(self.buzzer_pin, False, "Buzzer (force)")
+
     def trigger_tamper_alert(self, camera_role="camera"):
         self.trigger_alert(f"tamper:{camera_role}", self.alert_duration, log_name="Tamper detected")
 
