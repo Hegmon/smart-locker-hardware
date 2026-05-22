@@ -11,6 +11,24 @@ Environment=PYTHONUNBUFFERED=1
 Environment=SMARTLOCKER_CONFIG_JSON=/etc/smartlocker/config.json
 Environment=SMARTLOCKER_DEVICE_ID_FILE=/etc/smartlocker/device_id
 Environment=SMARTLOCKER_BACKEND_STATE_FILE=/var/lib/smartlocker/backend_device.json
+Environment=DETECTION_RELAY_SOURCE_TTL_SECONDS=0
+Environment=DETECTION_LED_HOLD_SECONDS=0
+Environment=PERSON_DETECTOR_EVERY_N_FRAMES=1
+Environment=PERSON_DETECTION_CONFIRM_FRAMES=1
+Environment=PERSON_DETECTION_CLEAR_FRAMES=1
+Environment=PERSON_DETECTION_CLEAR_SECONDS=0
+Environment=PERSON_DETECTION_STALE_CLEAR_SECONDS=0.35
+Environment=PERSON_NEAR_OBJECT_ENABLED=false
+Environment=PERSON_MOTION_ENABLED=true
+Environment=PERSON_MOTION_REBASELINE_SECONDS=1.5
+Environment=TAMPER_DETECTOR_EVERY_N_FRAMES=1
+Environment=TAMPER_CONFIRM_SECONDS=0.2
+Environment=TAMPER_CONFIRM_FRAMES=2
+Environment=TAMPER_CLEAR_SECONDS=0
+Environment=TAMPER_CLEAR_FRAMES=1
+Environment=TAMPER_STALE_CLEAR_SECONDS=0.5
+Environment=TAMPER_BASELINE_FRAMES=5
+Environment=TAMPER_SCENE_CHANGE_ENABLED=false
 ExecStartPre=/usr/bin/test -d /etc/smartlocker
 ExecStart=/bin/sh -c 'cd __PROJECT_DIR__ && exec __PROJECT_DIR__/venv/bin/python -m app.streaming_agent.main'
 Restart=always
