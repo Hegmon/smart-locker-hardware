@@ -24,7 +24,7 @@ RELAY_INPUTS = {
 
 QR_SUCCESS_UNLOCK_TIME = 5
 ALERT_DURATION = 15
-DETECTION_SOURCE_TTL_SECONDS = 2.5
+DETECTION_SOURCE_TTL_SECONDS = 6.0
 
 
 def _env_bool(name, default):
@@ -182,7 +182,6 @@ class RelayController:
     def green_led_off(self):
         with self._lock:
             if not self._green_on:
-                self._write(self.green_led_pin, False, "Green LED")
                 return
             self._green_on = False
             self._write(self.green_led_pin, False, "Green LED")
@@ -204,12 +203,12 @@ class RelayController:
     def lock_locker(self):
         with self._lock:
             was_unlocked = self._locker_unlocked
+            if not was_unlocked:
+                logger.info("Locker locked/default state confirmed")
+                return
             self._locker_unlocked = False
             self._write(self.locker_pin, False, "Locker relay")
-            if was_unlocked:
-                logger.info("Locker locked")
-            else:
-                logger.info("Locker locked/default state confirmed")
+            logger.info("Locker locked")
 
     def set_person_visible(self, visible):
         source = "person"
