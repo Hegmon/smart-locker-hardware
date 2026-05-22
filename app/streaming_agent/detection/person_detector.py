@@ -108,7 +108,8 @@ class PersonDetector:
         self._top_detection_log_seconds = _env_float("PERSON_DETECTOR_LOG_TOP_SECONDS", 10.0, minimum=0.0)
         self._required_detection_frames = _env_int("PERSON_DETECTION_CONFIRM_FRAMES", 2, minimum=1)
         self._required_clear_frames = _env_int("PERSON_DETECTION_CLEAR_FRAMES", 2, minimum=1)
-        self._clear_seconds = _env_float("PERSON_DETECTION_CLEAR_SECONDS", 0.5, minimum=0.0)
+        self._clear_seconds = _env_float("PERSON_DETECTION_CLEAR_SECONDS", 0.0, minimum=0.0)
+        self._stale_clear_seconds = _env_float("PERSON_DETECTION_STALE_CLEAR_SECONDS", 1.0, minimum=0.05)
         self._min_box_area = _env_float("PERSON_DETECTION_MIN_BOX_AREA", 0.04, minimum=0.0, maximum=1.0)
         self._max_box_area = _env_float("PERSON_DETECTION_MAX_BOX_AREA", 0.95, minimum=0.01, maximum=1.0)
         self._near_object_enabled = os.getenv("PERSON_NEAR_OBJECT_ENABLED", "true").strip().lower() in {
@@ -252,9 +253,9 @@ class PersonDetector:
             self._log_fps()
 
     def _clear_stale_led_state(self):
-        if not self._led_visible or self._clear_seconds <= 0:
+        if not self._led_visible:
             return
-        if time.monotonic() - self._last_person_seen_at < self._clear_seconds:
+        if time.monotonic() - self._last_person_seen_at < self._stale_clear_seconds:
             return
         logger.info("No fresh person detection; GPIO LEDs OFF")
         self.led_controller.set_person_visible(False)
