@@ -235,44 +235,39 @@ class DetectionStateManager:
         except Exception:
             logger.exception("Failed while logging security debug state")
 
-        # compute independent signals for the two physical relays
-        internal = self.camera_state.get("internal", {})
-        human_active = bool(
-            internal.get("person_detected")
-            or internal.get("motion_detected")
-            or internal.get("face_detected")
-            or internal.get("hand_detected")
-        )
-        tamper_active = any(
-            bool(state.get("tamper_detected")) for state in self.camera_state.values()
-        )
-        combined_active = human_active or tamper_active
+        # === SINGLE AUTHORITATIVE SECURITY STATE (controls BOTH relays simultaneously) ===
+        # security_active is the ONLY thing that decides relay1 + relay4 state.
+        # Detectors only ever report observations; they never touch GPIO.
 
-        # synchronize relays independently (Relay 1 = human on internal, Relay 4 = any tamper)
-        # this matches the required mapping and prevents cross-triggering
+        # detailed relay decision log (required for debugging stuck relays)
         try:
-            if force or combined_active != self._security_event_active:
-                self._security_event_active = combined_active
-                if combined_active:
+            logger.info(
+                "Relay decision: security=%s person=%s motion=%s hand=%s face=%s tamper=%s",
+                bool(security_event_active),
+                bool(any(s.get("person_detected") for s in self.camera_state.values())),
+                bool(any(s.get("motion_detected") for s in self.camera_state.values())),
+                bool(any(s.get("hand_detected") for s in self.camera_state.values())),
+                bool(any(s.get("face_detected") for s in self.camera_state.values())),
+                bool(any(s.get("tamper_detected") for s in self.camera_state.values())),
+            )
+        except Exception:
+            pass
+
+        # synchronize both relays together using the single security_event source
+        try:
+            if force or security_event_active != self._security_event_active:
+                self._security_event_active = security_event_active
+                if security_event_active:
                     logger.warning("Unified security event ACTIVE")
                 else:
                     logger.info("Unified security event CLEARED")
-                self.relay_controller.set_person_visible(human_active)
-                self.relay_controller.set_tamper_active("any", tamper_active)
-                logger.info(
-                    "Relays synchronized: relay1(human)=%s relay4(tamper)=%s",
-                    "ON" if human_active else "OFF",
-                    "ON" if tamper_active else "OFF",
-                )
+                logger.info("Relays synchronized %s", "ON" if security_event_active else "OFF")
+                self.relay_controller.set_security_relays(security_event_active)
 
-            # refresh the individual sources so their TTLs don't expire while active
-            if human_active:
+            # keep refreshing the TTL so the source does not expire while we are active
+            if security_event_active:
                 if now - self._last_relay_refresh_at >= RELAY_REFRESH_INTERVAL:
-                    self.relay_controller.set_person_visible(True)
-                    self._last_relay_refresh_at = now
-            if tamper_active:
-                if now - self._last_relay_refresh_at >= RELAY_REFRESH_INTERVAL:
-                    self.relay_controller.set_tamper_active("any", True)
+                    self.relay_controller.set_security_relays(True)
                     self._last_relay_refresh_at = now
         except Exception:
             logger.exception("Failed to synchronize relays with detection state manager")
@@ -287,24 +282,27 @@ class DetectionStateManager:
                 with self._lock:
                     # re-evaluate timeouts and states (run immediately on start)
                     self._apply_locked(time.monotonic())
-                    if not self._security_event_active:
-                        # if computed state says no security event, relays must be OFF
+                    desired = self._security_event_active
+
+                    # Always drive the authoritative state into the relay controller (idempotent)
+                    try:
+                        self.relay_controller.set_security_relays(desired)
+                    except Exception:
+                        logger.exception("Verifier failed to set desired relay state")
+
+                    if not desired:
+                        # Belt + suspenders: when we know security must be off, repeatedly force it.
+                        # This guarantees that even if a source was left behind or GPIO got out of sync,
+                        # the relays will be driven LOW every second.
                         try:
                             if hasattr(self.relay_controller, "is_security_relays_on") and self.relay_controller.is_security_relays_on():
-                                logger.error("Relay mismatch: computed security_clear but hardware reports ON; forcing OFF")
-                                # attempt graceful clear first
-                                try:
-                                    self.relay_controller.set_security_relays(False)
-                                except Exception:
-                                    logger.exception("Failed to clear relays gracefully; forcing hardware OFF")
-                                # force hardware OFF if still mismatched
-                                try:
-                                    if hasattr(self.relay_controller, "force_security_relays_off"):
-                                        self.relay_controller.force_security_relays_off()
-                                except Exception:
-                                    logger.exception("Failed to force relays OFF")
+                                logger.error("Relay mismatch: computed security=False but hardware reports ON; forcing OFF")
+                                self.relay_controller.force_security_relays_off()
+
+                            # Unconditional enforcement - the ultimate recovery for "stuck ON" bugs
+                            self.relay_controller.force_security_relays_off()
                         except Exception:
-                            logger.exception("Verification check failed")
+                            logger.exception("Verification force-off failed")
                 time.sleep(1.0)
             except Exception:
                 logger.exception("Security verification thread failed")
