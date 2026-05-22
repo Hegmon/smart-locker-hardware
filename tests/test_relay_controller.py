@@ -62,6 +62,19 @@ class RelayControllerTests(unittest.TestCase):
         self.assertEqual(gpio.outputs[12], gpio.HIGH)
         self.assertEqual(controller._alert_threads, set())
 
+    def test_security_event_synchronizes_relay_1_and_relay_4(self) -> None:
+        gpio = _FakeGPIO()
+        controller = RelayController(active_low=True)
+        with patch.dict(sys.modules, {"RPi": types.SimpleNamespace(GPIO=gpio), "RPi.GPIO": gpio}):
+            controller.start()
+            controller.set_security_relays(True)
+            self.assertEqual(gpio.outputs[21], gpio.LOW)
+            self.assertEqual(gpio.outputs[12], gpio.LOW)
+            controller.set_security_relays(False)
+
+        self.assertEqual(gpio.outputs[21], gpio.HIGH)
+        self.assertEqual(gpio.outputs[12], gpio.HIGH)
+
     def test_detection_ttl_turns_relay_off_if_detector_stops_refreshing(self) -> None:
         gpio = _FakeGPIO()
         controller = RelayController(active_low=True)
