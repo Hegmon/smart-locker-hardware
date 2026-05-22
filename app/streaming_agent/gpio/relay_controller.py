@@ -240,6 +240,19 @@ class RelayController:
     def is_security_relays_on(self):
         """Return True if either the red LED or buzzer is currently on."""
         with self._lock:
+            # Prefer reading GPIO pins when available to detect hardware-level mismatches
+            if self._enabled and self._gpio is not None:
+                try:
+                    # RPi.GPIO provides `input`; lgpio compat may expose `gpio_read` via wrapper
+                    if hasattr(self._gpio, "input"):
+                        red_state = self._gpio.input(self.red_led_pin)
+                        buz_state = self._gpio.input(self.buzzer_pin)
+                        if self.active_low:
+                            return (red_state == self._gpio.LOW) or (buz_state == self._gpio.LOW)
+                        return (red_state == self._gpio.HIGH) or (buz_state == self._gpio.HIGH)
+                    # fallback: use stored flags
+                except Exception:
+                    logger.exception("Failed to read GPIO inputs for security relay verification")
             return bool(self._red_on or self._buzzer_on)
 
     def force_security_relays_off(self):
