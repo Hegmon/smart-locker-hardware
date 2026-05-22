@@ -109,7 +109,7 @@ class TamperDetection:
         self._last_sequence = -1
         self._baseline_gray = None
         self._tamper_started_at = None
-        self._last_tamper_seen_at = 0.0
+        self._last_tamper_seen_at = time.monotonic()
         self._tamper_active = False
         self._tamper_streak = 0
         self._clear_streak = 0
@@ -180,7 +180,7 @@ class TamperDetection:
 
     def _pause_tamper_state(self, reason):
         self._tamper_started_at = None
-        self._last_tamper_seen_at = 0.0
+        self._last_tamper_seen_at = time.monotonic()
         self._tamper_streak = 0
         self._clear_streak = 0
         if self._tamper_active:
