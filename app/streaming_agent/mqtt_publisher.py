@@ -125,7 +125,8 @@ class MQTTPublisher:
         self.publish_stream_status()
 
     def _publish(self, topic, payload):
-        published = self.mqtt.publish_json(topic, payload, qos=1)
+        retain = topic.endswith("/stream/status")
+        published = self.mqtt.publish_json(topic, payload, qos=1, retain=retain)
         if published:
             logger.info("Published MQTT message to topic %s", topic)
         else:
