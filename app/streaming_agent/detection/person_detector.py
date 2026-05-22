@@ -82,6 +82,10 @@ class PersonDetector:
         self._owns_led_controller = led_controller is None
         self.led_controller = led_controller or RelayController()
         self._top_detection_log_seconds = _env_float("PERSON_DETECTOR_LOG_TOP_SECONDS", 10.0, minimum=0.0)
+        self._required_detection_frames = _env_int("PERSON_DETECTION_CONFIRM_FRAMES", 2, minimum=1)
+        self._required_clear_frames = _env_int("PERSON_DETECTION_CLEAR_FRAMES", 2, minimum=1)
+        self._min_box_area = _env_float("PERSON_DETECTION_MIN_BOX_AREA", 0.02, minimum=0.0, maximum=1.0)
+        self._max_box_area = _env_float("PERSON_DETECTION_MAX_BOX_AREA", 0.90, minimum=0.01, maximum=1.0)
 
         self._running = False
         self._thread = None
@@ -99,6 +103,8 @@ class PersonDetector:
         self._fps_window_started_at = time.monotonic()
         self._led_visible = False
         self._last_top_detection_log_at = 0.0
+        self._detection_streak = 0
+        self._clear_streak = 0
 
     def start(self):
         if self._running:
@@ -212,10 +218,12 @@ class PersonDetector:
         self._interpreter.set_tensor(self._input_details[0]["index"], input_tensor)
         self._interpreter.invoke()
 
-        scores, classes = self._read_detection_outputs()
-        self._maybe_log_top_detection(scores, classes)
-        for score, class_id in zip(scores, classes):
+        scores, classes, boxes = self._read_detection_outputs()
+        self._maybe_log_top_detection(scores, classes, boxes)
+        for index, (score, class_id) in enumerate(zip(scores, classes)):
             if float(score) >= self.confidence_threshold and int(class_id) in self._person_class_ids:
+                if not self._box_area_is_valid(boxes, index):
+                    continue
                 return True
         return False
 
@@ -238,6 +246,7 @@ class PersonDetector:
         output_names = [str(detail.get("name", "")).lower() for detail in self._output_details]
 
         count = None
+        boxes = None
         for output, name in zip(squeezed, output_names):
             if "num" in name and output.size:
                 count = int(np.ravel(output)[0])
@@ -253,9 +262,16 @@ class PersonDetector:
                 scores = flattened
             elif "class" in name:
                 classes = flattened
+            elif "box" in name and output.size:
+                boxes = np.reshape(output, (-1, 4))
 
         if scores is not None and classes is not None:
-            return self._normalize_detection_vectors(scores, classes, count)
+            return self._normalize_detection_vectors(scores, classes, boxes, count)
+
+        if boxes is None and squeezed:
+            first = np.asarray(squeezed[0])
+            if first.size and first.shape[-1] == 4:
+                boxes = np.reshape(first, (-1, 4))
 
         scores = next(
             (
@@ -286,17 +302,26 @@ class PersonDetector:
             scores = np.ravel(squeezed[2]) if len(squeezed) > 2 else np.array([], dtype=np.float32)
             if count is None and len(squeezed) > 3 and np.ravel(squeezed[3]).size:
                 count = int(np.ravel(squeezed[3])[0])
-        return self._normalize_detection_vectors(scores, classes, count)
+        if scores is None:
+            scores = np.array([], dtype=np.float32)
+        if classes is None:
+            classes = np.array([], dtype=np.float32)
+        return self._normalize_detection_vectors(scores, classes, boxes, count)
 
-    def _normalize_detection_vectors(self, scores, classes, count=None):
+    def _normalize_detection_vectors(self, scores, classes, boxes=None, count=None):
         scores = np.ravel(scores).astype(np.float32, copy=False)
         classes = np.ravel(classes).astype(np.float32, copy=False)
         length = min(scores.size, classes.size)
+        if boxes is not None:
+            boxes = np.reshape(boxes, (-1, 4)).astype(np.float32, copy=False)
+            length = min(length, boxes.shape[0])
         if count is not None:
             length = min(length, max(0, int(count)))
-        return scores[:length], classes[:length]
+        if boxes is None:
+            boxes = np.empty((0, 4), dtype=np.float32)
+        return scores[:length], classes[:length], boxes[:length]
 
-    def _maybe_log_top_detection(self, scores, classes):
+    def _maybe_log_top_detection(self, scores, classes, boxes):
         if self._top_detection_log_seconds <= 0 or scores.size == 0 or classes.size == 0:
             return
         now = time.monotonic()
@@ -304,18 +329,42 @@ class PersonDetector:
             return
         self._last_top_detection_log_at = now
         best_index = int(np.argmax(scores))
+        area = self._box_area(boxes[best_index]) if best_index < len(boxes) else None
         logger.info(
-            "Person detector top detection: class=%s score=%.2f threshold=%.2f person_class_ids=%s",
+            "Person detector top detection: class=%s score=%.2f threshold=%.2f area=%s person_class_ids=%s",
             int(classes[best_index]),
             float(scores[best_index]),
             self.confidence_threshold,
+            f"{area:.3f}" if area is not None else "unknown",
             sorted(self._person_class_ids),
         )
+
+    def _box_area_is_valid(self, boxes, index):
+        if boxes is None or index >= len(boxes):
+            return True
+        area = self._box_area(boxes[index])
+        if area is None:
+            return True
+        return self._min_box_area <= area <= self._max_box_area
+
+    @staticmethod
+    def _box_area(box):
+        if box is None or len(box) != 4:
+            return None
+        y_min, x_min, y_max, x_max = [float(value) for value in box]
+        width = max(0.0, min(1.0, x_max) - max(0.0, x_min))
+        height = max(0.0, min(1.0, y_max) - max(0.0, y_min))
+        area = width * height
+        return area if area > 0 else None
 
     def _update_led_state(self, person_detected):
         now = time.monotonic()
         if person_detected:
             self._last_person_seen_at = now
+            self._detection_streak += 1
+            self._clear_streak = 0
+            if self._detection_streak < self._required_detection_frames:
+                return
             if not self._led_visible:
                 logger.info("Person detected; GPIO LEDs ON")
             self.led_controller.set_person_visible(True)
@@ -323,10 +372,21 @@ class PersonDetector:
             return
 
         if self._last_person_seen_at and now - self._last_person_seen_at >= self.led_off_delay_seconds:
+            self._clear_streak += 1
+            self._detection_streak = 0
+            if self._clear_streak < self._required_clear_frames:
+                return
             if self._led_visible:
                 logger.info("No person detected for %.1f seconds; GPIO LEDs OFF", self.led_off_delay_seconds)
             self.led_controller.set_person_visible(False)
             self._led_visible = False
+        elif not person_detected:
+            self._clear_streak += 1
+            self._detection_streak = 0
+            if self._led_visible and self._clear_streak >= self._required_clear_frames:
+                logger.info("No person detected; GPIO LEDs OFF")
+                self.led_controller.set_person_visible(False)
+                self._led_visible = False
 
     def _log_fps(self):
         self._processed_frames += 1
