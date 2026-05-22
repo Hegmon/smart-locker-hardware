@@ -17,6 +17,14 @@ Environment=STREAM_AUTO_START=true
 Environment=MEDIAMTX_HOST=backend.qbox.sa
 Environment=MEDIAMTX_RTSP_PORT=8554
 Environment=STREAM_PUBLIC_BASE_URL=https://backend.qbox.sa
+Environment=RELAY_RED_LED_PIN=21
+Environment=RELAY_GREEN_LED_PIN=20
+Environment=RELAY_LOCKER_PIN=16
+Environment=RELAY_BUZZER_PIN=12
+Environment=RELAY_ACTIVE_LOW=true
+Environment=PERSON_DETECTION_CONFIDENCE=0.40
+Environment=PERSON_DETECTOR_EVERY_N_FRAMES=2
+Environment=PERSON_DETECTOR_LOG_TOP_SECONDS=10
 
 ExecStart=__PROJECT_DIR__/.venv/bin/python -m app.main
 
