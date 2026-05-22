@@ -56,6 +56,10 @@ class TamperDetectionTests(unittest.TestCase):
     def test_dark_frame_is_tamper(self) -> None:
         buffer = _Buffer()
         detector = TamperDetection(buffer, camera_role="internal")
+        detector._baseline_frame_target = 0
+        detector._baseline_frames_seen = 1
+        detector._baseline_gray = tamper_detection.np.full((120, 160), 120, dtype=tamper_detection.np.float32)
+        detector._baseline_brightness = 120.0
         frame = bytes(buffer.frame_size)
 
         tampered, reason = detector._detect_tamper(frame)
@@ -67,6 +71,10 @@ class TamperDetectionTests(unittest.TestCase):
     def test_bright_frame_is_tamper(self) -> None:
         buffer = _Buffer()
         detector = TamperDetection(buffer, camera_role="external")
+        detector._baseline_frame_target = 0
+        detector._baseline_frames_seen = 1
+        detector._baseline_gray = tamper_detection.np.full((120, 160), 120, dtype=tamper_detection.np.float32)
+        detector._baseline_brightness = 120.0
         frame = bytes([255]) * buffer.frame_size
 
         tampered, reason = detector._detect_tamper(frame)
@@ -78,9 +86,21 @@ class TamperDetectionTests(unittest.TestCase):
     def test_scene_change_is_not_tamper_by_default(self) -> None:
         buffer = _Buffer()
         detector = TamperDetection(buffer, camera_role="external")
+        detector._baseline_frame_target = 0
+        detector._baseline_frames_seen = 1
         detector._baseline_gray = tamper_detection.np.zeros((120, 160), dtype=tamper_detection.np.float32)
         detector._baseline_brightness = 0.0
         frame = bytes([120, 80, 40]) * buffer.frame_size
+
+        tampered, _ = detector._detect_tamper(frame)
+
+        self.assertFalse(tampered)
+
+    @unittest.skipIf(tamper_detection.np is None, "numpy unavailable")
+    def test_dark_startup_frame_calibrates_instead_of_triggering_tamper(self) -> None:
+        buffer = _Buffer()
+        detector = TamperDetection(buffer, camera_role="internal")
+        frame = bytes(buffer.frame_size)
 
         tampered, _ = detector._detect_tamper(frame)
 
