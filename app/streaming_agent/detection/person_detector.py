@@ -27,11 +27,11 @@ ALT_MODEL_PATH = DETECTION_DIR / "models" / "model.tflite"
 DEFAULT_LABELS_PATH = DETECTION_DIR / "labels.txt"
 PROJECT_DIR = DETECTION_DIR.parents[2]
 MODEL_INSTALLER = PROJECT_DIR / "app" / "scripts" / "install_detection_model.sh"
-DETECTION_HOLD_SECONDS = 5.0
+DETECTION_HOLD_SECONDS = 8.0
 PERSON_TRIGGER_FRAMES = 3
 PERSON_CLEAR_FRAMES = 10
-MOTION_TRIGGER_FRAMES = 3
-MOTION_CLEAR_FRAMES = 10
+MOTION_TRIGGER_FRAMES = 2
+MOTION_CLEAR_FRAMES = 8
 
 
 def _env_float(name, default, minimum=None, maximum=None):
@@ -98,17 +98,17 @@ class PersonDetector:
         self.model_path = self._resolve_model_path(model_path)
         self.labels_path = Path(labels_path)
         self.confidence_threshold = (
-            _env_float("PERSON_DETECTION_CONFIDENCE", 0.55, minimum=0.05, maximum=0.95)
+            _env_float("PERSON_CONFIDENCE_THRESHOLD", _env_float("PERSON_DETECTION_CONFIDENCE", 0.45, minimum=0.05, maximum=0.95), minimum=0.05, maximum=0.95)
             if confidence_threshold is None
             else float(confidence_threshold)
         )
         self.process_every_n_frames = (
-            _env_int("PERSON_DETECTOR_EVERY_N_FRAMES", 2, minimum=1)
+            _env_int("PERSON_DETECTOR_EVERY_N_FRAMES", 1, minimum=1)
             if process_every_n_frames is None
             else max(1, int(process_every_n_frames))
         )
-        self._model_every_n_frames = _env_int("PERSON_MODEL_EVERY_N_FRAMES", 3, minimum=1)
-        self.led_off_delay_seconds = _env_float("DETECTION_HOLD_SECONDS", led_off_delay_seconds, minimum=0.0)
+        self._model_every_n_frames = _env_int("PERSON_MODEL_EVERY_N_FRAMES", 2, minimum=1)
+        self.led_off_delay_seconds = _env_float("SECURITY_HOLD_SECONDS", _env_float("DETECTION_HOLD_SECONDS", led_off_delay_seconds, minimum=0.0), minimum=0.0)
         self._owns_led_controller = led_controller is None
         self.led_controller = led_controller or RelayController()
         self.detection_state_manager = detection_state_manager
@@ -136,8 +136,8 @@ class PersonDetector:
         self._near_baseline_gray = None
         self._near_baseline_brightness = None
         self._motion_enabled = _env_bool("PERSON_MOTION_ENABLED", True)
-        self._motion_threshold = _env_float("PERSON_MOTION_THRESHOLD", 0.025, minimum=0.001, maximum=1.0)
-        legacy_motion_area = _env_float("PERSON_MOTION_MIN_CONTOUR_AREA", 0.10, minimum=0.0001, maximum=1.0)
+        self._motion_threshold = _env_float("PERSON_MOTION_THRESHOLD", 0.015, minimum=0.001, maximum=1.0)
+        legacy_motion_area = _env_float("PERSON_MOTION_MIN_CONTOUR_AREA", 0.02, minimum=0.0001, maximum=1.0)
         self._motion_min_contour_area = _env_float(
             "MOTION_MINIMUM_AREA",
             legacy_motion_area,
@@ -147,8 +147,16 @@ class PersonDetector:
         self._motion_pixel_delta = _env_int("PERSON_MOTION_PIXEL_DELTA", 28, minimum=1)
         self._motion_roi = _env_roi("PERSON_MOTION_ROI", "0.05,0.05,0.95,0.95")
         self._motion_baseline_gray = None
+        self._motion_subtractor = cv2.createBackgroundSubtractorMOG2(history=80, varThreshold=20, detectShadows=False) if cv2 is not None else None
+        self._last_motion_roi = None
         self._motion_rebaseline_seconds = _env_float("PERSON_MOTION_REBASELINE_SECONDS", 1.5, minimum=0.1)
         self._motion_candidate_started_at = None
+        self._face_enabled = _env_bool("FACE_DETECTION_ENABLED", True)
+        self._hand_enabled = _env_bool("HAND_DETECTION_ENABLED", True)
+        self._face_cascade = self._load_face_cascade()
+        self._face_min_area = _env_float("FACE_MIN_AREA", 0.006, minimum=0.0001, maximum=1.0)
+        self._hand_min_area = _env_float("HAND_MIN_AREA", 0.015, minimum=0.0001, maximum=1.0)
+        self._human_score_threshold = _env_float("HUMAN_SCORE_THRESHOLD", 0.5, minimum=0.1, maximum=1.0)
 
         self._running = False
         self._thread = None
@@ -171,6 +179,8 @@ class PersonDetector:
         self._clear_streak = 0
         self._motion_streak = 0
         self._motion_clear_streak = 0
+        self._face_active = False
+        self._hand_active = False
         self._person_active = False
         self._motion_active = False
         self._person_confidence_ema = 0.0
@@ -210,14 +220,16 @@ class PersonDetector:
         self._thread = threading.Thread(target=self._run, daemon=True, name="person-detector")
         self._thread.start()
         logger.info(
-            "Person/body detector started; model_enabled=%s model=%s hold=%.1fs person_frames=%s/%s motion_frames=%s/%s",
+            "Person/body detector started; model_enabled=%s model=%s hold=%.1fs threshold=%.2f person_frames=%s/%s motion_frames=%s/%s model_every=%s",
             self._model_enabled(),
             self.model_path,
             self._clear_seconds,
+            self.confidence_threshold,
             self._required_detection_frames,
             self._required_clear_frames,
             self._motion_trigger_frames,
             self._motion_clear_frames,
+            self._model_every_n_frames,
         )
 
     def stop(self):
@@ -299,18 +311,24 @@ class PersonDetector:
                 continue
 
             person_detected = False
+            face_detected = False
+            hand_detected = False
             motion_detected = False
+            human_score = 0.0
             reason = ""
             try:
-                person_detected, motion_detected, reason = self._detect_presence(frame_bytes, sequence)
+                face_detected, hand_detected, person_detected, motion_detected, human_score, reason = self._detect_presence(frame_bytes, sequence)
             except Exception:
                 logger.exception("Person detection failed")
 
             self._update_led_state(
-                person_detected or motion_detected,
+                human_score >= self._human_score_threshold,
                 reason,
+                face_detected=face_detected,
+                hand_detected=hand_detected,
                 person_detected=person_detected,
                 motion_detected=motion_detected,
+                human_score=human_score,
             )
             self._log_fps()
 
@@ -327,8 +345,8 @@ class PersonDetector:
         self._clear_person_state()
 
     def _detect_person(self, frame_bytes, sequence):
-        person_detected, motion_detected, reason = self._detect_presence(frame_bytes, sequence)
-        return person_detected or motion_detected, reason
+        face_detected, hand_detected, person_detected, motion_detected, human_score, reason = self._detect_presence(frame_bytes, sequence)
+        return human_score >= self._human_score_threshold, reason
 
     def _detect_presence(self, frame_bytes, sequence):
         frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
@@ -336,17 +354,41 @@ class PersonDetector:
             self.frame_buffer.width,
             self.frame_buffer.channels,
         )
+        face_detected, face_reason = self._detect_face(frame)
+        hand_detected, hand_reason = self._detect_hand(frame)
         near_detected, near_reason = self._detect_near_object(frame)
         motion_detected, motion_reason = self._detect_motion(frame)
 
         model_detected = False
         model_reason = ""
-        if self._model_enabled() and sequence % self._model_every_n_frames == 0:
+        run_model = self._model_enabled() and (
+            sequence % self._model_every_n_frames == 0
+            or face_detected
+            or hand_detected
+            or motion_detected
+        )
+        if run_model:
             model_detected, model_reason = self._detect_model_person(frame)
 
         person_detected = near_detected or model_detected
-        reasons = [reason for reason in (near_reason, model_reason, motion_reason) if reason]
-        return person_detected, motion_detected, "; ".join(reasons)
+        human_score = self._human_score(face_detected, hand_detected, person_detected, motion_detected)
+        reasons = [reason for reason in (face_reason, hand_reason, near_reason, model_reason, motion_reason) if reason]
+        if human_score >= self._human_score_threshold:
+            logger.info("Human presence score=%.2f signals face=%s hand=%s person=%s motion=%s", human_score, face_detected, hand_detected, person_detected, motion_detected)
+        return face_detected, hand_detected, person_detected, motion_detected, human_score, "; ".join(reasons)
+
+    @staticmethod
+    def _human_score(face_detected, hand_detected, person_detected, motion_detected):
+        score = 0.0
+        if face_detected:
+            score += 0.4
+        if hand_detected:
+            score += 0.3
+        if person_detected:
+            score += 0.5
+        if motion_detected:
+            score += 0.3
+        return score
 
     def _detect_model_person(self, frame):
         resized = cv2.resize(frame, (self._input_width, self._input_height), interpolation=cv2.INTER_AREA)
@@ -370,6 +412,49 @@ class PersonDetector:
         self._person_confidence_ema = alpha * best_person_score + (1.0 - alpha) * self._person_confidence_ema
         if self._person_confidence_ema >= self.confidence_threshold:
             return True, f"person_model score={best_person_score:.2f} smooth={self._person_confidence_ema:.2f}"
+        return False, ""
+
+    def _detect_face(self, frame):
+        if not self._face_enabled or self._face_cascade is None:
+            return False, ""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        height, width = gray.shape[:2]
+        scale_width = 320
+        scale = scale_width / float(width) if width > scale_width else 1.0
+        small = cv2.resize(gray, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA) if scale < 1.0 else gray
+        faces = self._face_cascade.detectMultiScale(
+            small,
+            scaleFactor=1.1,
+            minNeighbors=4,
+            minSize=(24, 24),
+        )
+        if len(faces) == 0:
+            return False, ""
+        frame_area = float(small.shape[0] * small.shape[1])
+        largest = max((w * h for (_x, _y, w, h) in faces), default=0) / frame_area
+        if largest >= self._face_min_area:
+            return True, f"face area={largest:.3f}"
+        return False, ""
+
+    def _detect_hand(self, frame):
+        if not self._hand_enabled:
+            return False, ""
+        height, width = frame.shape[:2]
+        scale_width = 320
+        scale = scale_width / float(width) if width > scale_width else 1.0
+        small = cv2.resize(frame, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA) if scale < 1.0 else frame
+        ycrcb = cv2.cvtColor(small, cv2.COLOR_BGR2YCrCb)
+        lower = np.array([0, 133, 77], dtype=np.uint8)
+        upper = np.array([255, 173, 127], dtype=np.uint8)
+        mask = cv2.inRange(ycrcb, lower, upper)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), dtype=np.uint8))
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return False, ""
+        area = max(float(cv2.contourArea(contour)) for contour in contours) / float(mask.size)
+        if area >= self._hand_min_area:
+            return True, f"hand area={area:.3f}"
         return False, ""
 
     def _detect_near_object(self, frame):
@@ -432,19 +517,31 @@ class PersonDetector:
 
         if self._motion_baseline_gray is None:
             self._motion_baseline_gray = blurred.astype(np.float32)
+            if self._motion_subtractor is not None:
+                self._motion_subtractor.apply(blurred)
             return False, ""
 
         baseline_u8 = cv2.convertScaleAbs(self._motion_baseline_gray)
         delta = cv2.absdiff(blurred, baseline_u8)
         _, mask = cv2.threshold(delta, self._motion_pixel_delta, 255, cv2.THRESH_BINARY)
+        if self._motion_subtractor is not None:
+            fg_mask = self._motion_subtractor.apply(blurred, learningRate=0.01)
+            _, fg_mask = cv2.threshold(fg_mask, 180, 255, cv2.THRESH_BINARY)
+            mask = cv2.bitwise_or(mask, fg_mask)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), dtype=np.uint8))
         mask = cv2.dilate(mask, None, iterations=2)
 
         changed_fraction = float(np.count_nonzero(mask)) / float(mask.size)
         largest_area = 0.0
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if contours:
-            largest_area = max(float(cv2.contourArea(contour)) for contour in contours) / float(mask.size)
+            largest_contour = max(contours, key=cv2.contourArea)
+            largest_area = float(cv2.contourArea(largest_contour)) / float(mask.size)
+            x, y, w, h = cv2.boundingRect(largest_contour)
+            self._last_motion_roi = (x / mask.shape[1], y / mask.shape[0], (x + w) / mask.shape[1], (y + h) / mask.shape[0])
+        else:
+            self._last_motion_roi = None
 
         motion_detected = (
             changed_fraction >= self._motion_threshold
@@ -478,6 +575,8 @@ class PersonDetector:
         self._near_baseline_gray = None
         self._near_baseline_brightness = None
         self._motion_baseline_gray = None
+        self._motion_subtractor = cv2.createBackgroundSubtractorMOG2(history=80, varThreshold=20, detectShadows=False) if cv2 is not None else None
+        self._last_motion_roi = None
         self._motion_candidate_started_at = None
 
     def _clear_person_state(self):
@@ -492,6 +591,8 @@ class PersonDetector:
         self._motion_clear_streak = 0
         self._person_active = False
         self._motion_active = False
+        self._face_active = False
+        self._hand_active = False
         self._last_person_seen_at = 0.0
         self._last_motion_seen_at = 0.0
         self._reset_presence_baselines()
@@ -626,12 +727,29 @@ class PersonDetector:
         area = width * height
         return area if area > 0 else None
 
-    def _update_led_state(self, detected, reason="", *, person_detected=None, motion_detected=None):
+    def _update_led_state(
+        self,
+        detected,
+        reason="",
+        *,
+        face_detected=None,
+        hand_detected=None,
+        person_detected=None,
+        motion_detected=None,
+        human_score=0.0,
+    ):
         now = time.monotonic()
+        if face_detected is None:
+            face_detected = False
+        if hand_detected is None:
+            hand_detected = False
         if person_detected is None:
             person_detected = bool(detected)
         if motion_detected is None:
             motion_detected = bool(detected)
+
+        self._face_active = bool(face_detected)
+        self._hand_active = bool(hand_detected)
 
         if person_detected:
             self._last_person_seen_at = now
@@ -671,12 +789,15 @@ class PersonDetector:
                 self._motion_active = False
                 logger.info("Motion detection cleared after %.2fs", clear_age)
 
-        relay_active = self._person_active or self._motion_active
+        relay_active = self._face_active or self._hand_active or self._person_active or self._motion_active
         if self.detection_state_manager is not None:
             self.detection_state_manager.update_presence(
                 "internal",
+                face_detected=self._face_active,
+                hand_detected=self._hand_active,
                 person_detected=person_detected and self._person_active,
                 motion_detected=motion_detected and self._motion_active,
+                human_score=human_score,
                 reason=reason,
             )
         elif relay_active:
@@ -725,6 +846,20 @@ class PersonDetector:
         if ALT_MODEL_PATH.exists():
             return ALT_MODEL_PATH
         return path
+
+    @staticmethod
+    def _load_face_cascade():
+        if cv2 is None:
+            return None
+        cascade_path = Path(getattr(cv2.data, "haarcascades", "")) / "haarcascade_frontalface_default.xml"
+        if not cascade_path.exists():
+            logger.warning("Face cascade not found; face signal disabled")
+            return None
+        cascade = cv2.CascadeClassifier(str(cascade_path))
+        if cascade.empty():
+            logger.warning("Face cascade failed to load; face signal disabled")
+            return None
+        return cascade
 
     def _install_missing_model(self):
         if os.environ.get("PERSON_DETECTOR_AUTO_INSTALL_MODEL", "true").strip().lower() in {"0", "false", "no"}:
