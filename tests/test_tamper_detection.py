@@ -38,6 +38,20 @@ class TamperDetectionTests(unittest.TestCase):
         self.assertFalse(led.active)
         self.assertEqual(led.role, "external")
 
+    def test_update_tamper_state_clears_immediately_by_default(self) -> None:
+        led = _Led()
+        detector = TamperDetection(
+            None,
+            camera_role="internal",
+            led_controller=led,
+        )
+        detector._tamper_active = True
+
+        detector._update_tamper_state(False, "")
+
+        self.assertFalse(led.active)
+        self.assertEqual(led.role, "internal")
+
     @unittest.skipIf(tamper_detection.np is None, "numpy unavailable")
     def test_dark_frame_is_tamper(self) -> None:
         buffer = _Buffer()
