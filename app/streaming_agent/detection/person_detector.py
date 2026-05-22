@@ -94,6 +94,7 @@ class PersonDetector:
             if process_every_n_frames is None
             else max(1, int(process_every_n_frames))
         )
+        self._model_every_n_frames = _env_int("PERSON_MODEL_EVERY_N_FRAMES", 5, minimum=1)
         self.led_off_delay_seconds = led_off_delay_seconds
         self._owns_led_controller = led_controller is None
         self.led_controller = led_controller or RelayController()
@@ -230,7 +231,7 @@ class PersonDetector:
             person_detected = False
             reason = ""
             try:
-                person_detected, reason = self._detect_person(frame_bytes)
+                person_detected, reason = self._detect_person(frame_bytes, sequence)
             except Exception:
                 logger.exception("Person detection failed")
 
@@ -248,12 +249,19 @@ class PersonDetector:
         self._detection_streak = 0
         self._clear_streak = 0
 
-    def _detect_person(self, frame_bytes):
+    def _detect_person(self, frame_bytes, sequence):
         frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
             self.frame_buffer.height,
             self.frame_buffer.width,
             self.frame_buffer.channels,
         )
+        near_detected, near_reason = self._detect_near_object(frame)
+        if near_detected:
+            return True, near_reason
+
+        if sequence % self._model_every_n_frames != 0:
+            return False, ""
+
         resized = cv2.resize(frame, (self._input_width, self._input_height), interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         input_tensor = self._prepare_input(rgb)
@@ -271,11 +279,8 @@ class PersonDetector:
                 model_detected = True
                 break
 
-        near_detected, near_reason = self._detect_near_object(frame)
         if model_detected:
             return True, "person_model"
-        if near_detected:
-            return True, near_reason
         return False, ""
 
     def _detect_near_object(self, frame):
