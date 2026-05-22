@@ -126,6 +126,8 @@ class PersonDetector:
         self._motion_pixel_delta = _env_int("PERSON_MOTION_PIXEL_DELTA", 28, minimum=1)
         self._motion_roi = _env_roi("PERSON_MOTION_ROI", "0.05,0.05,0.95,0.95")
         self._motion_baseline_gray = None
+        self._motion_rebaseline_seconds = _env_float("PERSON_MOTION_REBASELINE_SECONDS", 1.5, minimum=0.1)
+        self._motion_candidate_started_at = None
 
         self._running = False
         self._thread = None
@@ -152,32 +154,35 @@ class PersonDetector:
         if self.frame_buffer is None:
             logger.warning("Person detector disabled: no shared frame buffer available")
             return
+        if cv2 is None or np is None:
+            logger.warning("Person/body detector disabled: opencv-python-headless and numpy are required")
+            return
+
         if not self.model_path.exists():
             self._install_missing_model()
             self.model_path = self._resolve_model_path(self.model_path)
 
-        if not self.model_path.exists():
+        if self.model_path.exists():
+            try:
+                self._load_model()
+            except Exception as exc:
+                logger.warning("Person model disabled; body-motion detection will continue: %s", exc)
+                self._disable_model()
+        else:
             logger.warning(
-                "Person detector disabled: model not found at %s. "
+                "Person model disabled: model not found at %s. "
                 "Place detect.tflite in app/streaming_agent/detection/models/ "
-                "set PERSON_DETECTOR_MODEL_PATH, or run app/scripts/install_detection_model.sh.",
+                "set PERSON_DETECTOR_MODEL_PATH, or run app/scripts/install_detection_model.sh. "
+                "Body-motion detection will continue without the model.",
                 self.model_path,
             )
-            return
-        if cv2 is None or np is None:
-            logger.warning("Person detector disabled: opencv-python-headless and numpy are required")
-            return
+            self._disable_model()
 
-        try:
-            self._load_model()
-        except Exception as exc:
-            logger.warning("Person detector disabled: %s", exc)
-            return
         self.led_controller.start()
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True, name="person-detector")
         self._thread.start()
-        logger.info("Person detector started with model %s", self.model_path)
+        logger.info("Person/body detector started; model_enabled=%s model=%s", self._model_enabled(), self.model_path)
 
     def stop(self):
         self._running = False
@@ -225,6 +230,23 @@ class PersonDetector:
         )
         logger.info("Person detector inference runtime: %s", runtime_name)
 
+    def _disable_model(self):
+        self._interpreter = None
+        self._input_details = None
+        self._output_details = None
+        self._input_height = 0
+        self._input_width = 0
+        self._input_dtype = None
+
+    def _model_enabled(self):
+        return (
+            self._interpreter is not None
+            and self._input_details is not None
+            and self._output_details is not None
+            and self._input_width > 0
+            and self._input_height > 0
+        )
+
     def _run(self):
         while self._running:
             frame_bytes, sequence, _ = self.frame_buffer.latest()
@@ -268,7 +290,7 @@ class PersonDetector:
         if motion_detected:
             return True, motion_reason
 
-        if sequence % self._model_every_n_frames != 0:
+        if not self._model_enabled() or sequence % self._model_every_n_frames != 0:
             return False, ""
 
         resized = cv2.resize(frame, (self._input_width, self._input_height), interpolation=cv2.INTER_AREA)
@@ -370,6 +392,17 @@ class PersonDetector:
             changed_fraction >= self._motion_threshold
             and largest_area >= self._motion_min_contour_area
         )
+        if motion_detected and self._motion_rebaseline_seconds > 0:
+            now = time.monotonic()
+            if self._motion_candidate_started_at is None:
+                self._motion_candidate_started_at = now
+            elif now - self._motion_candidate_started_at >= self._motion_rebaseline_seconds:
+                self._motion_baseline_gray = blurred.astype(np.float32)
+                self._motion_candidate_started_at = None
+                return False, ""
+        else:
+            self._motion_candidate_started_at = None
+
         if not motion_detected and self._baseline_learning_rate > 0:
             cv2.accumulateWeighted(
                 blurred.astype(np.float32),
@@ -387,6 +420,7 @@ class PersonDetector:
         self._near_baseline_gray = None
         self._near_baseline_brightness = None
         self._motion_baseline_gray = None
+        self._motion_candidate_started_at = None
 
     def _clear_person_state(self):
         self.led_controller.set_person_visible(False)
@@ -541,7 +575,7 @@ class PersonDetector:
 
         self._clear_streak += 1
         self._detection_streak = 0
-        clear_age = now - self._last_person_seen_at
+        clear_age = now - self._last_person_seen_at if self._last_person_seen_at else 0.0
         if self._clear_streak >= self._required_clear_frames and clear_age >= self._clear_seconds:
             if self._led_visible:
                 logger.info("No person detected; GPIO LEDs OFF")
