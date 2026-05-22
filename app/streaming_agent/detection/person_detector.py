@@ -27,6 +27,11 @@ ALT_MODEL_PATH = DETECTION_DIR / "models" / "model.tflite"
 DEFAULT_LABELS_PATH = DETECTION_DIR / "labels.txt"
 PROJECT_DIR = DETECTION_DIR.parents[2]
 MODEL_INSTALLER = PROJECT_DIR / "app" / "scripts" / "install_detection_model.sh"
+DETECTION_HOLD_SECONDS = 5.0
+PERSON_TRIGGER_FRAMES = 3
+PERSON_CLEAR_FRAMES = 10
+MOTION_TRIGGER_FRAMES = 3
+MOTION_CLEAR_FRAMES = 10
 
 
 def _env_float(name, default, minimum=None, maximum=None):
@@ -85,8 +90,9 @@ class PersonDetector:
         labels_path=DEFAULT_LABELS_PATH,
         confidence_threshold=None,
         process_every_n_frames=None,
-        led_off_delay_seconds=2.5,
+        led_off_delay_seconds=DETECTION_HOLD_SECONDS,
         led_controller=None,
+        detection_state_manager=None,
     ):
         self.frame_buffer = frame_buffer
         self.model_path = self._resolve_model_path(model_path)
@@ -102,13 +108,22 @@ class PersonDetector:
             else max(1, int(process_every_n_frames))
         )
         self._model_every_n_frames = _env_int("PERSON_MODEL_EVERY_N_FRAMES", 3, minimum=1)
-        self.led_off_delay_seconds = max(0.0, float(led_off_delay_seconds))
+        self.led_off_delay_seconds = _env_float("DETECTION_HOLD_SECONDS", led_off_delay_seconds, minimum=0.0)
         self._owns_led_controller = led_controller is None
         self.led_controller = led_controller or RelayController()
+        self.detection_state_manager = detection_state_manager
         self._top_detection_log_seconds = _env_float("PERSON_DETECTOR_LOG_TOP_SECONDS", 10.0, minimum=0.0)
-        self._required_detection_frames = _env_int("PERSON_DETECTION_CONFIRM_FRAMES", 2, minimum=1)
-        self._required_clear_frames = _env_int("PERSON_DETECTION_CLEAR_FRAMES", 2, minimum=1)
+        self._required_detection_frames = _env_int("PERSON_TRIGGER_FRAMES", PERSON_TRIGGER_FRAMES, minimum=1)
+        self._required_clear_frames = _env_int("PERSON_CLEAR_FRAMES", PERSON_CLEAR_FRAMES, minimum=1)
+        self._motion_trigger_frames = _env_int("MOTION_TRIGGER_FRAMES", MOTION_TRIGGER_FRAMES, minimum=1)
+        self._motion_clear_frames = _env_int("MOTION_CLEAR_FRAMES", MOTION_CLEAR_FRAMES, minimum=1)
         self._clear_seconds = _env_float("PERSON_DETECTION_CLEAR_SECONDS", self.led_off_delay_seconds, minimum=0.0)
+        self._confidence_smoothing_alpha = _env_float(
+            "PERSON_CONFIDENCE_SMOOTHING_ALPHA",
+            0.4,
+            minimum=0.01,
+            maximum=1.0,
+        )
         self._stale_clear_seconds = _env_float("PERSON_DETECTION_STALE_CLEAR_SECONDS", 0.35, minimum=0.05)
         self._min_box_area = _env_float("PERSON_DETECTION_MIN_BOX_AREA", 0.04, minimum=0.0, maximum=1.0)
         self._max_box_area = _env_float("PERSON_DETECTION_MAX_BOX_AREA", 0.95, minimum=0.01, maximum=1.0)
@@ -122,7 +137,13 @@ class PersonDetector:
         self._near_baseline_brightness = None
         self._motion_enabled = _env_bool("PERSON_MOTION_ENABLED", True)
         self._motion_threshold = _env_float("PERSON_MOTION_THRESHOLD", 0.025, minimum=0.001, maximum=1.0)
-        self._motion_min_contour_area = _env_float("PERSON_MOTION_MIN_CONTOUR_AREA", 0.006, minimum=0.0001, maximum=1.0)
+        legacy_motion_area = _env_float("PERSON_MOTION_MIN_CONTOUR_AREA", 0.10, minimum=0.0001, maximum=1.0)
+        self._motion_min_contour_area = _env_float(
+            "MOTION_MINIMUM_AREA",
+            legacy_motion_area,
+            minimum=0.0001,
+            maximum=1.0,
+        )
         self._motion_pixel_delta = _env_int("PERSON_MOTION_PIXEL_DELTA", 28, minimum=1)
         self._motion_roi = _env_roi("PERSON_MOTION_ROI", "0.05,0.05,0.95,0.95")
         self._motion_baseline_gray = None
@@ -140,6 +161,7 @@ class PersonDetector:
         self._labels = []
         self._person_class_ids = {0, 1}
         self._last_person_seen_at = 0.0
+        self._last_motion_seen_at = 0.0
         self._last_sequence = -1
         self._processed_frames = 0
         self._fps_window_started_at = time.monotonic()
@@ -147,6 +169,11 @@ class PersonDetector:
         self._last_top_detection_log_at = 0.0
         self._detection_streak = 0
         self._clear_streak = 0
+        self._motion_streak = 0
+        self._motion_clear_streak = 0
+        self._person_active = False
+        self._motion_active = False
+        self._person_confidence_ema = 0.0
 
     def start(self):
         if self._running:
@@ -182,14 +209,26 @@ class PersonDetector:
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True, name="person-detector")
         self._thread.start()
-        logger.info("Person/body detector started; model_enabled=%s model=%s", self._model_enabled(), self.model_path)
+        logger.info(
+            "Person/body detector started; model_enabled=%s model=%s hold=%.1fs person_frames=%s/%s motion_frames=%s/%s",
+            self._model_enabled(),
+            self.model_path,
+            self._clear_seconds,
+            self._required_detection_frames,
+            self._required_clear_frames,
+            self._motion_trigger_frames,
+            self._motion_clear_frames,
+        )
 
     def stop(self):
         self._running = False
         if self._thread:
             self._thread.join(timeout=2)
             self._thread = None
-        self.led_controller.set_person_visible(False)
+        if self.detection_state_manager is not None:
+            self.detection_state_manager.clear_presence("internal")
+        else:
+            self.led_controller.set_person_visible(False)
         if self._owns_led_controller:
             self.led_controller.cleanup()
         logger.info("Person detector stopped")
@@ -260,39 +299,56 @@ class PersonDetector:
                 continue
 
             person_detected = False
+            motion_detected = False
             reason = ""
             try:
-                person_detected, reason = self._detect_person(frame_bytes, sequence)
+                person_detected, motion_detected, reason = self._detect_presence(frame_bytes, sequence)
             except Exception:
                 logger.exception("Person detection failed")
 
-            self._update_led_state(person_detected, reason)
+            self._update_led_state(
+                person_detected or motion_detected,
+                reason,
+                person_detected=person_detected,
+                motion_detected=motion_detected,
+            )
             self._log_fps()
 
     def _clear_stale_led_state(self):
         if not self._led_visible:
             return
-        if time.monotonic() - self._last_person_seen_at < self._stale_clear_seconds:
+        last_seen_at = max(self._last_person_seen_at, self._last_motion_seen_at)
+        if time.monotonic() - last_seen_at < self._stale_clear_seconds:
             return
-        logger.info("No fresh person detection; GPIO LEDs OFF")
+        if self.detection_state_manager is not None:
+            self.detection_state_manager.check_timeouts()
+            return
+        logger.info("No fresh person detection; Relay 1 OFF")
         self._clear_person_state()
 
     def _detect_person(self, frame_bytes, sequence):
+        person_detected, motion_detected, reason = self._detect_presence(frame_bytes, sequence)
+        return person_detected or motion_detected, reason
+
+    def _detect_presence(self, frame_bytes, sequence):
         frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
             self.frame_buffer.height,
             self.frame_buffer.width,
             self.frame_buffer.channels,
         )
         near_detected, near_reason = self._detect_near_object(frame)
-        if near_detected:
-            return True, near_reason
         motion_detected, motion_reason = self._detect_motion(frame)
-        if motion_detected:
-            return True, motion_reason
 
-        if not self._model_enabled() or sequence % self._model_every_n_frames != 0:
-            return False, ""
+        model_detected = False
+        model_reason = ""
+        if self._model_enabled() and sequence % self._model_every_n_frames == 0:
+            model_detected, model_reason = self._detect_model_person(frame)
 
+        person_detected = near_detected or model_detected
+        reasons = [reason for reason in (near_reason, model_reason, motion_reason) if reason]
+        return person_detected, motion_detected, "; ".join(reasons)
+
+    def _detect_model_person(self, frame):
         resized = cv2.resize(frame, (self._input_width, self._input_height), interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         input_tensor = self._prepare_input(rgb)
@@ -302,16 +358,18 @@ class PersonDetector:
 
         scores, classes, boxes = self._read_detection_outputs()
         self._maybe_log_top_detection(scores, classes, boxes)
-        model_detected = False
+        best_person_score = 0.0
         for index, (score, class_id) in enumerate(zip(scores, classes)):
-            if float(score) >= self.confidence_threshold and int(class_id) in self._person_class_ids:
-                if not self._box_area_is_valid(boxes, index):
-                    continue
-                model_detected = True
-                break
+            if int(class_id) not in self._person_class_ids:
+                continue
+            if not self._box_area_is_valid(boxes, index):
+                continue
+            best_person_score = max(best_person_score, float(score))
 
-        if model_detected:
-            return True, "person_model"
+        alpha = self._confidence_smoothing_alpha
+        self._person_confidence_ema = alpha * best_person_score + (1.0 - alpha) * self._person_confidence_ema
+        if self._person_confidence_ema >= self.confidence_threshold:
+            return True, f"person_model score={best_person_score:.2f} smooth={self._person_confidence_ema:.2f}"
         return False, ""
 
     def _detect_near_object(self, frame):
@@ -423,10 +481,19 @@ class PersonDetector:
         self._motion_candidate_started_at = None
 
     def _clear_person_state(self):
-        self.led_controller.set_person_visible(False)
+        if self.detection_state_manager is not None:
+            self.detection_state_manager.clear_presence("internal")
+        else:
+            self.led_controller.set_person_visible(False)
         self._led_visible = False
         self._detection_streak = 0
         self._clear_streak = 0
+        self._motion_streak = 0
+        self._motion_clear_streak = 0
+        self._person_active = False
+        self._motion_active = False
+        self._last_person_seen_at = 0.0
+        self._last_motion_seen_at = 0.0
         self._reset_presence_baselines()
 
     def _prepare_input(self, rgb_frame):
@@ -559,29 +626,71 @@ class PersonDetector:
         area = width * height
         return area if area > 0 else None
 
-    def _update_led_state(self, person_detected, reason=""):
+    def _update_led_state(self, detected, reason="", *, person_detected=None, motion_detected=None):
         now = time.monotonic()
+        if person_detected is None:
+            person_detected = bool(detected)
+        if motion_detected is None:
+            motion_detected = bool(detected)
+
         if person_detected:
             self._last_person_seen_at = now
             self._detection_streak += 1
             self._clear_streak = 0
-            if self._detection_streak < self._required_detection_frames:
-                return
+            if not self._person_active and self._detection_streak >= self._required_detection_frames:
+                self._person_active = True
+                logger.info("Person detected on internal camera: %s", reason or "person")
+        else:
+            self._clear_streak += 1
+            self._detection_streak = 0
+            clear_age = now - self._last_person_seen_at if self._last_person_seen_at else 0.0
+            if (
+                self._person_active
+                and self._clear_streak >= self._required_clear_frames
+                and clear_age > self._clear_seconds
+            ):
+                self._person_active = False
+                logger.info("Person detection cleared after %.2fs", clear_age)
+
+        if motion_detected:
+            self._last_motion_seen_at = now
+            self._motion_streak += 1
+            self._motion_clear_streak = 0
+            if not self._motion_active and self._motion_streak >= self._motion_trigger_frames:
+                self._motion_active = True
+                logger.info("Body movement detected on internal camera: %s", reason or "body_motion")
+        else:
+            self._motion_clear_streak += 1
+            self._motion_streak = 0
+            clear_age = now - self._last_motion_seen_at if self._last_motion_seen_at else 0.0
+            if (
+                self._motion_active
+                and self._motion_clear_streak >= self._motion_clear_frames
+                and clear_age > self._clear_seconds
+            ):
+                self._motion_active = False
+                logger.info("Motion detection cleared after %.2fs", clear_age)
+
+        relay_active = self._person_active or self._motion_active
+        if self.detection_state_manager is not None:
+            self.detection_state_manager.update_presence(
+                "internal",
+                person_detected=person_detected and self._person_active,
+                motion_detected=motion_detected and self._motion_active,
+                reason=reason,
+            )
+        elif relay_active:
             if not self._led_visible:
                 logger.info("Person/body movement confirmed; Relay 1 ON: %s", reason or "person")
-            self.led_controller.set_person_visible(True)
-            self._led_visible = True
-            return
-
-        self._clear_streak += 1
-        self._detection_streak = 0
-        if not self._led_visible:
+                self.led_controller.set_person_visible(True)
+        elif self._led_visible:
+            clear_age = now - self._last_person_seen_at if self._last_person_seen_at else 0.0
+            logger.info("No person/body movement detected for %.2fs; Relay 1 OFF", clear_age)
             self.led_controller.set_person_visible(False)
-            return
-        clear_age = now - self._last_person_seen_at if self._last_person_seen_at else 0.0
-        if self._clear_streak >= self._required_clear_frames and clear_age >= self._clear_seconds:
-            logger.info("No person detected for %.2fs; Relay 1 OFF", clear_age)
-            self._clear_person_state()
+        else:
+            self.led_controller.set_person_visible(False)
+
+        self._led_visible = relay_active
 
     def _log_fps(self):
         self._processed_frames += 1
