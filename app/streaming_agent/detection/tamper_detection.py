@@ -333,7 +333,7 @@ class TamperDetection:
                 logger.warning("Tamper detection candidate start on %s camera: %s", self.camera_role, reason)
             if (
                 not self._tamper_active
-                and self._tamper_streak >= self._required_tamper_frames
+                and (self._tamper_streak >= self._required_tamper_frames or self._is_immediate_tamper(reason))
                 and now - self._tamper_started_at >= self.tamper_confirm_seconds
             ):
                 self._tamper_active = True
@@ -369,6 +369,10 @@ class TamperDetection:
                 self.led_controller.set_tamper_active(self.camera_role, False)
             clear_age = now - self._last_tamper_seen_at
             logger.info("Tamper cleared on %s camera for %.2fs; Relay 4 OFF", self.camera_role, clear_age)
+
+    @staticmethod
+    def _is_immediate_tamper(reason):
+        return "covered/" in str(reason or "")
 
     def _log_fps(self):
         self._processed_frames += 1
