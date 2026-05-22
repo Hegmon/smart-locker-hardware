@@ -112,12 +112,7 @@ class PersonDetector:
         self._stale_clear_seconds = _env_float("PERSON_DETECTION_STALE_CLEAR_SECONDS", 0.35, minimum=0.05)
         self._min_box_area = _env_float("PERSON_DETECTION_MIN_BOX_AREA", 0.04, minimum=0.0, maximum=1.0)
         self._max_box_area = _env_float("PERSON_DETECTION_MAX_BOX_AREA", 0.95, minimum=0.01, maximum=1.0)
-        self._near_object_enabled = os.getenv("PERSON_NEAR_OBJECT_ENABLED", "true").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        self._near_object_enabled = _env_bool("PERSON_NEAR_OBJECT_ENABLED", False)
         self._near_change_threshold = _env_float("PERSON_NEAR_CHANGE_THRESHOLD", 0.22, minimum=0.01, maximum=1.0)
         self._near_brightness_delta = _env_float("PERSON_NEAR_BRIGHTNESS_DELTA", 6.0, minimum=0.0, maximum=255.0)
         self._near_edge_density_min = _env_float("PERSON_NEAR_EDGE_DENSITY_MIN", 0.004, minimum=0.0, maximum=1.0)
