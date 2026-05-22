@@ -209,11 +209,24 @@ class RelayController:
 
     def set_person_visible(self, visible):
         if visible:
-            self.trigger_alert("person", self.alert_duration, log_name="Person detected")
+            self._set_red_source("person", True)
+            self._set_buzzer_source("person", True)
+            logger.info("Person detected; red LED and buzzer active while detection is active")
+        else:
+            self._set_red_source("person", False)
+            self._set_buzzer_source("person", False)
+            logger.info("Person cleared; person relay source OFF")
 
     def set_tamper_active(self, camera_role, active):
+        source = f"tamper:{camera_role}"
         if active:
-            self.trigger_alert(f"tamper:{camera_role}", self.alert_duration, log_name="Tamper detected")
+            self._set_red_source(source, True)
+            self._set_buzzer_source(source, True)
+            logger.warning("Tamper detected on %s; red LED and buzzer active while tamper is active", camera_role)
+        else:
+            self._set_red_source(source, False)
+            self._set_buzzer_source(source, False)
+            logger.info("Tamper cleared on %s; tamper relay source OFF", camera_role)
 
     def trigger_tamper_alert(self, camera_role="camera"):
         self.trigger_alert(f"tamper:{camera_role}", self.alert_duration, log_name="Tamper detected")
