@@ -16,6 +16,10 @@ from app.streaming_agent.gpio.relay_controller import RelayController
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 logger = LoggingManager.get_logger(__name__)
 
+TAMPER_HOLD_SECONDS = 5.0
+TAMPER_TRIGGER_FRAMES = 5
+TAMPER_CLEAR_FRAMES = 15
+
 
 def _env_float(name, default, minimum=None, maximum=None):
     try:
@@ -64,11 +68,13 @@ class TamperDetection:
         edge_density_threshold=None,
         large_change_threshold=None,
         skip_when=None,
+        detection_state_manager=None,
     ):
         self.frame_buffer = frame_buffer
         self.camera_role = camera_role
         self._owns_led_controller = led_controller is None
         self.led_controller = led_controller or RelayController()
+        self.detection_state_manager = detection_state_manager
         self.process_every_n_frames = (
             _env_int("TAMPER_DETECTOR_EVERY_N_FRAMES", 1, minimum=1)
             if process_every_n_frames is None
@@ -80,7 +86,7 @@ class TamperDetection:
             else max(0.0, float(tamper_confirm_seconds))
         )
         self.tamper_clear_seconds = (
-            _env_float("TAMPER_CLEAR_SECONDS", 2.5, minimum=0.0)
+            _env_float("TAMPER_HOLD_SECONDS", _env_float("TAMPER_CLEAR_SECONDS", TAMPER_HOLD_SECONDS, minimum=0.0), minimum=0.0)
             if tamper_clear_seconds is None
             else max(0.0, float(tamper_clear_seconds))
         )
@@ -112,13 +118,11 @@ class TamperDetection:
         self.hard_change_threshold = _env_float("TAMPER_HARD_CHANGE_THRESHOLD", 0.82, minimum=0.0, maximum=1.0)
         self.change_brightness_delta = _env_float("TAMPER_CHANGE_BRIGHTNESS_DELTA", 28.0, minimum=0.0, maximum=255.0)
         self.cover_brightness_delta = _env_float("TAMPER_COVER_BRIGHTNESS_DELTA", 35.0, minimum=0.0, maximum=255.0)
-        self.scene_change_tamper_enabled = _env_bool("TAMPER_SCENE_CHANGE_ENABLED", False)
+        self.scene_change_tamper_enabled = _env_bool("TAMPER_SCENE_CHANGE_ENABLED", True)
         self._stale_clear_seconds = _env_float("TAMPER_STALE_CLEAR_SECONDS", 0.5, minimum=0.05)
         self._baseline_frame_target = _env_int("TAMPER_BASELINE_FRAMES", 5, minimum=1)
-        confirm_frame_default = 1 if tamper_confirm_seconds is not None else 2
-        clear_frame_default = 1
-        self._required_tamper_frames = _env_int("TAMPER_CONFIRM_FRAMES", confirm_frame_default, minimum=1)
-        self._required_clear_frames = _env_int("TAMPER_CLEAR_FRAMES", clear_frame_default, minimum=1)
+        self._required_tamper_frames = _env_int("TAMPER_TRIGGER_FRAMES", TAMPER_TRIGGER_FRAMES, minimum=1)
+        self._required_clear_frames = _env_int("TAMPER_CLEAR_FRAMES", TAMPER_CLEAR_FRAMES, minimum=1)
         self.skip_when = skip_when
 
         self._running = False
@@ -162,7 +166,10 @@ class TamperDetection:
         if self._thread:
             self._thread.join(timeout=2)
             self._thread = None
-        self.led_controller.set_tamper_active(self.camera_role, False)
+        if self.detection_state_manager is not None:
+            self.detection_state_manager.clear_tamper(self.camera_role)
+        else:
+            self.led_controller.set_tamper_active(self.camera_role, False)
         if self._owns_led_controller:
             self.led_controller.cleanup()
         logger.info("Tamper detector stopped for %s camera", self.camera_role)
@@ -205,11 +212,17 @@ class TamperDetection:
         self._clear_streak = 0
         if self._tamper_active:
             self._tamper_active = False
-            self.led_controller.set_tamper_active(self.camera_role, False)
+            if self.detection_state_manager is not None:
+                self.detection_state_manager.clear_tamper(self.camera_role)
+            else:
+                self.led_controller.set_tamper_active(self.camera_role, False)
             logger.info("Tamper paused for %s camera while %s", self.camera_role, reason)
 
     def _clear_stale_tamper_state(self):
         if not self._tamper_active:
+            return
+        if self.detection_state_manager is not None:
+            self.detection_state_manager.check_timeouts()
             return
         if time.monotonic() - self._last_tamper_seen_at < self._stale_clear_seconds:
             return
@@ -218,7 +231,7 @@ class TamperDetection:
         self._tamper_streak = 0
         self._clear_streak = 0
         self.led_controller.set_tamper_active(self.camera_role, False)
-        logger.info("No fresh tamper detection on %s camera; GPIO LEDs OFF", self.camera_role)
+        logger.info("No fresh tamper detection on %s camera; Relay 4 OFF", self.camera_role)
 
     def _detect_tamper(self, frame_bytes):
         frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
@@ -277,6 +290,16 @@ class TamperDetection:
             return True, f"covered/dark brightness={brightness:.1f} blur={blur_score:.1f} edges={edge_density:.4f}"
         if overexposed:
             return True, f"covered/bright brightness={brightness:.1f} blur={blur_score:.1f} edges={edge_density:.4f}"
+        severe_blur = (
+            blur_score <= self.blur_threshold
+            and edge_density <= self.edge_density_threshold
+            and brightness_delta >= self.change_brightness_delta * 0.5
+        )
+        if severe_blur:
+            return True, (
+                f"lens obstruction blur={blur_score:.1f} edges={edge_density:.4f} "
+                f"brightness_delta={brightness_delta:.1f}"
+            )
         scene_change_tamper = self.scene_change_tamper_enabled and (
             scene_change >= self.hard_change_threshold
             or (
@@ -314,8 +337,21 @@ class TamperDetection:
                 and now - self._tamper_started_at >= self.tamper_confirm_seconds
             ):
                 self._tamper_active = True
-                self.led_controller.set_tamper_active(self.camera_role, True)
+                if self.detection_state_manager is not None:
+                    self.detection_state_manager.update_tamper(
+                        self.camera_role,
+                        tamper_detected=True,
+                        reason=reason,
+                    )
+                else:
+                    self.led_controller.set_tamper_active(self.camera_role, True)
                 logger.warning("Tamper confirmed on %s camera; Relay 4 ON: %s", self.camera_role, reason)
+            elif self._tamper_active and self.detection_state_manager is not None:
+                self.detection_state_manager.update_tamper(
+                    self.camera_role,
+                    tamper_detected=True,
+                    reason=reason,
+                )
             return
 
         self._tamper_started_at = None
@@ -327,7 +363,10 @@ class TamperDetection:
             and now - self._last_tamper_seen_at >= self.tamper_clear_seconds
         ):
             self._tamper_active = False
-            self.led_controller.set_tamper_active(self.camera_role, False)
+            if self.detection_state_manager is not None:
+                self.detection_state_manager.update_tamper(self.camera_role, tamper_detected=False)
+            else:
+                self.led_controller.set_tamper_active(self.camera_role, False)
             clear_age = now - self._last_tamper_seen_at
             logger.info("Tamper cleared on %s camera for %.2fs; Relay 4 OFF", self.camera_role, clear_age)
 
