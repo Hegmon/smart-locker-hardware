@@ -13,11 +13,14 @@ STREAM_VIDEO_ENCODER = os.getenv("STREAM_VIDEO_ENCODER", "libx264").strip() or "
 STREAM_INPUT_FORMAT = os.getenv("STREAM_INPUT_FORMAT", "mjpeg").strip() or "mjpeg"
 STREAM_INPUT_SIZE = os.getenv("STREAM_INPUT_SIZE", "1280x720").strip() or "1280x720"
 STREAM_INPUT_FPS = max(1, int(os.getenv("STREAM_INPUT_FPS", "20")))
-STREAM_RTSP_TRANSPORT = os.getenv("STREAM_RTSP_TRANSPORT", "tcp").strip() or "tcp"
-STREAM_BITRATE = os.getenv("STREAM_VIDEO_BITRATE", "1200k").strip() or "1200k"
+STREAM_OUTPUT_WIDTH = max(160, int(os.getenv("STREAM_OUTPUT_WIDTH", "640")))
+STREAM_OUTPUT_HEIGHT = max(120, int(os.getenv("STREAM_OUTPUT_HEIGHT", "360")))
+STREAM_OUTPUT_FPS = max(1, int(os.getenv("STREAM_OUTPUT_FPS", "15")))
+STREAM_RTSP_TRANSPORT = os.getenv("STREAM_RTSP_TRANSPORT", "udp").strip() or "udp"
+STREAM_BITRATE = os.getenv("STREAM_VIDEO_BITRATE", "500k").strip() or "500k"
 STREAM_MAXRATE = os.getenv("STREAM_VIDEO_MAXRATE", STREAM_BITRATE).strip() or STREAM_BITRATE
-STREAM_BUFSIZE = os.getenv("STREAM_VIDEO_BUFSIZE", "600k").strip() or "600k"
-STREAM_GOP = max(1, int(os.getenv("STREAM_GOP", str(STREAM_INPUT_FPS))))
+STREAM_BUFSIZE = os.getenv("STREAM_VIDEO_BUFSIZE", "100k").strip() or "100k"
+STREAM_GOP = max(1, int(os.getenv("STREAM_GOP", str(STREAM_OUTPUT_FPS))))
 
 
 def build_rtsp_url(camera_role):
@@ -44,10 +47,13 @@ def build_ffmpeg_command(
             "-an",
             "-filter_complex",
             "[0:v]split=2[rtsp][detect];"
+            f"[rtsp]fps={STREAM_OUTPUT_FPS},"
+            f"scale={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,"
+            f"pad={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p[rtspout];"
             f"[detect]fps={QR_FRAME_FPS},"
             f"scale={frame_width}:{frame_height}:force_original_aspect_ratio=decrease,"
             f"pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2,format=bgr24[raw]",
-            "-map", "[rtsp]",
+            "-map", "[rtspout]",
             *encoder_args,
             *_rtsp_low_latency_args(),
             "-f", "rtsp",
@@ -64,6 +70,10 @@ def build_ffmpeg_command(
     *_input_low_latency_args(),
     "-i", video_device,
     "-an",
+    "-vf",
+    f"fps={STREAM_OUTPUT_FPS},"
+    f"scale={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,"
+    f"pad={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
     *encoder_args,
     *_rtsp_low_latency_args(),
     "-f", "rtsp",
@@ -103,6 +113,7 @@ def _rtsp_low_latency_args():
         "-muxpreload", "0",
         "-flush_packets", "1",
         "-max_delay", "0",
+        "-pkt_size", os.getenv("STREAM_RTP_PACKET_SIZE", "1316"),
     ]
 
 
@@ -120,7 +131,13 @@ def _encoder_args():
             "-c:v", "libx264",
             "-preset", os.getenv("STREAM_X264_PRESET", "ultrafast"),
             "-tune", "zerolatency",
-            "-x264-params", f"keyint={STREAM_GOP}:min-keyint={STREAM_GOP}:scenecut=0",
+            "-profile:v", os.getenv("STREAM_X264_PROFILE", "baseline"),
+            "-threads", os.getenv("STREAM_X264_THREADS", "1"),
+            "-x264-params",
+            (
+                f"keyint={STREAM_GOP}:min-keyint={STREAM_GOP}:scenecut=0:"
+                "rc-lookahead=0:sync-lookahead=0:sliced-threads=1"
+            ),
             *common,
         ]
     return ["-c:v", STREAM_VIDEO_ENCODER, *common]
