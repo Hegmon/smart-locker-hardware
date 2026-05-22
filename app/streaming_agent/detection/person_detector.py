@@ -29,6 +29,28 @@ PROJECT_DIR = DETECTION_DIR.parents[2]
 MODEL_INSTALLER = PROJECT_DIR / "app" / "scripts" / "install_detection_model.sh"
 
 
+def _env_float(name, default, minimum=None, maximum=None):
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = float(default)
+    if minimum is not None:
+        value = max(float(minimum), value)
+    if maximum is not None:
+        value = min(float(maximum), value)
+    return value
+
+
+def _env_int(name, default, minimum=None):
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    return value
+
+
 class PersonDetector:
     """Run lightweight person detection from the streaming agent's shared frame buffer."""
 
@@ -38,19 +60,28 @@ class PersonDetector:
         *,
         model_path=DEFAULT_MODEL_PATH,
         labels_path=DEFAULT_LABELS_PATH,
-        confidence_threshold=0.5,
-        process_every_n_frames=3,
+        confidence_threshold=None,
+        process_every_n_frames=None,
         led_off_delay_seconds=3.0,
         led_controller=None,
     ):
         self.frame_buffer = frame_buffer
         self.model_path = self._resolve_model_path(model_path)
         self.labels_path = Path(labels_path)
-        self.confidence_threshold = confidence_threshold
-        self.process_every_n_frames = max(1, int(process_every_n_frames))
+        self.confidence_threshold = (
+            _env_float("PERSON_DETECTION_CONFIDENCE", 0.4, minimum=0.05, maximum=0.95)
+            if confidence_threshold is None
+            else float(confidence_threshold)
+        )
+        self.process_every_n_frames = (
+            _env_int("PERSON_DETECTOR_EVERY_N_FRAMES", 2, minimum=1)
+            if process_every_n_frames is None
+            else max(1, int(process_every_n_frames))
+        )
         self.led_off_delay_seconds = led_off_delay_seconds
         self._owns_led_controller = led_controller is None
         self.led_controller = led_controller or RelayController()
+        self._top_detection_log_seconds = _env_float("PERSON_DETECTOR_LOG_TOP_SECONDS", 10.0, minimum=0.0)
 
         self._running = False
         self._thread = None
@@ -67,6 +98,7 @@ class PersonDetector:
         self._processed_frames = 0
         self._fps_window_started_at = time.monotonic()
         self._led_visible = False
+        self._last_top_detection_log_at = 0.0
 
     def start(self):
         if self._running:
@@ -182,6 +214,7 @@ class PersonDetector:
         self._interpreter.invoke()
 
         scores, classes = self._read_detection_outputs()
+        self._maybe_log_top_detection(scores, classes)
         for score, class_id in zip(scores, classes):
             if float(score) >= self.confidence_threshold and int(class_id) in self._person_class_ids:
                 return True
@@ -203,37 +236,82 @@ class PersonDetector:
     def _read_detection_outputs(self):
         outputs = [self._interpreter.get_tensor(detail["index"]) for detail in self._output_details]
         squeezed = [np.squeeze(output) for output in outputs]
+        output_names = [str(detail.get("name", "")).lower() for detail in self._output_details]
+
+        count = None
+        for output, name in zip(squeezed, output_names):
+            if "num" in name and output.size:
+                count = int(np.ravel(output)[0])
+                break
+
+        scores = None
+        classes = None
+        for output, name in zip(squeezed, output_names):
+            flattened = np.ravel(output)
+            if not flattened.size:
+                continue
+            if "score" in name:
+                scores = flattened
+            elif "class" in name:
+                classes = flattened
+
+        if scores is not None and classes is not None:
+            return self._normalize_detection_vectors(scores, classes, count)
 
         scores = next(
             (
-                output
+                np.ravel(output)
                 for output in squeezed
-                if output.ndim == 1
-                and output.shape[0] > 1
+                if np.ravel(output).shape[0] > 1
                 and np.issubdtype(output.dtype, np.floating)
-                and output.size
-                and float(np.nanmax(output)) <= 1.0
+                and np.ravel(output).size
+                and float(np.nanmax(np.ravel(output))) <= 1.0
             ),
             None,
         )
         classes = next(
             (
-                output
+                np.ravel(output)
                 for output in squeezed
-                if output.ndim == 1
-                and output.shape[0] > 1
+                if np.ravel(output).shape[0] > 1
                 and output is not scores
-                and output.size
-                and float(np.nanmax(output)) > 1.0
+                and np.ravel(output).size
+                and float(np.nanmax(np.ravel(output))) > 1.0
             ),
             None,
         )
 
         if scores is None or classes is None:
             # Typical SSD order is boxes, classes, scores, count.
-            classes = squeezed[1] if len(squeezed) > 1 else np.array([], dtype=np.float32)
-            scores = squeezed[2] if len(squeezed) > 2 else np.array([], dtype=np.float32)
-        return scores, classes
+            classes = np.ravel(squeezed[1]) if len(squeezed) > 1 else np.array([], dtype=np.float32)
+            scores = np.ravel(squeezed[2]) if len(squeezed) > 2 else np.array([], dtype=np.float32)
+            if count is None and len(squeezed) > 3 and np.ravel(squeezed[3]).size:
+                count = int(np.ravel(squeezed[3])[0])
+        return self._normalize_detection_vectors(scores, classes, count)
+
+    def _normalize_detection_vectors(self, scores, classes, count=None):
+        scores = np.ravel(scores).astype(np.float32, copy=False)
+        classes = np.ravel(classes).astype(np.float32, copy=False)
+        length = min(scores.size, classes.size)
+        if count is not None:
+            length = min(length, max(0, int(count)))
+        return scores[:length], classes[:length]
+
+    def _maybe_log_top_detection(self, scores, classes):
+        if self._top_detection_log_seconds <= 0 or scores.size == 0 or classes.size == 0:
+            return
+        now = time.monotonic()
+        if now - self._last_top_detection_log_at < self._top_detection_log_seconds:
+            return
+        self._last_top_detection_log_at = now
+        best_index = int(np.argmax(scores))
+        logger.info(
+            "Person detector top detection: class=%s score=%.2f threshold=%.2f person_class_ids=%s",
+            int(classes[best_index]),
+            float(scores[best_index]),
+            self.confidence_threshold,
+            sorted(self._person_class_ids),
+        )
 
     def _update_led_state(self, person_detected):
         now = time.monotonic()
