@@ -168,8 +168,7 @@ class TamperDetection:
             self._thread = None
         if self.detection_state_manager is not None:
             self.detection_state_manager.clear_tamper(self.camera_role)
-        else:
-            self.led_controller.set_tamper_active(self.camera_role, False)
+        # detectors do not directly control relays
         if self._owns_led_controller:
             self.led_controller.cleanup()
         logger.info("Tamper detector stopped for %s camera", self.camera_role)
@@ -214,8 +213,7 @@ class TamperDetection:
             self._tamper_active = False
             if self.detection_state_manager is not None:
                 self.detection_state_manager.clear_tamper(self.camera_role)
-            else:
-                self.led_controller.set_tamper_active(self.camera_role, False)
+            # detectors do not directly control relays
             logger.info("Tamper paused for %s camera while %s", self.camera_role, reason)
 
     def _clear_stale_tamper_state(self):
@@ -230,7 +228,7 @@ class TamperDetection:
         self._tamper_started_at = None
         self._tamper_streak = 0
         self._clear_streak = 0
-        self.led_controller.set_tamper_active(self.camera_role, False)
+        # detectors do not directly control relays (state manager owns relay state)
         logger.info("No fresh tamper detection on %s camera; Relay 4 OFF", self.camera_role)
 
     def _detect_tamper(self, frame_bytes):
@@ -343,8 +341,7 @@ class TamperDetection:
                         tamper_detected=True,
                         reason=reason,
                     )
-                else:
-                    self.led_controller.set_tamper_active(self.camera_role, True)
+                # no direct relay control when no state manager (centralized authority)
                 logger.warning("Tamper confirmed on %s camera; Relay 4 ON: %s", self.camera_role, reason)
             elif self._tamper_active and self.detection_state_manager is not None:
                 self.detection_state_manager.update_tamper(
@@ -365,8 +362,7 @@ class TamperDetection:
             self._tamper_active = False
             if self.detection_state_manager is not None:
                 self.detection_state_manager.update_tamper(self.camera_role, tamper_detected=False)
-            else:
-                self.led_controller.set_tamper_active(self.camera_role, False)
+            # no direct relay control when no state manager (centralized authority)
             clear_age = now - self._last_tamper_seen_at
             logger.info("Tamper cleared on %s camera for %.2fs; Relay 4 OFF", self.camera_role, clear_age)
 
