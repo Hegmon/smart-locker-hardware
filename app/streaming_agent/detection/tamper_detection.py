@@ -111,8 +111,10 @@ class TamperDetection:
         )
         self.hard_change_threshold = _env_float("TAMPER_HARD_CHANGE_THRESHOLD", 0.82, minimum=0.0, maximum=1.0)
         self.change_brightness_delta = _env_float("TAMPER_CHANGE_BRIGHTNESS_DELTA", 28.0, minimum=0.0, maximum=255.0)
+        self.cover_brightness_delta = _env_float("TAMPER_COVER_BRIGHTNESS_DELTA", 35.0, minimum=0.0, maximum=255.0)
         self.scene_change_tamper_enabled = _env_bool("TAMPER_SCENE_CHANGE_ENABLED", False)
         self._stale_clear_seconds = _env_float("TAMPER_STALE_CLEAR_SECONDS", 0.5, minimum=0.05)
+        self._baseline_frame_target = _env_int("TAMPER_BASELINE_FRAMES", 5, minimum=1)
         confirm_frame_default = 1 if tamper_confirm_seconds is not None else 2
         clear_frame_default = 1
         self._required_tamper_frames = _env_int("TAMPER_CONFIRM_FRAMES", confirm_frame_default, minimum=1)
@@ -124,6 +126,7 @@ class TamperDetection:
         self._last_sequence = -1
         self._baseline_gray = None
         self._baseline_brightness = None
+        self._baseline_frames_seen = 0
         self._tamper_started_at = None
         self._last_tamper_seen_at = time.monotonic()
         self._tamper_active = False
@@ -232,10 +235,15 @@ class TamperDetection:
         edge_density = float(np.count_nonzero(edges)) / float(edges.size)
 
         texture_missing = blur_score <= self.blur_threshold or edge_density <= self.edge_density_threshold
-        dark_or_covered = brightness <= self.dark_brightness_threshold and texture_missing
-        overexposed = brightness >= self.bright_brightness_threshold and texture_missing
+        raw_dark = brightness <= self.dark_brightness_threshold and texture_missing
+        raw_bright = brightness >= self.bright_brightness_threshold and texture_missing
 
-        if self._baseline_gray is None and not dark_or_covered and not overexposed:
+        if self._baseline_frames_seen < self._baseline_frame_target:
+            self._learn_baseline(small, brightness)
+            self._baseline_frames_seen += 1
+            return False, ""
+
+        if self._baseline_gray is None:
             self._baseline_gray = small.astype(np.float32)
             self._baseline_brightness = brightness
             return False, ""
@@ -246,7 +254,7 @@ class TamperDetection:
             delta = cv2.absdiff(small, cv2.convertScaleAbs(self._baseline_gray))
             scene_change = float(np.mean(delta > 45))
             brightness_delta = abs(brightness - float(self._baseline_brightness or brightness))
-            if not dark_or_covered and not overexposed and not texture_missing:
+            if not raw_dark and not raw_bright and not texture_missing:
                 cv2.accumulateWeighted(small.astype(np.float32), self._baseline_gray, 0.02)
                 self._baseline_brightness = (
                     0.98 * float(self._baseline_brightness or brightness)
@@ -254,6 +262,16 @@ class TamperDetection:
                 )
 
         self._maybe_log_metrics(brightness, blur_score, edge_density, scene_change, brightness_delta)
+
+        baseline_brightness = float(self._baseline_brightness or brightness)
+        baseline_is_dark = baseline_brightness <= self.dark_brightness_threshold
+        baseline_is_bright = baseline_brightness >= self.bright_brightness_threshold
+        dark_or_covered = raw_dark and (
+            not baseline_is_dark or baseline_brightness - brightness >= self.cover_brightness_delta
+        )
+        overexposed = raw_bright and (
+            not baseline_is_bright or brightness - baseline_brightness >= self.cover_brightness_delta
+        )
 
         if dark_or_covered:
             return True, f"covered/dark brightness={brightness:.1f} blur={blur_score:.1f} edges={edge_density:.4f}"
@@ -272,6 +290,14 @@ class TamperDetection:
                 f"blur={blur_score:.1f} edges={edge_density:.4f}"
             )
         return False, ""
+
+    def _learn_baseline(self, small, brightness):
+        if self._baseline_gray is None:
+            self._baseline_gray = small.astype(np.float32)
+            self._baseline_brightness = brightness
+            return
+        cv2.accumulateWeighted(small.astype(np.float32), self._baseline_gray, 0.25)
+        self._baseline_brightness = 0.75 * float(self._baseline_brightness or brightness) + 0.25 * brightness
 
     def _update_tamper_state(self, tampered, reason):
         now = time.monotonic()
