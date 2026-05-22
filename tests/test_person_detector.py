@@ -35,6 +35,11 @@ class PersonDetectorStateTests(unittest.TestCase):
 
         self.assertEqual(led.visible_calls, [False])
 
+    def test_near_object_detection_is_disabled_by_default(self) -> None:
+        detector = PersonDetector(None, led_controller=_Led())
+
+        self.assertFalse(detector._near_object_enabled)
+
 
 class _Led:
     def __init__(self):
