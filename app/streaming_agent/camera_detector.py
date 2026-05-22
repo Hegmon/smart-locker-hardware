@@ -1,5 +1,7 @@
+from pathlib import Path
 import re
 import subprocess
+import time
 
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 
@@ -7,7 +9,20 @@ from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 logger = LoggingManager.get_logger(__name__)
 
 
-def detect_usb_cameras():
+def detect_usb_cameras(retries=1, retry_delay=1.0):
+    for attempt in range(1, max(1, int(retries)) + 1):
+        cameras = _detect_usb_cameras_once()
+        cameras = [camera for camera in cameras if Path(camera["video_device"]).exists()]
+        if cameras:
+            return cameras
+        if attempt < retries:
+            logger.warning("No live USB camera video devices found; retrying in %.1fs", retry_delay)
+            time.sleep(max(0.1, float(retry_delay)))
+    logger.warning("No live USB camera video devices found after %s attempt(s)", retries)
+    return []
+
+
+def _detect_usb_cameras_once():
     try:
         result = subprocess.run(
             ["v4l2-ctl", "--list-devices"],
@@ -53,7 +68,12 @@ def detect_usb_cameras():
         if not video_devices:
             continue
 
-        main_video = video_devices[0]
+        existing_video_devices = [device for device in video_devices if Path(device).exists()]
+        if not existing_video_devices:
+            logger.warning("Skipping camera %s because none of its video nodes exist: %s", camera_name, video_devices)
+            continue
+
+        main_video = existing_video_devices[0]
         usb_match = re.search(r"\(usb-[^)]+\)", header)
         usb_path = usb_match.group(0)[1:-1] if usb_match else "unknown"
 
