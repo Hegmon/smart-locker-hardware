@@ -24,6 +24,7 @@ RELAY_INPUTS = {
 
 QR_SUCCESS_UNLOCK_TIME = 5
 ALERT_DURATION = 15
+DETECTION_SOURCE_TTL_SECONDS = 2.5
 
 
 def _env_bool(name, default):
@@ -87,6 +88,8 @@ class RelayController:
         self._buzzer_sources = set()
         self._alert_until = {}
         self._alert_threads = set()
+        self._detection_source_until = {}
+        self._detection_expiry_thread = None
         self._qr_success_running = False
         self._red_on = False
         self._buzzer_on = False
@@ -137,6 +140,7 @@ class RelayController:
             self._enabled = True
             self._red_sources.clear()
             self._buzzer_sources.clear()
+            self._detection_source_until.clear()
             self._red_on = False
             self._buzzer_on = False
             self._green_on = False
@@ -208,24 +212,21 @@ class RelayController:
                 logger.info("Locker locked/default state confirmed")
 
     def set_person_visible(self, visible):
+        source = "person"
         if visible:
-            self._set_red_source("person", True)
-            self._set_buzzer_source("person", True)
+            self._set_detection_source(source, True)
             logger.info("Person detected; red LED and buzzer active while detection is active")
         else:
-            self._set_red_source("person", False)
-            self._set_buzzer_source("person", False)
+            self._set_detection_source(source, False)
             logger.info("Person cleared; person relay source OFF")
 
     def set_tamper_active(self, camera_role, active):
         source = f"tamper:{camera_role}"
         if active:
-            self._set_red_source(source, True)
-            self._set_buzzer_source(source, True)
+            self._set_detection_source(source, True)
             logger.warning("Tamper detected on %s; red LED and buzzer active while tamper is active", camera_role)
         else:
-            self._set_red_source(source, False)
-            self._set_buzzer_source(source, False)
+            self._set_detection_source(source, False)
             logger.info("Tamper cleared on %s; tamper relay source OFF", camera_role)
 
     def trigger_tamper_alert(self, camera_role="camera"):
@@ -281,6 +282,7 @@ class RelayController:
             self._buzzer_sources.clear()
             self._alert_until.clear()
             self._alert_threads.clear()
+            self._detection_source_until.clear()
             self._qr_success_running = False
             try:
                 self.lock_locker()
@@ -329,6 +331,57 @@ class RelayController:
                 self._set_red_source(source, False)
                 self._set_buzzer_source(source, False)
             logger.info("Relay alert cleared for source=%s", source)
+
+    def _set_detection_source(self, source, active):
+        source = str(source or "detection")
+        ttl = _env_float("DETECTION_RELAY_SOURCE_TTL_SECONDS", DETECTION_SOURCE_TTL_SECONDS, minimum=0.5)
+        with self._lock:
+            if active:
+                self._detection_source_until[source] = time.monotonic() + ttl
+                self._red_sources.add(source)
+                self._buzzer_sources.add(source)
+                self._apply_red_locked()
+                self._apply_buzzer_locked()
+                self._ensure_detection_expiry_thread_locked()
+                return
+
+            self._detection_source_until.pop(source, None)
+            self._red_sources.discard(source)
+            self._buzzer_sources.discard(source)
+            self._apply_red_locked()
+            self._apply_buzzer_locked()
+
+    def _ensure_detection_expiry_thread_locked(self):
+        if self._detection_expiry_thread and self._detection_expiry_thread.is_alive():
+            return
+        self._detection_expiry_thread = threading.Thread(
+            target=self._detection_expiry_worker,
+            daemon=True,
+            name="relay-detection-expiry",
+        )
+        self._detection_expiry_thread.start()
+
+    def _detection_expiry_worker(self):
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                expired = [
+                    source
+                    for source, until in self._detection_source_until.items()
+                    if until <= now
+                ]
+                for source in expired:
+                    self._detection_source_until.pop(source, None)
+                    self._red_sources.discard(source)
+                    self._buzzer_sources.discard(source)
+                    logger.warning("Detection relay source expired without refresh: %s", source)
+                if expired:
+                    self._apply_red_locked()
+                    self._apply_buzzer_locked()
+                if not self._detection_source_until:
+                    return
+                sleep_for = max(0.05, min(self._detection_source_until.values()) - now)
+            time.sleep(min(sleep_for, 0.25))
 
     def _set_red_source(self, source, active):
         with self._lock:
