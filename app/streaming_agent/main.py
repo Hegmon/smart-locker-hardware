@@ -14,6 +14,7 @@ from app.streaming_agent.detection import qr_scanner as qr_scanner_module
 from app.streaming_agent.detection.person_detector import PersonDetector
 from app.streaming_agent.detection.qr_scanner import BackendQRValidator, QrScanner, summarize_qr_value
 from app.streaming_agent.detection.scanner_config import QRScannerConfig
+from app.streaming_agent.detection.state_manager import DetectionStateManager
 from app.streaming_agent.detection.tamper_detection import TamperDetection
 from app.streaming_agent.gpio.relay_controller import RelayController
 from app.streaming_agent.health_monitor import HealthMonitor
@@ -25,7 +26,7 @@ from app.streaming_agent.streaming_manager import StreamingManager
 
 logger = LoggingManager.get_logger(__name__)
 
-DETECTION_LED_HOLD_SECONDS = float(os.getenv("DETECTION_LED_HOLD_SECONDS", "2.5"))
+DETECTION_LED_HOLD_SECONDS = float(os.getenv("DETECTION_HOLD_SECONDS", os.getenv("DETECTION_LED_HOLD_SECONDS", "5")))
 
 
 class StreamingAgent:
@@ -39,6 +40,7 @@ class StreamingAgent:
         self.qr_scanner_config = QRScannerConfig.from_env()
         self.tamper_detectors = []
         self.relay_controller = RelayController()
+        self.detection_state_manager = DetectionStateManager(self.relay_controller)
         self.keyboard_thread = None
         self.running = False
         self._stopping = False
@@ -54,6 +56,7 @@ class StreamingAgent:
         self.person_detector = PersonDetector(
             self.stream_manager.get_frame_buffer("internal"),
             led_controller=self.relay_controller,
+            detection_state_manager=self.detection_state_manager,
             led_off_delay_seconds=DETECTION_LED_HOLD_SECONDS,
         )
         self.qr_scanner = QrScanner(
@@ -67,9 +70,6 @@ class StreamingAgent:
         )
         self.tamper_detectors = []
         for role, frame_buffer in self.stream_manager.frame_buffers.items():
-            if role != "external":
-                logger.info("Skipping tamper detector for %s camera; tamper relay is external-camera only", role)
-                continue
             if role == "external" and os.getenv("EXTERNAL_TAMPER_DETECTION_ENABLED", "true").strip().lower() not in {
                 "1",
                 "true",
@@ -84,6 +84,7 @@ class StreamingAgent:
                     frame_buffer,
                     camera_role=role,
                     led_controller=self.relay_controller,
+                    detection_state_manager=self.detection_state_manager,
                     skip_when=skip_when,
                 )
             )
