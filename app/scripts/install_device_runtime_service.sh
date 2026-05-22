@@ -22,6 +22,10 @@ sed "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$GLOBAL_SERVICE_SRC" > "$GLOBAL_SERVICE_
 echo "Installing qbox-device.service for project: $PROJECT_DIR"
 echo "Removing stale qbox-device.service drop-in overrides so every device uses the repo service template"
 sudo rm -rf /etc/systemd/system/qbox-device.service.d
+
+echo "Clearing Python bytecode caches so the runtime uses the current source files"
+find "$PROJECT_DIR/app" -type d -name __pycache__ -prune -exec rm -rf {} +
+
 sudo cp "$GLOBAL_SERVICE_TMP" /etc/systemd/system/qbox-device.service
 
 echo "Disabling old split agent services so the device keeps one MQTT connection"
