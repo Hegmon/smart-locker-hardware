@@ -316,8 +316,6 @@ class SecurityRelayManager:
         mapping = {
             ("internal", DetectionType.PERSON_DETECTED.value): "internal_person",
             ("internal", DetectionType.PERSON_CLEARED.value): "internal_person",
-            ("internal", DetectionType.MOTION_DETECTED.value): "internal_motion",
-            ("internal", DetectionType.MOTION_CLEARED.value): "internal_motion",
             ("internal", DetectionType.TAMPER_DETECTED.value): "internal_tamper",
             ("internal", DetectionType.TAMPER_CLEARED.value): "internal_tamper",
             ("external", DetectionType.TAMPER_DETECTED.value): "external_tamper",
