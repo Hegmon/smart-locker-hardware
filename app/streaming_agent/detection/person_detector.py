@@ -154,6 +154,11 @@ class PersonDetector:
             max(0.5, self._clear_seconds + 0.5),
             minimum=0.05,
         )
+        self._presence_timeout_seconds = _env_float(
+            "INTERNAL_PERSON_TIMEOUT_SECONDS",
+            5.0,
+            minimum=0.0,
+        )
         self._min_box_area = _env_float("PERSON_DETECTION_MIN_BOX_AREA", 0.04, minimum=0.0, maximum=1.0)
         self._max_box_area = _env_float("PERSON_DETECTION_MAX_BOX_AREA", 0.95, minimum=0.01, maximum=1.0)
         self._near_object_enabled = _env_bool("PERSON_NEAR_OBJECT_ENABLED", False)
@@ -189,12 +194,15 @@ class PersonDetector:
         self._last_face_seen_at = 0.0
         self._last_hand_seen_at = 0.0
         self._last_body_seen_at = 0.0
+        self._last_person_detected_time = 0.0
         self._last_sequence = -1
         self._processed_frames = 0
         self._fps_window_started_at = time.monotonic()
         self._led_visible = False
         self._last_top_detection_log_at = 0.0
         self._last_ignored_hand_log_at = 0.0
+        self._last_presence_seen_log_at = 0.0
+        self._last_presence_countdown_log_at = 0.0
         self._detection_streak = 0
         self._clear_streak = 0
         self._face_streak = 0
@@ -368,16 +376,26 @@ class PersonDetector:
     def _clear_stale_led_state(self):
         if not self._led_visible:
             return
-        last_seen_at = max(
+        now = time.monotonic()
+        last_seen_at = self._last_person_detected_time or max(
             self._last_person_seen_at,
             self._last_face_seen_at,
             self._last_hand_seen_at,
             self._last_body_seen_at,
         )
-        if not last_seen_at or time.monotonic() - last_seen_at < self._stale_clear_seconds:
+        if not last_seen_at:
             return
-        logger.info("Internal presence state went stale; clearing detector state")
+        absence_age = now - last_seen_at
+        if absence_age < self._presence_timeout_seconds:
+            self._log_presence_countdown(absence_age)
+            return
+        logger.info(
+            "No person detected for %.1fs, clearing internal_person source due to stale frames",
+            absence_age,
+        )
         self._clear_person_state()
+        if self.detection_state_manager is not None:
+            self.detection_state_manager.check_timeouts()
 
     def _detect_presence(self, frame_bytes, sequence):
         frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
@@ -642,6 +660,7 @@ class PersonDetector:
         self._last_face_seen_at = 0.0
         self._last_hand_seen_at = 0.0
         self._last_body_seen_at = 0.0
+        self._last_person_detected_time = 0.0
         self._reset_presence_baselines()
 
     def _prepare_input(self, rgb_frame):
@@ -794,6 +813,10 @@ class PersonDetector:
             body_detected = False
         if person_detected is None:
             person_detected = bool(detected)
+        raw_human_detected = bool(face_detected or hand_detected or body_detected or person_detected)
+        if raw_human_detected:
+            self._last_person_detected_time = now
+            self._log_person_seen(now, reason)
 
         # face debouncing (prevents flicker from Haar false positives)
         if face_detected:
@@ -874,11 +897,31 @@ class PersonDetector:
                 logger.info("Person detection cleared after %.2fs without person signal", clear_age)
 
         body_part_active = self._person_active or self._face_active or self._hand_active or self._body_active
+        absence_age = now - self._last_person_detected_time if self._last_person_detected_time else 0.0
+        hold_active = (
+            self._led_visible
+            and self._last_person_detected_time > 0
+            and absence_age < self._presence_timeout_seconds
+        )
+        if not raw_human_detected and hold_active:
+            self._log_presence_countdown(absence_age)
+        elif not raw_human_detected and self._led_visible and self._last_person_detected_time:
+            logger.info(
+                "No person detected for %.1fs, clearing internal_person source",
+                absence_age,
+            )
+            self._expire_internal_presence_state()
+            body_part_active = False
+            logger.info("Relay 1 and relay 4 OFF due to detection timeout")
+
         previous_relay_active = self._led_visible
-        relay_active = body_part_active
+        relay_active = body_part_active or hold_active
         effective_person_active = body_part_active
+        if relay_active and not body_part_active:
+            effective_person_active = True
+            reason = "presence_hold"
         if relay_active and not previous_relay_active:
-            logger.info("Human detected on internal camera; requesting Relay 1 + Relay 4 ON")
+            logger.info("Relay 1 and relay 4 ON reason=internal_person_detected")
         elif previous_relay_active and not relay_active:
             logger.info("Human lost timeout on internal camera; requesting Relay 1 + Relay 4 OFF")
         if self.detection_state_manager is not None:
@@ -895,6 +938,43 @@ class PersonDetector:
         # detectors never directly drive security relays; DetectionStateManager is authoritative
 
         self._led_visible = relay_active
+
+    def _expire_internal_presence_state(self):
+        self._person_active = False
+        self._face_active = False
+        self._hand_active = False
+        self._body_active = False
+        self._detection_streak = 0
+        self._clear_streak = 0
+        self._face_streak = 0
+        self._face_clear_streak = 0
+        self._hand_streak = 0
+        self._hand_clear_streak = 0
+        self._body_streak = 0
+        self._body_clear_streak = 0
+
+    def _log_person_seen(self, now, reason):
+        if now - self._last_presence_seen_log_at < 1.0:
+            return
+        self._last_presence_seen_log_at = now
+        logger.info(
+            "Person detected timestamp=%.2f last_seen=%.2f reason=%s",
+            now,
+            self._last_person_detected_time,
+            reason or "human_presence",
+        )
+
+    def _log_presence_countdown(self, absence_age):
+        now = time.monotonic()
+        if now - self._last_presence_countdown_log_at < 1.0:
+            return
+        self._last_presence_countdown_log_at = now
+        remaining = max(0.0, self._presence_timeout_seconds - absence_age)
+        logger.info(
+            "Person last seen %.1fs ago, relay hold active timeout_remaining=%.1fs",
+            absence_age,
+            remaining,
+        )
 
     def _log_fps(self):
         self._processed_frames += 1
