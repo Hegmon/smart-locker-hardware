@@ -15,6 +15,7 @@ except Exception:
     cv2 = None
     np = None
 
+from app.streaming_agent.config.runtime import StreamingAgentRuntimeConfig
 from app.streaming_agent.gpio.relay_controller import RelayController
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 
@@ -101,12 +102,14 @@ class PersonDetector:
         led_off_delay_seconds=DETECTION_HOLD_SECONDS,
         led_controller=None,
         detection_state_manager=None,
+        runtime_config: StreamingAgentRuntimeConfig | None = None,
     ):
+        self.runtime_config = runtime_config or StreamingAgentRuntimeConfig.from_env()
         self.frame_buffer = frame_buffer
         self.model_path = self._resolve_model_path(model_path)
         self.labels_path = Path(labels_path)
         self.confidence_threshold = (
-            _env_float("PERSON_CONFIDENCE_THRESHOLD", 0.45, minimum=0.05, maximum=0.95)
+            self.runtime_config.person.confidence_threshold
             if confidence_threshold is None
             else float(confidence_threshold)
         )
@@ -147,12 +150,12 @@ class PersonDetector:
         self._baseline_learning_rate = _env_float("PERSON_BASELINE_LEARNING_RATE", 0.01, minimum=0.0, maximum=1.0)
         self._near_baseline_gray = None
         self._near_baseline_brightness = None
-        self._motion_enabled = _env_bool("PERSON_MOTION_ENABLED", True)
-        self._motion_threshold = _env_float("PERSON_MOTION_THRESHOLD", 0.015, minimum=0.001, maximum=1.0)
+        self._motion_enabled = self.runtime_config.person.motion_enabled
+        self._motion_threshold = self.runtime_config.person.motion_threshold
         legacy_motion_area = _env_float("PERSON_MOTION_MIN_CONTOUR_AREA", 0.02, minimum=0.0001, maximum=1.0)
         self._motion_min_contour_area = _env_float(
             "MOTION_MINIMUM_AREA",
-            legacy_motion_area,
+            self.runtime_config.person.motion_minimum_area or legacy_motion_area,
             minimum=0.0001,
             maximum=1.0,
         )
@@ -861,17 +864,16 @@ class PersonDetector:
 
         relay_active = self._face_active or self._hand_active or self._person_active or self._motion_active
         if self.detection_state_manager is not None:
-            if detected:
-                self.detection_state_manager.update_presence(
-                    "internal",
-                    face_detected=self._face_active,
-                    hand_detected=self._hand_active,
-                    person_detected=person_detected and self._person_active,
-                    motion_detected=motion_detected and self._motion_active,
-                    human_score=human_score,
-                    reason=reason,
-                )
-            else:
+            self.detection_state_manager.update_presence(
+                "internal",
+                face_detected=self._face_active,
+                hand_detected=self._hand_active,
+                person_detected=self._person_active,
+                motion_detected=self._motion_active,
+                human_score=human_score,
+                reason=reason,
+            )
+            if not relay_active:
                 self.detection_state_manager.check_timeouts()
         # detectors never directly drive security relays; DetectionStateManager is authoritative
 
