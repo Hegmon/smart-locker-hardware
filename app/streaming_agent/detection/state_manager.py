@@ -58,6 +58,10 @@ class DetectionStateManager:
         }
         self._lock = threading.RLock()
         self._last_debug_log_at = 0.0
+        self._event_refresh_seconds = max(
+            0.1,
+            float(getattr(self.runtime_config.event, "cooldown_seconds", 0.25) or 0.25),
+        )
 
     @staticmethod
     def _new_camera_state():
@@ -136,10 +140,20 @@ class DetectionStateManager:
         if previous == active:
             if active:
                 state[time_key] = now
+                self._publish_refresh_if_due_locked(
+                    state,
+                    camera_role,
+                    signal,
+                    now,
+                    reason,
+                    human_score=human_score,
+                    publish_security_event=publish_security_event,
+                )
             return
 
         state[state_key] = active
         state[time_key] = now if active else 0.0
+        state[f"last_{signal}_publish_time"] = now if active else 0.0
         self._log_signal_change(camera_role, signal, active, reason)
         if not publish_security_event:
             logger.info(
@@ -156,6 +170,37 @@ class DetectionStateManager:
         if signal == "tamper":
             confidence = 1.0
         self._publish_detection(camera_role, detection_type, confidence, now, reason)
+
+    def _publish_refresh_if_due_locked(
+        self,
+        state,
+        camera_role,
+        signal,
+        now,
+        reason,
+        *,
+        human_score=0.0,
+        publish_security_event=True,
+    ):
+        if not publish_security_event:
+            return
+        detection_type = self._transition_event_type(signal, True)
+        if detection_type is None:
+            return
+        last_publish_key = f"last_{signal}_publish_time"
+        last_publish_at = float(state.get(last_publish_key) or 0.0)
+        if last_publish_at and now - last_publish_at < self._event_refresh_seconds:
+            return
+        state[last_publish_key] = now
+        confidence = 1.0 if signal == "tamper" else float(human_score or 0.0)
+        logger.info(
+            "Detection refresh event=%s camera=%s last_seen=%.2f reason=%s",
+            detection_type,
+            camera_role,
+            now,
+            reason or signal,
+        )
+        self._publish_detection(camera_role, detection_type, confidence, now, reason or f"{signal}_refresh")
 
     def _publish_detection(self, camera_role, detection_type, confidence, timestamp, reason):
         event = DetectionEvent(
