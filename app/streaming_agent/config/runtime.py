@@ -83,7 +83,12 @@ class PersonDetectionConfig:
     @classmethod
     def from_env(cls) -> "PersonDetectionConfig":
         return cls(
-            confidence_threshold=_env_float("PERSON_CONFIDENCE_THRESHOLD", 0.6, minimum=0.05, maximum=0.95),
+            confidence_threshold=_env_float(
+                "PERSON_CONFIDENCE_THRESHOLD",
+                _env_float("PERSON_DETECTION_CONFIDENCE", 0.6, minimum=0.05, maximum=0.95),
+                minimum=0.05,
+                maximum=0.95,
+            ),
             motion_enabled=_env_bool("PERSON_MOTION_ENABLED", False),
             motion_security_trigger_enabled=_env_bool("MOTION_SECURITY_TRIGGER_ENABLED", False),
             motion_threshold=_env_float("PERSON_MOTION_THRESHOLD", 0.03, minimum=0.001, maximum=1.0),
