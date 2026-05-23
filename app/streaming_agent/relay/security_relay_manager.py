@@ -176,6 +176,7 @@ class SecurityRelayManager:
                         return
                     now = time.monotonic()
                     self._log_periodic_state_locked(now)
+                    self._expire_stale_sources_locked(now)
                     self._run_failsafe_locked(now)
 
                     if self.state.lifecycle_state is RelayLifecycleState.ACTIVE:
@@ -219,6 +220,33 @@ class SecurityRelayManager:
         self.state.off_deadline_ts = 0.0
         self._transition_state_locked(RelayLifecycleState.IDLE, reason="failsafe")
         self._execute_relay_write_locked(False, reason="failsafe_force_off", force=True)
+
+    def _expire_stale_sources_locked(self, now: float) -> None:
+        ttl = float(getattr(self.config, "active_source_ttl_seconds", 0.0) or 0.0)
+        if ttl <= 0 or not self.state.active_detection_sources:
+            return
+        stale_sources = [
+            source
+            for source in list(self.state.active_detection_sources)
+            if now - self.state.last_event_by_source.get(source, self.state.last_detection_ts or now) >= ttl
+        ]
+        if not stale_sources:
+            return
+        for source in stale_sources:
+            self.state.active_detection_sources.discard(source)
+            self.state.last_event_by_source.pop(source, None)
+            logger.warning("DETECTION SOURCE EXPIRED: source=%s ttl=%.1fs", source, ttl)
+        if self.state.active_detection_sources:
+            self._transition_state_locked(RelayLifecycleState.ACTIVE, reason="stale_source_expired_remaining_active")
+            return
+        self.state.off_deadline_ts = now + self.config.timeout_seconds
+        if self.state.relay_active:
+            self._transition_state_locked(RelayLifecycleState.WAITING_OFF, reason="stale_source_expired")
+            logger.info("Relay 1 and relay 4 OFF due to detection source timeout")
+        else:
+            self.state.off_deadline_ts = 0.0
+            self._transition_state_locked(RelayLifecycleState.IDLE, reason="stale_source_expired_relays_already_off")
+        self._condition.notify_all()
 
     def _transition_state_locked(self, new_state: RelayLifecycleState, *, reason: str) -> None:
         old_state = self.state.lifecycle_state
