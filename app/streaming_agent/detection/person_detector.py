@@ -860,8 +860,11 @@ class PersonDetector:
                 self._motion_suppressed_until = now + self._motion_retrigger_cooldown_seconds
                 logger.info("Motion detection cleared after %.2fs", clear_age)
 
-        # Only person and motion are valid security triggers for the internal camera.
-        relay_active = self._person_active or self._motion_active
+        # Person/tamper are authoritative security triggers. Motion is tracked for
+        # diagnostics and can be enabled as a relay trigger with explicit config.
+        relay_active = self._person_active or (
+            self.runtime_config.person.motion_security_trigger_enabled and self._motion_active
+        )
         if self.detection_state_manager is not None:
             self.detection_state_manager.update_presence(
                 "internal",
