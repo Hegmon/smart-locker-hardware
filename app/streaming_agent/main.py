@@ -276,16 +276,18 @@ class StreamingAgent:
                 return
 
 
-agent = StreamingAgent()
+agent = None
 
 
 def signal_handler(sig, frame):
     logger.info("Signal received: %s", sig)
-    agent.stop()
+    if agent is not None:
+        agent.stop()
     sys.exit(0)
 
 
 if __name__ == "__main__":
+    agent = StreamingAgent()
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     try:
