@@ -160,10 +160,15 @@ class PersonDetector:
         self._motion_baseline_gray = None
         self._motion_subtractor = cv2.createBackgroundSubtractorMOG2(history=80, varThreshold=20, detectShadows=False) if cv2 is not None else None
         self._last_motion_roi = None
+        self._motion_settle_seconds = _env_float("PERSON_MOTION_SETTLE_SECONDS", 3.0, minimum=0.0)
+        self._motion_scene_shift_fraction = _env_float("PERSON_MOTION_SCENE_SHIFT_FRACTION", 0.75, minimum=0.05, maximum=1.0)
+        self._motion_scene_shift_area = _env_float("PERSON_MOTION_SCENE_SHIFT_AREA", 0.75, minimum=0.05, maximum=1.0)
+        self._last_motion_scene_shift_log_at = 0.0
         self._motion_rebaseline_seconds = _env_float("PERSON_MOTION_REBASELINE_SECONDS", 1.5, minimum=0.1)
         self._motion_candidate_started_at = None
         self._motion_retrigger_cooldown_seconds = _env_float("PERSON_MOTION_RETRIGGER_COOLDOWN_SECONDS", 1.0, minimum=0.0)
         self._motion_suppressed_until = 0.0
+        self._motion_started_at = time.monotonic()
         self._face_enabled = _env_bool("FACE_DETECTION_ENABLED", False)
         self._hand_enabled = _env_bool("HAND_DETECTION_ENABLED", False)
         self._face_cascade = self._load_face_cascade()
@@ -233,6 +238,7 @@ class PersonDetector:
             self._disable_model()
 
         self.led_controller.start()
+        self._motion_started_at = time.monotonic()
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True, name="person-detector")
         self._thread.start()
@@ -530,6 +536,13 @@ class PersonDetector:
                 self._motion_subtractor.apply(blurred)
             return False, ""
 
+        now = time.monotonic()
+        if self._motion_settle_seconds > 0 and now - self._motion_started_at < self._motion_settle_seconds:
+            cv2.accumulateWeighted(blurred.astype(np.float32), self._motion_baseline_gray, 0.2)
+            if self._motion_subtractor is not None:
+                self._motion_subtractor.apply(blurred, learningRate=0.2)
+            return False, ""
+
         baseline_u8 = cv2.convertScaleAbs(self._motion_baseline_gray)
         delta = cv2.absdiff(blurred, baseline_u8)
         _, mask = cv2.threshold(delta, self._motion_pixel_delta, 255, cv2.THRESH_BINARY)
@@ -556,8 +569,27 @@ class PersonDetector:
             changed_fraction >= self._motion_threshold
             and largest_area >= self._motion_min_contour_area
         )
+        scene_shift = (
+            changed_fraction >= self._motion_scene_shift_fraction
+            and largest_area >= self._motion_scene_shift_area
+        )
+        if scene_shift:
+            # Whole-frame changes are almost always exposure/autofocus/camera settling,
+            # not body movement. Rebaseline instead of raising a security event.
+            self._motion_baseline_gray = blurred.astype(np.float32)
+            self._motion_candidate_started_at = None
+            if self._motion_subtractor is not None:
+                self._motion_subtractor.apply(blurred, learningRate=1.0)
+            if now - self._last_motion_scene_shift_log_at >= 5.0:
+                self._last_motion_scene_shift_log_at = now
+                logger.info(
+                    "Motion ignored as scene shift on internal camera: change=%.3f largest_area=%.3f roi=%s",
+                    changed_fraction,
+                    largest_area,
+                    self._motion_roi,
+                )
+            return False, ""
         if motion_detected and self._motion_rebaseline_seconds > 0:
-            now = time.monotonic()
             if self._motion_candidate_started_at is None:
                 self._motion_candidate_started_at = now
             elif now - self._motion_candidate_started_at >= self._motion_rebaseline_seconds:
