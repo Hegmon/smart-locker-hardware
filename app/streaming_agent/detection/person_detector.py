@@ -425,14 +425,10 @@ class PersonDetector:
     @staticmethod
     def _human_score(face_detected, hand_detected, person_detected, motion_detected):
         score = 0.0
-        if face_detected:
-            score += 0.4
-        if hand_detected:
-            score += 0.3
         if person_detected:
-            score += 0.5
+            score += 0.7
         if motion_detected:
-            score += 0.3
+            score += 0.4
         return score
 
     def _detect_model_person(self, frame):
@@ -862,7 +858,8 @@ class PersonDetector:
                 self._motion_active = False
                 logger.info("Motion detection cleared after %.2fs", clear_age)
 
-        relay_active = self._face_active or self._hand_active or self._person_active or self._motion_active
+        # Only person and motion are valid security triggers for the internal camera.
+        relay_active = self._person_active or self._motion_active
         if self.detection_state_manager is not None:
             self.detection_state_manager.update_presence(
                 "internal",
