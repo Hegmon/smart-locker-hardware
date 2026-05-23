@@ -39,10 +39,6 @@ HAND_TRIGGER_FRAMES = 2
 HAND_CLEAR_FRAMES = 6
 
 # Hysteresis thresholds to eliminate oscillation around the decision boundary
-HUMAN_ACTIVATE_THRESHOLD = 0.60
-HUMAN_CLEAR_THRESHOLD = 0.40
-
-
 def _env_float(name, default, minimum=None, maximum=None):
     try:
         value = float(os.getenv(name, str(default)))
@@ -166,16 +162,12 @@ class PersonDetector:
         self._last_motion_roi = None
         self._motion_rebaseline_seconds = _env_float("PERSON_MOTION_REBASELINE_SECONDS", 1.5, minimum=0.1)
         self._motion_candidate_started_at = None
-        self._face_enabled = _env_bool("FACE_DETECTION_ENABLED", True)
-        self._hand_enabled = _env_bool("HAND_DETECTION_ENABLED", True)
+        self._face_enabled = _env_bool("FACE_DETECTION_ENABLED", False)
+        self._hand_enabled = _env_bool("HAND_DETECTION_ENABLED", False)
         self._face_cascade = self._load_face_cascade()
         self._face_min_area = _env_float("FACE_MIN_AREA", 0.006, minimum=0.0001, maximum=1.0)
         self._hand_min_area = _env_float("HAND_MIN_AREA", 0.015, minimum=0.0001, maximum=1.0)
-        self._human_score_threshold = _env_float("HUMAN_SCORE_THRESHOLD", 0.5, minimum=0.1, maximum=1.0)
-
-        # hysteresis to kill oscillation when score hovers around the old hard threshold
-        self._human_activate_threshold = _env_float("HUMAN_ACTIVATE_THRESHOLD", HUMAN_ACTIVATE_THRESHOLD, minimum=0.1, maximum=0.95)
-        self._human_clear_threshold = _env_float("HUMAN_CLEAR_THRESHOLD", HUMAN_CLEAR_THRESHOLD, minimum=0.05, maximum=0.9)
+        self._human_score_threshold = _env_float("HUMAN_SCORE_THRESHOLD", 0.7, minimum=0.1, maximum=1.0)
 
         self._running = False
         self._thread = None
@@ -204,20 +196,6 @@ class PersonDetector:
         self._hand_clear_streak = 0
         self._face_active = False
         self._hand_active = False
-        self._person_active = False
-        self._motion_active = False
-        self._human_presence_active = False
-        self._face_streak = 0
-        self._face_clear_streak = 0
-        self._hand_streak = 0
-        self._hand_clear_streak = 0
-        self._person_active = False
-        self._motion_active = False
-        self._human_presence_active = False  # hysteretic overall presence (prevents 0.55-0.65 chatter)
-        self._face_streak = 0
-        self._face_clear_streak = 0
-        self._hand_streak = 0
-        self._hand_clear_streak = 0
         self._person_active = False
         self._motion_active = False
         self._person_confidence_ema = 0.0
@@ -357,17 +335,8 @@ class PersonDetector:
             except Exception:
                 logger.exception("Person detection failed")
 
-            # Hysteresis: once presence activates at 0.60 it stays active until score drops to 0.40.
-            # This completely eliminates the 0.55-0.65 oscillation that was causing rapid relay chatter.
-            if not self._human_presence_active:
-                if human_score >= self._human_activate_threshold:
-                    self._human_presence_active = True
-            else:
-                if human_score <= self._human_clear_threshold:
-                    self._human_presence_active = False
-
             self._update_led_state(
-                self._human_presence_active,  # stable latched value instead of raw threshold comparison
+                human_score >= self._human_score_threshold,
                 reason,
                 face_detected=face_detected,
                 hand_detected=hand_detected,
@@ -386,12 +355,8 @@ class PersonDetector:
         if self.detection_state_manager is not None:
             self.detection_state_manager.check_timeouts()
             return
-        logger.info("No fresh person detection; Relay 1 OFF")
+        logger.info("Internal presence state went stale; clearing detector state")
         self._clear_person_state()
-
-    def _detect_person(self, frame_bytes, sequence):
-        face_detected, hand_detected, person_detected, motion_detected, human_score, reason = self._detect_presence(frame_bytes, sequence)
-        return human_score >= self._human_score_threshold, reason
 
     def _detect_presence(self, frame_bytes, sequence):
         frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
@@ -408,8 +373,6 @@ class PersonDetector:
         model_reason = ""
         run_model = self._model_enabled() and (
             sequence % self._model_every_n_frames == 0
-            or face_detected
-            or hand_detected
             or motion_detected
         )
         if run_model:
@@ -868,7 +831,7 @@ class PersonDetector:
                 person_detected=self._person_active,
                 motion_detected=self._motion_active,
                 human_score=human_score,
-                reason=reason,
+                reason=reason if relay_active else "",
             )
             if not relay_active:
                 self.detection_state_manager.check_timeouts()
