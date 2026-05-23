@@ -4,6 +4,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from itertools import count
 
 from app.streaming_agent.config.runtime import RelayConfig
 from app.streaming_agent.event_bus.detection_events import DetectionEvent, DetectionType
@@ -11,6 +12,7 @@ from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 
 
 logger = LoggingManager.get_logger(__name__)
+_MANAGER_IDS = count(1)
 
 
 class RelayLifecycleState(str, Enum):
@@ -33,7 +35,11 @@ class SecurityRelayState:
 class SecurityRelayManager:
     """Single source of truth for Relay 1 + Relay 4 security control."""
 
+    _instance_lock = threading.RLock()
+    _active_instance: "SecurityRelayManager | None" = None
+
     def __init__(self, relay_controller, *, config: RelayConfig | None = None) -> None:
+        self.manager_id = next(_MANAGER_IDS)
         self.relay_controller = relay_controller
         self.config = config or RelayConfig.from_env()
         self.state = SecurityRelayState(state_changed_ts=time.monotonic())
@@ -41,14 +47,35 @@ class SecurityRelayManager:
         self._condition = threading.Condition(self._lock)
         self._running = True
         self._last_state_log_at = 0.0
-        self._worker = threading.Thread(target=self._worker_loop, daemon=True, name="security-relay-manager")
+        with self._instance_lock:
+            previous = self.__class__._active_instance
+            if previous is not None:
+                logger.critical(
+                    "Duplicate SecurityRelayManager detected: stopping previous manager_id=%s before starting manager_id=%s",
+                    previous.manager_id,
+                    self.manager_id,
+                )
+                previous.stop()
+            self.__class__._active_instance = self
+        self._worker = threading.Thread(
+            target=self._worker_loop,
+            daemon=True,
+            name=f"security-relay-manager-{self.manager_id}",
+        )
         self._worker.start()
+        logger.info("SecurityRelayManager started manager_id=%s", self.manager_id)
 
     def stop(self) -> None:
         with self._condition:
+            if not self._running:
+                return
             self._running = False
             self._condition.notify_all()
         self._worker.join(timeout=2.0)
+        with self._instance_lock:
+            if self.__class__._active_instance is self:
+                self.__class__._active_instance = None
+        logger.info("SecurityRelayManager stopped manager_id=%s", self.manager_id)
 
     def handle_detection_event(self, event: DetectionEvent) -> bool:
         source_key = self._event_to_source_key(event)
@@ -91,8 +118,17 @@ class SecurityRelayManager:
 
     def _handle_detected_locked(self, source_key: str, now: float) -> bool:
         if source_key in self.state.active_detection_sources:
-            logger.info("DETECTION IGNORED: reason=already_active source=%s", source_key)
-            return False
+            last_seen = self.state.last_event_by_source.get(source_key, 0.0)
+            age = now - last_seen
+            if last_seen and age < self.config.detection_debounce_seconds:
+                logger.info("DETECTION IGNORED: reason=debounce source=%s age=%.2fs", source_key, age)
+                return False
+            self.state.last_event_by_source[source_key] = now
+            self.state.last_detection_ts = now
+            self.state.off_deadline_ts = now + self.config.timeout_seconds
+            logger.info("DETECTION ACCEPTED: source=%s refreshed_off_deadline=%.2f", source_key, self.state.off_deadline_ts)
+            self._log_relay_decision_locked()
+            return True
 
         last_seen = self.state.last_event_by_source.get(source_key, 0.0)
         age = now - last_seen
@@ -118,9 +154,13 @@ class SecurityRelayManager:
         logger.info("DETECTION CLEARED: source=%s active_sources=%s", source_key, sorted(self.state.active_detection_sources))
         if was_active and self.state.active_detection_sources:
             self._transition_state_locked(RelayLifecycleState.ACTIVE, reason=f"remaining_active:{source_key}")
-        elif was_active and self.state.relay_active:
+        elif was_active:
             self.state.off_deadline_ts = now + self.config.timeout_seconds
-            self._transition_state_locked(RelayLifecycleState.WAITING_OFF, reason="all_detections_cleared")
+            if self.state.relay_active:
+                self._transition_state_locked(RelayLifecycleState.WAITING_OFF, reason="all_detections_cleared")
+            else:
+                self.state.off_deadline_ts = 0.0
+                self._transition_state_locked(RelayLifecycleState.IDLE, reason="all_detections_cleared_relays_already_off")
         self._log_relay_decision_locked()
         self._condition.notify_all()
         return True
@@ -147,6 +187,8 @@ class SecurityRelayManager:
                                 logger.info("RELAY OFF EXECUTION SUCCESS")
                                 self.state.last_detection_ts = 0.0
                                 self.state.off_deadline_ts = 0.0
+                                self.state.active_detection_sources.clear()
+                                self.state.last_event_by_source.clear()
                                 self._transition_state_locked(RelayLifecycleState.IDLE, reason="timeout_expired")
                             else:
                                 logger.error("RELAY OFF EXECUTION FAILED")
@@ -185,7 +227,8 @@ class SecurityRelayManager:
 
     def _log_relay_decision_locked(self) -> None:
         logger.info(
-            "RELAY DECISION: active_sources=%s state=%s relay_active=%s deadline=%.2f",
+            "RELAY DECISION: manager_id=%s active_sources=%s state=%s relay_active=%s deadline=%.2f",
+            self.manager_id,
             sorted(self.state.active_detection_sources),
             self.state.lifecycle_state.value,
             self.state.relay_active,
@@ -197,7 +240,8 @@ class SecurityRelayManager:
             return
         self._last_state_log_at = now
         logger.info(
-            "RELAY STATE SNAPSHOT: state=%s active_sources=%s relay_active=%s gpio_state=%s deadline=%.2f",
+            "RELAY STATE SNAPSHOT: manager_id=%s state=%s active_sources=%s relay_active=%s gpio_state=%s deadline=%.2f",
+            self.manager_id,
             self.state.lifecycle_state.value,
             sorted(self.state.active_detection_sources),
             self.state.relay_active,
