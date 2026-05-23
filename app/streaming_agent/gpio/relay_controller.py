@@ -14,10 +14,10 @@ logger = LoggingManager.get_logger(__name__)
 # =============================================================================
 # ARCHITECTURE (Security Relays for Surveillance)
 # =============================================================================
-# For the person / motion / face / hand / tamper detection feature:
+# For the human-presence / tamper detection feature:
 #
 #   • DetectionStateManager is the SINGLE SOURCE OF TRUTH.
-#   • It computes one boolean: security_active = person or motion or face or hand or tamper
+#   • It computes one boolean: security_active = human_presence or tamper
 #   • It is the ONLY code allowed to call:
 #         relay_controller.set_security_relays(security_active)
 #   • This call drives BOTH Relay 1 (Red LED / IN1) and Relay 4 (Buzzer / IN4) together.
@@ -232,7 +232,7 @@ class RelayController:
             logger.info("Locker locked")
 
     # NOTE: set_person_visible and set_tamper_active have been removed.
-    # All surveillance security relay control (person + tamper + face + hand + motion)
+    # All surveillance security relay control (human presence + tamper)
     # now goes exclusively through DetectionStateManager → set_security_relays().
     # The two methods above were the old bypass paths that caused stuck relays.
 
