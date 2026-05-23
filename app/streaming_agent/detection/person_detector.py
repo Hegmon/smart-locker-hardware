@@ -180,6 +180,7 @@ class PersonDetector:
         self._face_enabled = _env_bool("FACE_DETECTION_ENABLED", False)
         self._face_security_trigger_enabled = _env_bool("FACE_SECURITY_TRIGGER_ENABLED", True)
         self._hand_enabled = _env_bool("HAND_DETECTION_ENABLED", False)
+        self._body_motion_requires_human_signal = _env_bool("BODY_MOTION_REQUIRES_HUMAN_SIGNAL", True)
         self._face_cascade = self._load_face_cascade()
         self._face_min_area = _env_float("FACE_MIN_AREA", 0.006, minimum=0.0001, maximum=1.0)
         self._hand_min_area = _env_float("HAND_MIN_AREA", 0.015, minimum=0.0001, maximum=1.0)
@@ -408,6 +409,8 @@ class PersonDetector:
         score = 0.0
         if face_detected:
             score += 0.7
+        if hand_detected:
+            score += 0.5
         if person_detected:
             score += 0.7
         if motion_detected:
@@ -874,8 +877,12 @@ class PersonDetector:
         # Person/tamper are authoritative security triggers. Motion is tracked for
         # diagnostics and can be enabled as a relay trigger with explicit config.
         face_security_active = self._face_security_trigger_enabled and self._face_active
+        body_part_active = self._person_active or self._face_active or self._hand_active
+        motion_security_active = self._motion_active and (
+            body_part_active or not self._body_motion_requires_human_signal
+        )
         relay_active = self._person_active or face_security_active or (
-            self.runtime_config.person.motion_security_trigger_enabled and self._motion_active
+            self.runtime_config.person.motion_security_trigger_enabled and motion_security_active
         )
         effective_person_active = self._person_active or face_security_active
         if self.detection_state_manager is not None:
@@ -884,7 +891,7 @@ class PersonDetector:
                 face_detected=self._face_active,
                 hand_detected=self._hand_active,
                 person_detected=effective_person_active,
-                motion_detected=self._motion_active,
+                motion_detected=motion_security_active,
                 human_score=human_score,
                 reason=reason if relay_active else "",
             )
