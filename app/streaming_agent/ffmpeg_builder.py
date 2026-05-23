@@ -7,15 +7,17 @@ from app.streaming_agent.config_loader import get_device_id
 MEDIAMTX_HOST = os.getenv("MEDIAMTX_HOST", "69.62.125.223").strip() or "69.62.125.223"
 MEDIAMTX_RTSP_PORT = int(os.getenv("MEDIAMTX_RTSP_PORT", "8554"))
 STREAM_PUBLIC_BASE_URL = os.getenv("STREAM_PUBLIC_BASE_URL", "").strip().rstrip("/")
-QR_FRAME_WIDTH = int(os.getenv("QR_FRAME_WIDTH", "960"))
-QR_FRAME_HEIGHT = int(os.getenv("QR_FRAME_HEIGHT", "540"))
+QR_FRAME_WIDTH = int(os.getenv("QR_FRAME_WIDTH", "1280"))
+QR_FRAME_HEIGHT = int(os.getenv("QR_FRAME_HEIGHT", "720"))
 QR_FRAME_CHANNELS = int(os.getenv("QR_FRAME_CHANNELS", "3"))
 QR_FRAME_FPS = max(1, int(os.getenv("QR_FRAME_FPS", "10")))
 INTERNAL_FRAME_FPS = max(1, int(os.getenv("INTERNAL_FRAME_FPS", "10")))
 STREAM_VIDEO_ENCODER = os.getenv("STREAM_VIDEO_ENCODER", "libx264").strip() or "libx264"
 STREAM_INPUT_FORMAT = os.getenv("STREAM_INPUT_FORMAT", "mjpeg").strip() or "mjpeg"
 STREAM_INPUT_SIZE = os.getenv("STREAM_INPUT_SIZE", "1280x720").strip() or "1280x720"
+EXTERNAL_STREAM_INPUT_SIZE = os.getenv("EXTERNAL_STREAM_INPUT_SIZE", "1280x720").strip() or "1280x720"
 STREAM_INPUT_FPS = max(1, int(os.getenv("STREAM_INPUT_FPS", "20")))
+EXTERNAL_STREAM_INPUT_FPS = max(1, int(os.getenv("EXTERNAL_STREAM_INPUT_FPS", str(STREAM_INPUT_FPS))))
 STREAM_OUTPUT_WIDTH = max(160, int(os.getenv("STREAM_OUTPUT_WIDTH", "640")))
 STREAM_OUTPUT_HEIGHT = max(120, int(os.getenv("STREAM_OUTPUT_HEIGHT", "360")))
 STREAM_OUTPUT_FPS = max(1, int(os.getenv("STREAM_OUTPUT_FPS", "15")))
@@ -59,7 +61,7 @@ def build_ffmpeg_command(
         return [
             "ffmpeg",
             *_global_low_latency_args(),
-            *_input_low_latency_args(),
+            *_input_low_latency_args(camera_role),
             "-i", video_device,
             "-an",
             "-filter_complex",
@@ -83,7 +85,7 @@ def build_ffmpeg_command(
     return  [
     "ffmpeg",
     *_global_low_latency_args(),
-    *_input_low_latency_args(),
+    *_input_low_latency_args(camera_role),
     "-i", video_device,
     "-an",
     "-vf",
@@ -109,14 +111,16 @@ def _global_low_latency_args():
     ]
 
 
-def _input_low_latency_args():
+def _input_low_latency_args(camera_role=None):
+    input_size = EXTERNAL_STREAM_INPUT_SIZE if camera_role == "external" else STREAM_INPUT_SIZE
+    input_fps = EXTERNAL_STREAM_INPUT_FPS if camera_role == "external" else STREAM_INPUT_FPS
     return [
         "-thread_queue_size", os.getenv("STREAM_THREAD_QUEUE_SIZE", "1"),
         "-rtbufsize", os.getenv("STREAM_RTBUF_SIZE", "256k"),
         "-f", "v4l2",
         "-input_format", STREAM_INPUT_FORMAT,
-        "-video_size", STREAM_INPUT_SIZE,
-        "-framerate", str(STREAM_INPUT_FPS),
+        "-video_size", input_size,
+        "-framerate", str(input_fps),
     ]
 
 
