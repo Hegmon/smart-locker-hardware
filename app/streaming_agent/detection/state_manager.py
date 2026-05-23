@@ -1,64 +1,64 @@
-import os
+from __future__ import annotations
+
 import threading
 import time
 
+from dataclasses import replace
+
+from app.streaming_agent.config.runtime import StreamingAgentRuntimeConfig
+from app.streaming_agent.event_bus import DetectionEvent, DetectionType, EventBus
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
+from app.streaming_agent.relay.security_relay_manager import SecurityRelayManager
 
 
 logger = LoggingManager.get_logger(__name__)
-
-DEFAULT_SECURITY_HOLD_SECONDS = 8.0
-DEFAULT_MAX_STALE_SECONDS = 15.0
 DEBUG_LOG_INTERVAL = 2.0
-RELAY_REFRESH_INTERVAL = 1.0
-
-
-def _env_float(name, default, minimum=None):
-    try:
-        value = float(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        value = float(default)
-    if minimum is not None:
-        value = max(float(minimum), value)
-    return value
 
 
 class DetectionStateManager:
-    """Thread-safe detection state and relay decision owner.
+    """Thread-safe detection registry and centralized event publisher.
 
-    Detectors report debounced observations here. This class owns hold timers,
-    derived relay state, and edge-triggered logging.
+    Detectors report debounced observations here. This class keeps a current
+    snapshot for each camera, logs transitions, and forwards supported
+    detections into the single relay-event pipeline.
     """
 
-    def __init__(self, relay_controller, *, security_hold_seconds=None, detection_hold_seconds=None, tamper_hold_seconds=None):
-        self.relay_controller = relay_controller
-        default_hold = _env_float("SECURITY_HOLD_SECONDS", DEFAULT_SECURITY_HOLD_SECONDS, minimum=0.0)
-        self.security_hold_seconds = (
-            default_hold
-            if security_hold_seconds is None
-            else max(0.0, float(security_hold_seconds))
-        )
+    def __init__(
+        self,
+        relay_controller,
+        *,
+        security_hold_seconds=None,
+        detection_hold_seconds=None,
+        tamper_hold_seconds=None,
+        runtime_config: StreamingAgentRuntimeConfig | None = None,
+        event_bus: EventBus | None = None,
+        relay_manager: SecurityRelayManager | None = None,
+    ):
+        self.runtime_config = runtime_config or StreamingAgentRuntimeConfig.from_env()
+        hold_seconds = self.runtime_config.relay.timeout_seconds
+        if security_hold_seconds is not None:
+            hold_seconds = max(0.0, float(security_hold_seconds))
         if detection_hold_seconds is not None:
-            self.security_hold_seconds = max(0.0, float(detection_hold_seconds))
+            hold_seconds = max(0.0, float(detection_hold_seconds))
         if tamper_hold_seconds is not None:
-            self.security_hold_seconds = max(self.security_hold_seconds, max(0.0, float(tamper_hold_seconds)))
+            hold_seconds = max(hold_seconds, max(0.0, float(tamper_hold_seconds)))
+        self.security_hold_seconds = hold_seconds
+        self.event_bus = event_bus or EventBus()
+        relay_config = replace(
+            self.runtime_config.relay,
+            timeout_seconds=self.security_hold_seconds,
+        )
+        self.relay_manager = relay_manager or SecurityRelayManager(
+            relay_controller,
+            config=relay_config,
+        )
+        self.event_bus.subscribe("*", self.relay_manager.handle_detection_event)
         self.camera_state = {
             "internal": self._new_camera_state(),
             "external": self._new_camera_state(),
         }
         self._lock = threading.RLock()
-        self._security_event_active = False
-        self._expiry_thread = None
         self._last_debug_log_at = 0.0
-        self._last_relay_refresh_at = 0.0
-        self._max_stale_seconds = DEFAULT_MAX_STALE_SECONDS
-        # start verifier thread that ensures relays match computed state
-        self._verifier_thread = threading.Thread(
-            target=self._verification_worker,
-            daemon=True,
-            name="detection-state-verifier",
-        )
-        self._verifier_thread.start()
 
     @staticmethod
     def _new_camera_state():
@@ -96,8 +96,10 @@ class DetectionStateManager:
                 state["last_hand_time"] = now
             if person_detected:
                 state["last_person_time"] = now
+                self._publish_detection(camera_role, DetectionType.PERSON_DETECTED.value, human_score, now, reason)
             if motion_detected:
                 state["last_motion_time"] = now
+                self._publish_detection(camera_role, DetectionType.MOTION_DETECTED.value, human_score, now, reason)
             state["human_score"] = max(float(human_score or 0.0), state.get("human_score", 0.0) * 0.8)
             self._apply_locked(now, reason=reason)
 
@@ -107,6 +109,7 @@ class DetectionStateManager:
             state = self._state_for(camera_role)
             if tamper_detected:
                 state["last_tamper_time"] = now
+                self._publish_detection(camera_role, DetectionType.TAMPER_DETECTED.value, 1.0, now, reason)
             self._apply_locked(now, reason=reason)
 
     def clear_presence(self, camera_role="internal"):
@@ -117,17 +120,35 @@ class DetectionStateManager:
             state["last_face_time"] = 0.0
             state["last_hand_time"] = 0.0
             state["human_score"] = 0.0
-            self._apply_locked(time.monotonic(), force=True)
+            self._apply_locked(time.monotonic(), reason="clear_presence")
 
     def clear_tamper(self, camera_role):
         with self._lock:
             state = self._state_for(camera_role)
             state["last_tamper_time"] = 0.0
-            self._apply_locked(time.monotonic(), force=True)
+            self._apply_locked(time.monotonic(), reason="clear_tamper")
 
     def check_timeouts(self):
         with self._lock:
-            self._apply_locked(time.monotonic())
+            self._apply_locked(time.monotonic(), reason="timeout_check")
+
+    def _publish_detection(self, camera_role, detection_type, confidence, timestamp, reason):
+        event = DetectionEvent(
+            camera_type=str(camera_role or "internal"),
+            detection_type=str(detection_type),
+            confidence=float(confidence or 0.0),
+            timestamp=timestamp,
+            reason=str(reason or ""),
+        )
+        logger.info(
+            "Detection event published event_id=%s camera=%s detection=%s confidence=%.2f reason=%s",
+            event.event_id,
+            event.camera_type,
+            event.detection_type,
+            event.confidence,
+            event.reason or "n/a",
+        )
+        self.event_bus.publish(event.event_name, event)
 
     def _state_for(self, camera_role):
         role = str(camera_role or "internal")
@@ -135,52 +156,31 @@ class DetectionStateManager:
             self.camera_state[role] = self._new_camera_state()
         return self.camera_state[role]
 
-    def _apply_locked(self, now, *, reason="", force=False):
+    def _apply_locked(self, now, *, reason=""):
         for role, state in self.camera_state.items():
             previous_face = state["face_detected"]
             previous_hand = state["hand_detected"]
             previous_person = state["person_detected"]
             previous_motion = state["motion_detected"]
             previous_tamper = state["tamper_detected"]
-            # compute strict within-hold (< not <=) activity
-            face_active = self._within_hold(now, state["last_face_time"], self.security_hold_seconds)
-            hand_active = self._within_hold(now, state["last_hand_time"], self.security_hold_seconds)
-            person_active = self._within_hold(now, state["last_person_time"], self.security_hold_seconds)
-            motion_active = self._within_hold(now, state["last_motion_time"], self.security_hold_seconds)
-            tamper_active = self._within_hold(now, state["last_tamper_time"], self.security_hold_seconds)
 
-            state["face_detected"] = bool(face_active)
-            state["hand_detected"] = bool(hand_active)
-            state["person_detected"] = bool(person_active)
-            state["motion_detected"] = bool(motion_active)
-            state["tamper_detected"] = bool(tamper_active)
+            state["face_detected"] = self._within_hold(now, state["last_face_time"], self.security_hold_seconds)
+            state["hand_detected"] = self._within_hold(now, state["last_hand_time"], self.security_hold_seconds)
+            state["person_detected"] = self._within_hold(now, state["last_person_time"], self.security_hold_seconds)
+            state["motion_detected"] = self._within_hold(now, state["last_motion_time"], self.security_hold_seconds)
+            state["tamper_detected"] = self._within_hold(now, state["last_tamper_time"], self.security_hold_seconds)
 
-            # when hold expires clear timestamps to avoid stale data
-            if not face_active and state.get("last_face_time"):
+            if not state["face_detected"]:
                 state["last_face_time"] = 0.0
-            if not hand_active and state.get("last_hand_time"):
+            if not state["hand_detected"]:
                 state["last_hand_time"] = 0.0
-            if not person_active and state.get("last_person_time"):
+            if not state["person_detected"]:
                 state["last_person_time"] = 0.0
-            if not motion_active and state.get("last_motion_time"):
+            if not state["motion_detected"]:
                 state["last_motion_time"] = 0.0
-            if not tamper_active and state.get("last_tamper_time"):
+            if not state["tamper_detected"]:
                 state["last_tamper_time"] = 0.0
 
-            # stale-state watchdog: forcibly clear very old timestamps
-            stale_threshold = self._max_stale_seconds
-            for key, last_key in (
-                ("face_detected", "last_face_time"),
-                ("hand_detected", "last_hand_time"),
-                ("person_detected", "last_person_time"),
-                ("motion_detected", "last_motion_time"),
-                ("tamper_detected", "last_tamper_time"),
-            ):
-                last_val = state.get(last_key, 0.0)
-                if last_val and now - last_val > stale_threshold:
-                    logger.warning("Clearing stale detector state for %s on %s camera", key, role)
-                    state[last_key] = 0.0
-                    state[key] = False
             if state["face_detected"] != previous_face:
                 self._log_signal_change(role, "face", state["face_detected"], reason)
             if state["hand_detected"] != previous_hand:
@@ -192,150 +192,26 @@ class DetectionStateManager:
             if state["tamper_detected"] != previous_tamper:
                 self._log_signal_change(role, "tamper", state["tamper_detected"], reason)
 
-        security_event_active = any(
-            bool(
-                state.get("face_detected")
-                or state.get("hand_detected")
-                or state.get("person_detected")
-                or state.get("motion_detected")
-                or state.get("tamper_detected")
-            )
-            for state in self.camera_state.values()
-        )
-
-        # periodic debug logging for easier diagnosis of stuck relays
-        try:
-            if now - self._last_debug_log_at >= DEBUG_LOG_INTERVAL:
-                parts = []
-                for role, state in self.camera_state.items():
-                    parts.append(
-                        f"{role}:person={state.get('person_detected')} motion={state.get('motion_detected')} face={state.get('face_detected')} hand={state.get('hand_detected')} tamper={state.get('tamper_detected')}"
-                    )
-                logger.info(
-                    "Security state: %s security=%s",
-                    " | ".join(parts),
-                    bool(security_event_active),
+        if now - self._last_debug_log_at >= DEBUG_LOG_INTERVAL:
+            parts = []
+            for role, state in self.camera_state.items():
+                parts.append(
+                    f"{role}:person={state['person_detected']} motion={state['motion_detected']} "
+                    f"face={state['face_detected']} hand={state['hand_detected']} tamper={state['tamper_detected']}"
                 )
-                # flat summary matching required debug format
-                person_active = any(bool(s.get("person_detected")) for s in self.camera_state.values())
-                motion_active = any(bool(s.get("motion_detected")) for s in self.camera_state.values())
-                face_active = any(bool(s.get("face_detected")) for s in self.camera_state.values())
-                hand_active = any(bool(s.get("hand_detected")) for s in self.camera_state.values())
-                tamper_active = any(bool(s.get("tamper_detected")) for s in self.camera_state.values())
-                logger.info(
-                    "Security state: person=%s motion=%s face=%s hand=%s tamper=%s security=%s",
-                    person_active,
-                    motion_active,
-                    face_active,
-                    hand_active,
-                    tamper_active,
-                    bool(security_event_active),
-                )
-                self._last_debug_log_at = now
-        except Exception:
-            logger.exception("Failed while logging security debug state")
-
-        # === SINGLE AUTHORITATIVE SECURITY STATE (controls BOTH relays simultaneously) ===
-        # security_active is the ONLY thing that decides relay1 + relay4 state.
-        # Detectors only ever report observations; they never touch GPIO.
-
-        # detailed relay decision log (required for debugging stuck relays)
-        try:
-            logger.info(
-                "Relay decision: security=%s person=%s motion=%s hand=%s face=%s tamper=%s",
-                bool(security_event_active),
-                bool(any(s.get("person_detected") for s in self.camera_state.values())),
-                bool(any(s.get("motion_detected") for s in self.camera_state.values())),
-                bool(any(s.get("hand_detected") for s in self.camera_state.values())),
-                bool(any(s.get("face_detected") for s in self.camera_state.values())),
-                bool(any(s.get("tamper_detected") for s in self.camera_state.values())),
-            )
-        except Exception:
-            pass
-
-        # synchronize both relays together using the single security_event source
-        try:
-            if force or security_event_active != self._security_event_active:
-                self._security_event_active = security_event_active
-                if security_event_active:
-                    logger.warning("Unified security event ACTIVE")
-                else:
-                    logger.info("Unified security event CLEARED")
-                logger.info("Relays synchronized %s", "ON" if security_event_active else "OFF")
-                self.relay_controller.set_security_relays(security_event_active)
-
-            # keep refreshing the TTL so the source does not expire while we are active
-            if security_event_active:
-                if now - self._last_relay_refresh_at >= RELAY_REFRESH_INTERVAL:
-                    self.relay_controller.set_security_relays(True)
-                    self._last_relay_refresh_at = now
-        except Exception:
-            logger.exception("Failed to synchronize relays with detection state manager")
-
-        if security_event_active:
-            self._ensure_expiry_thread_locked()
-
-    def _verification_worker(self):
-        # Runs continuously to verify relays reflect computed security state
-        while True:
-            try:
-                with self._lock:
-                    # re-evaluate timeouts and states (run immediately on start)
-                    self._apply_locked(time.monotonic())
-                    desired = self._security_event_active
-
-                    # Always drive the authoritative state into the relay controller (idempotent)
-                    try:
-                        self.relay_controller.set_security_relays(desired)
-                    except Exception:
-                        logger.exception("Verifier failed to set desired relay state")
-
-                    if not desired:
-                        # Belt + suspenders: when we know security must be off, repeatedly force it.
-                        # This guarantees that even if a source was left behind or GPIO got out of sync,
-                        # the relays will be driven LOW every second.
-                        try:
-                            if hasattr(self.relay_controller, "is_security_relays_on") and self.relay_controller.is_security_relays_on():
-                                logger.error("Relay mismatch: computed security=False but hardware reports ON; forcing OFF")
-                                self.relay_controller.force_security_relays_off()
-
-                            # Unconditional enforcement - the ultimate recovery for "stuck ON" bugs
-                            self.relay_controller.force_security_relays_off()
-                        except Exception:
-                            logger.exception("Verification force-off failed")
-                time.sleep(1.0)
-            except Exception:
-                logger.exception("Security verification thread failed")
+            logger.info("Detection snapshot %s", " | ".join(parts))
+            self._last_debug_log_at = now
 
     @staticmethod
     def _within_hold(now, last_seen_at, hold_seconds):
-        # strict '<' semantics: expiration occurs once age >= hold_seconds
         try:
             return bool(last_seen_at and (now - last_seen_at) < float(hold_seconds))
         except Exception:
             return False
-
-    def _ensure_expiry_thread_locked(self):
-        if self._expiry_thread and self._expiry_thread.is_alive():
-            return
-        self._expiry_thread = threading.Thread(
-            target=self._expiry_worker,
-            daemon=True,
-            name="detection-state-expiry",
-        )
-        self._expiry_thread.start()
-
-    def _expiry_worker(self):
-        while True:
-            time.sleep(0.1)
-            with self._lock:
-                self._apply_locked(time.monotonic())
-                if not self._security_event_active:
-                    return
 
     @staticmethod
     def _log_signal_change(camera_role, signal, active, reason):
         if active:
             logger.info("%s detection active on %s camera: %s", signal, camera_role, reason or signal)
         else:
-            logger.info("%s detection cleared on %s camera after hold timeout", signal, camera_role)
+            logger.info("%s detection cleared on %s camera", signal, camera_role)
