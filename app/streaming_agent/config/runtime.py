@@ -37,6 +37,7 @@ def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
 class RelayConfig:
     timeout_seconds: float
     detection_debounce_seconds: float
+    active_source_ttl_seconds: float
     retry_count: int
     retry_delay_seconds: float
     poll_interval_seconds: float
@@ -53,6 +54,7 @@ class RelayConfig:
         return cls(
             timeout_seconds=timeout,
             detection_debounce_seconds=_env_float("DETECTION_EVENT_DEBOUNCE_SECONDS", 1.0, minimum=0.0),
+            active_source_ttl_seconds=_env_float("DETECTION_RELAY_SOURCE_TTL_SECONDS", 5.0, minimum=0.0),
             retry_count=_env_int("SECURITY_RELAY_RETRY_COUNT", 3, minimum=1),
             retry_delay_seconds=_env_float("SECURITY_RELAY_RETRY_DELAY_SECONDS", 0.2, minimum=0.0),
             poll_interval_seconds=_env_float("SECURITY_RELAY_POLL_INTERVAL_SECONDS", 0.1, minimum=0.01),
