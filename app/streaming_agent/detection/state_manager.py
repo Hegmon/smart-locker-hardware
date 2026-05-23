@@ -94,16 +94,9 @@ class DetectionStateManager:
             self._update_signal_locked(state, camera_role, "face", bool(face_detected), now, reason)
             self._update_signal_locked(state, camera_role, "hand", bool(hand_detected), now, reason)
             self._update_signal_locked(state, camera_role, "person", bool(person_detected), now, reason, human_score=human_score)
-            self._update_signal_locked(
-                state,
-                camera_role,
-                "motion",
-                bool(motion_detected),
-                now,
-                reason,
-                human_score=human_score,
-                publish_security_event=self.motion_security_trigger_enabled,
-            )
+            # Body-motion detection is intentionally disabled for production
+            # security decisions; keep the state false even if legacy callers pass it.
+            self._update_signal_locked(state, camera_role, "motion", False, now, "motion_disabled", human_score=0.0)
             self._maybe_log_snapshot_locked(now)
 
     def update_tamper(self, camera_role, *, tamper_detected=False, reason=""):
