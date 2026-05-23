@@ -72,9 +72,6 @@ class DetectionStateManager:
             "last_person_time": 0.0,
             "last_motion_time": 0.0,
             "last_tamper_time": 0.0,
-            "last_person_event_time": 0.0,
-            "last_motion_event_time": 0.0,
-            "last_tamper_event_time": 0.0,
         }
 
     def update_presence(
@@ -119,25 +116,15 @@ class DetectionStateManager:
 
     def check_timeouts(self):
         with self._lock:
-            self._publish_active_refresh_locked(time.monotonic())
             self._maybe_log_snapshot_locked(time.monotonic())
 
     def _update_signal_locked(self, state, camera_role, signal, active, now, reason, *, human_score=0.0):
         state_key = f"{signal}_detected"
         time_key = f"last_{signal}_time"
-        event_time_key = f"last_{signal}_event_time"
         previous = bool(state.get(state_key))
         if previous == active:
             if active:
                 state[time_key] = now
-                if signal in {"person", "motion", "tamper"}:
-                    debounce_seconds = self.runtime_config.relay.detection_debounce_seconds
-                    last_event_time = float(state.get(event_time_key, 0.0))
-                    if now - last_event_time >= debounce_seconds:
-                        detection_type = self._transition_event_type(signal, True)
-                        confidence = 1.0 if signal == "tamper" else float(human_score or 0.0)
-                        self._publish_detection(camera_role, detection_type, confidence, now, reason)
-                        state[event_time_key] = now
             return
 
         state[state_key] = active
@@ -150,7 +137,6 @@ class DetectionStateManager:
         if signal == "tamper":
             confidence = 1.0
         self._publish_detection(camera_role, detection_type, confidence, now, reason)
-        state[event_time_key] = now if active else 0.0
 
     def _publish_detection(self, camera_role, detection_type, confidence, timestamp, reason):
         event = DetectionEvent(
@@ -187,38 +173,6 @@ class DetectionStateManager:
             )
         logger.info("Detection snapshot %s", " | ".join(parts))
         self._last_debug_log_at = now
-
-    def _publish_active_refresh_locked(self, now):
-        for camera_role, state in self.camera_state.items():
-            if state.get("person_detected"):
-                self._update_signal_locked(
-                    state,
-                    camera_role,
-                    "person",
-                    True,
-                    now,
-                    "person_refresh",
-                    human_score=state.get("human_score", 0.0),
-                )
-            if state.get("motion_detected"):
-                self._update_signal_locked(
-                    state,
-                    camera_role,
-                    "motion",
-                    True,
-                    now,
-                    "motion_refresh",
-                    human_score=state.get("human_score", 0.0),
-                )
-            if state.get("tamper_detected"):
-                self._update_signal_locked(
-                    state,
-                    camera_role,
-                    "tamper",
-                    True,
-                    now,
-                    "tamper_refresh",
-                )
 
     @staticmethod
     def _transition_event_type(signal, active):
