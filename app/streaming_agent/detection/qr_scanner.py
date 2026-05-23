@@ -431,7 +431,7 @@ class QRScanner:
             with self._lock:
                 self.metrics.invalid_payloads += 1
             logger.warning("Invalid QR payload: %s", exc)
-            self.gpio_controller.pulse_failure()
+            self._signal_failure()
             write_scan_log(raw_value, None, "qr_failure_alert", str(exc))
             return
 
@@ -504,12 +504,15 @@ class QRScanner:
                     self.metrics.backend_success += 1
                 write_scan_log(result.raw_value, backend_response, f"qr_success_unlock_{duration}s")
             else:
-                logger.warning(
-                    "QR backend denied token=%s; turning on red LED and buzzer for %.1fs",
-                    result.debounce_key,
-                    getattr(self.gpio_controller, "alert_duration", self.config.failure_signal_seconds),
-                )
-                self.gpio_controller.pulse_failure()
+                if getattr(self.config, "failure_signal_enabled", False):
+                    logger.warning(
+                        "QR backend denied token=%s; turning on red LED and buzzer for %.1fs",
+                        result.debounce_key,
+                        getattr(self.gpio_controller, "alert_duration", self.config.failure_signal_seconds),
+                    )
+                else:
+                    logger.warning("QR backend denied token=%s; failure GPIO signal suppressed", result.debounce_key)
+                self._signal_failure()
                 with self._lock:
                     self.metrics.backend_failure += 1
                 write_scan_log(result.raw_value, backend_response, "qr_failure_alert")
@@ -517,7 +520,7 @@ class QRScanner:
         except Exception as exc:
             error = str(exc)
             logger.warning("QR backend validation failed; locker will stay closed: %s", exc)
-            self.gpio_controller.pulse_failure()
+            self._signal_failure()
             with self._lock:
                 self.metrics.backend_failure += 1
             write_scan_log(result.raw_value, backend_response, "qr_failure_alert", error)
@@ -573,6 +576,12 @@ class QRScanner:
                 self._qr_attention_until,
                 time.monotonic() + self.config.attention_hold_seconds,
             )
+
+    def _signal_failure(self):
+        if not getattr(self.config, "failure_signal_enabled", False):
+            logger.info("QR failure signal suppressed to keep security relays exclusively controlled by SecurityRelayManager")
+            return
+        self.gpio_controller.pulse_failure()
 
     def _log_periodic_metrics(self, quality: FrameQualityMetrics):
         now = time.monotonic()
