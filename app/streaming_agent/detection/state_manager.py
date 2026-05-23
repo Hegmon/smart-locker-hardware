@@ -94,10 +94,12 @@ class DetectionStateManager:
             self._update_signal_locked(state, camera_role, "face", bool(face_detected), now, reason)
             self._update_signal_locked(state, camera_role, "hand", bool(hand_detected), now, reason)
             self._update_signal_locked(state, camera_role, "person", bool(person_detected), now, reason, human_score=human_score)
+            body_signal_active = bool(face_detected or hand_detected or person_detected)
             motion_active = (
                 str(camera_role or "internal") == "internal"
                 and self.motion_security_trigger_enabled
                 and bool(motion_detected)
+                and body_signal_active
             )
             self._update_signal_locked(
                 state,
