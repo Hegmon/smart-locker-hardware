@@ -2,6 +2,7 @@ import threading
 import time
 
 from app.core.mqtt_manager import MQTTManager, get_shared_mqtt_manager
+from app.streaming_agent.config_loader import get_device_id
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 
 
