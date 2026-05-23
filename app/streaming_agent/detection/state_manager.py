@@ -72,6 +72,9 @@ class DetectionStateManager:
             "last_person_time": 0.0,
             "last_motion_time": 0.0,
             "last_tamper_time": 0.0,
+            "last_person_event_time": 0.0,
+            "last_motion_event_time": 0.0,
+            "last_tamper_event_time": 0.0,
         }
 
     def update_presence(
@@ -121,10 +124,19 @@ class DetectionStateManager:
     def _update_signal_locked(self, state, camera_role, signal, active, now, reason, *, human_score=0.0):
         state_key = f"{signal}_detected"
         time_key = f"last_{signal}_time"
+        event_time_key = f"last_{signal}_event_time"
         previous = bool(state.get(state_key))
         if previous == active:
             if active:
                 state[time_key] = now
+                if signal in {"person", "motion", "tamper"}:
+                    debounce_seconds = self.runtime_config.relay.detection_debounce_seconds
+                    last_event_time = float(state.get(event_time_key, 0.0))
+                    if now - last_event_time >= debounce_seconds:
+                        detection_type = self._transition_event_type(signal, True)
+                        confidence = 1.0 if signal == "tamper" else float(human_score or 0.0)
+                        self._publish_detection(camera_role, detection_type, confidence, now, f"{reason or signal}_refresh")
+                        state[event_time_key] = now
             return
 
         state[state_key] = active
@@ -137,6 +149,7 @@ class DetectionStateManager:
         if signal == "tamper":
             confidence = 1.0
         self._publish_detection(camera_role, detection_type, confidence, now, reason)
+        state[event_time_key] = now if active else 0.0
 
     def _publish_detection(self, camera_role, detection_type, confidence, timestamp, reason):
         event = DetectionEvent(
