@@ -427,6 +427,9 @@ class PersonDetector:
 
         scores, classes, boxes = self._read_detection_outputs()
         self._maybe_log_top_detection(scores, classes, boxes)
+        return self._model_person_detected(scores, classes, boxes)
+
+    def _model_person_detected(self, scores, classes, boxes):
         best_person_score = 0.0
         for index, (score, class_id) in enumerate(zip(scores, classes)):
             if int(class_id) not in self._person_class_ids:
@@ -437,7 +440,7 @@ class PersonDetector:
 
         alpha = self._confidence_smoothing_alpha
         self._person_confidence_ema = alpha * best_person_score + (1.0 - alpha) * self._person_confidence_ema
-        if self._person_confidence_ema >= self.confidence_threshold:
+        if best_person_score >= self.confidence_threshold and self._person_confidence_ema >= self.confidence_threshold:
             return True, f"person_model score={best_person_score:.2f} smooth={self._person_confidence_ema:.2f}"
         return False, ""
 
