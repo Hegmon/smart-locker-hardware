@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import threading
 import time
-
 from dataclasses import replace
 
 from app.streaming_agent.config.runtime import StreamingAgentRuntimeConfig
@@ -16,11 +15,10 @@ DEBUG_LOG_INTERVAL = 2.0
 
 
 class DetectionStateManager:
-    """Thread-safe detection registry and centralized event publisher.
+    """Centralized detection lifecycle and event publisher.
 
-    Detectors report debounced observations here. This class keeps a current
-    snapshot for each camera, logs transitions, and forwards supported
-    detections into the single relay-event pipeline.
+    Detectors report their current debounced state here. This manager emits
+    `*_DETECTED` and `*_CLEARED` transitions exactly once per state change.
     """
 
     def __init__(
@@ -90,47 +88,55 @@ class DetectionStateManager:
         now = time.monotonic()
         with self._lock:
             state = self._state_for(camera_role)
-            if face_detected:
-                state["last_face_time"] = now
-            if hand_detected:
-                state["last_hand_time"] = now
-            if person_detected:
-                state["last_person_time"] = now
-                self._publish_detection(camera_role, DetectionType.PERSON_DETECTED.value, human_score, now, reason)
-            if motion_detected:
-                state["last_motion_time"] = now
-                self._publish_detection(camera_role, DetectionType.MOTION_DETECTED.value, human_score, now, reason)
-            state["human_score"] = max(float(human_score or 0.0), state.get("human_score", 0.0) * 0.8)
-            self._apply_locked(now, reason=reason)
+            state["human_score"] = float(human_score or 0.0)
+            self._update_signal_locked(state, camera_role, "face", bool(face_detected), now, reason)
+            self._update_signal_locked(state, camera_role, "hand", bool(hand_detected), now, reason)
+            self._update_signal_locked(state, camera_role, "person", bool(person_detected), now, reason, human_score=human_score)
+            self._update_signal_locked(state, camera_role, "motion", bool(motion_detected), now, reason, human_score=human_score)
+            self._maybe_log_snapshot_locked(now)
 
     def update_tamper(self, camera_role, *, tamper_detected=False, reason=""):
         now = time.monotonic()
         with self._lock:
             state = self._state_for(camera_role)
-            if tamper_detected:
-                state["last_tamper_time"] = now
-                self._publish_detection(camera_role, DetectionType.TAMPER_DETECTED.value, 1.0, now, reason)
-            self._apply_locked(now, reason=reason)
+            self._update_signal_locked(state, camera_role, "tamper", bool(tamper_detected), now, reason)
+            self._maybe_log_snapshot_locked(now)
 
     def clear_presence(self, camera_role="internal"):
         with self._lock:
             state = self._state_for(camera_role)
-            state["last_person_time"] = 0.0
-            state["last_motion_time"] = 0.0
-            state["last_face_time"] = 0.0
-            state["last_hand_time"] = 0.0
+            for signal in ("face", "hand", "person", "motion"):
+                self._update_signal_locked(state, camera_role, signal, False, time.monotonic(), "clear_presence")
             state["human_score"] = 0.0
-            self._apply_locked(time.monotonic(), reason="clear_presence")
 
     def clear_tamper(self, camera_role):
         with self._lock:
             state = self._state_for(camera_role)
-            state["last_tamper_time"] = 0.0
-            self._apply_locked(time.monotonic(), reason="clear_tamper")
+            self._update_signal_locked(state, camera_role, "tamper", False, time.monotonic(), "clear_tamper")
 
     def check_timeouts(self):
         with self._lock:
-            self._apply_locked(time.monotonic(), reason="timeout_check")
+            self._maybe_log_snapshot_locked(time.monotonic())
+
+    def _update_signal_locked(self, state, camera_role, signal, active, now, reason, *, human_score=0.0):
+        state_key = f"{signal}_detected"
+        time_key = f"last_{signal}_time"
+        previous = bool(state.get(state_key))
+        if previous == active:
+            if active:
+                state[time_key] = now
+            return
+
+        state[state_key] = active
+        state[time_key] = now if active else 0.0
+        self._log_signal_change(camera_role, signal, active, reason)
+        detection_type = self._transition_event_type(signal, active)
+        if detection_type is None:
+            return
+        confidence = float(human_score or 0.0)
+        if signal == "tamper":
+            confidence = 1.0
+        self._publish_detection(camera_role, detection_type, confidence, now, reason)
 
     def _publish_detection(self, camera_role, detection_type, confidence, timestamp, reason):
         event = DetectionEvent(
@@ -141,10 +147,10 @@ class DetectionStateManager:
             reason=str(reason or ""),
         )
         logger.info(
-            "Detection event published event_id=%s camera=%s detection=%s confidence=%.2f reason=%s",
-            event.event_id,
-            event.camera_type,
+            "Detection transition event=%s camera=%s event_id=%s confidence=%.2f reason=%s",
             event.detection_type,
+            event.camera_type,
+            event.event_id,
             event.confidence,
             event.reason or "n/a",
         )
@@ -156,62 +162,33 @@ class DetectionStateManager:
             self.camera_state[role] = self._new_camera_state()
         return self.camera_state[role]
 
-    def _apply_locked(self, now, *, reason=""):
+    def _maybe_log_snapshot_locked(self, now):
+        if now - self._last_debug_log_at < DEBUG_LOG_INTERVAL:
+            return
+        parts = []
         for role, state in self.camera_state.items():
-            previous_face = state["face_detected"]
-            previous_hand = state["hand_detected"]
-            previous_person = state["person_detected"]
-            previous_motion = state["motion_detected"]
-            previous_tamper = state["tamper_detected"]
-
-            state["face_detected"] = self._within_hold(now, state["last_face_time"], self.security_hold_seconds)
-            state["hand_detected"] = self._within_hold(now, state["last_hand_time"], self.security_hold_seconds)
-            state["person_detected"] = self._within_hold(now, state["last_person_time"], self.security_hold_seconds)
-            state["motion_detected"] = self._within_hold(now, state["last_motion_time"], self.security_hold_seconds)
-            state["tamper_detected"] = self._within_hold(now, state["last_tamper_time"], self.security_hold_seconds)
-
-            if not state["face_detected"]:
-                state["last_face_time"] = 0.0
-            if not state["hand_detected"]:
-                state["last_hand_time"] = 0.0
-            if not state["person_detected"]:
-                state["last_person_time"] = 0.0
-            if not state["motion_detected"]:
-                state["last_motion_time"] = 0.0
-            if not state["tamper_detected"]:
-                state["last_tamper_time"] = 0.0
-
-            if state["face_detected"] != previous_face:
-                self._log_signal_change(role, "face", state["face_detected"], reason)
-            if state["hand_detected"] != previous_hand:
-                self._log_signal_change(role, "hand", state["hand_detected"], reason)
-            if state["person_detected"] != previous_person:
-                self._log_signal_change(role, "person", state["person_detected"], reason)
-            if state["motion_detected"] != previous_motion:
-                self._log_signal_change(role, "motion", state["motion_detected"], reason)
-            if state["tamper_detected"] != previous_tamper:
-                self._log_signal_change(role, "tamper", state["tamper_detected"], reason)
-
-        if now - self._last_debug_log_at >= DEBUG_LOG_INTERVAL:
-            parts = []
-            for role, state in self.camera_state.items():
-                parts.append(
-                    f"{role}:person={state['person_detected']} motion={state['motion_detected']} "
-                    f"face={state['face_detected']} hand={state['hand_detected']} tamper={state['tamper_detected']}"
-                )
-            logger.info("Detection snapshot %s", " | ".join(parts))
-            self._last_debug_log_at = now
+            parts.append(
+                f"{role}:person={state['person_detected']} motion={state['motion_detected']} "
+                f"face={state['face_detected']} hand={state['hand_detected']} tamper={state['tamper_detected']}"
+            )
+        logger.info("Detection snapshot %s", " | ".join(parts))
+        self._last_debug_log_at = now
 
     @staticmethod
-    def _within_hold(now, last_seen_at, hold_seconds):
-        try:
-            return bool(last_seen_at and (now - last_seen_at) < float(hold_seconds))
-        except Exception:
-            return False
+    def _transition_event_type(signal, active):
+        mapping = {
+            ("person", True): DetectionType.PERSON_DETECTED.value,
+            ("person", False): DetectionType.PERSON_CLEARED.value,
+            ("motion", True): DetectionType.MOTION_DETECTED.value,
+            ("motion", False): DetectionType.MOTION_CLEARED.value,
+            ("tamper", True): DetectionType.TAMPER_DETECTED.value,
+            ("tamper", False): DetectionType.TAMPER_CLEARED.value,
+        }
+        return mapping.get((signal, active))
 
     @staticmethod
     def _log_signal_change(camera_role, signal, active, reason):
         if active:
-            logger.info("%s detection active on %s camera: %s", signal, camera_role, reason or signal)
+            logger.info("%s state changed on %s camera: INACTIVE -> ACTIVE reason=%s", signal, camera_role, reason or signal)
         else:
-            logger.info("%s detection cleared on %s camera", signal, camera_role)
+            logger.info("%s state changed on %s camera: ACTIVE -> INACTIVE", signal, camera_role)
