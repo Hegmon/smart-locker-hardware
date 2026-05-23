@@ -14,8 +14,11 @@ class CameraType(str, Enum):
 
 class DetectionType(str, Enum):
     PERSON_DETECTED = "PERSON_DETECTED"
+    PERSON_CLEARED = "PERSON_CLEARED"
     MOTION_DETECTED = "MOTION_DETECTED"
+    MOTION_CLEARED = "MOTION_CLEARED"
     TAMPER_DETECTED = "TAMPER_DETECTED"
+    TAMPER_CLEARED = "TAMPER_CLEARED"
 
 
 @dataclass(frozen=True)
