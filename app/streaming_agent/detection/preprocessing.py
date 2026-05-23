@@ -76,7 +76,6 @@ class QRPreprocessor:
 
             if self._config_value("invert_candidate_enabled", True):
                 yield PreprocessedFrame(f"adaptive_threshold_inverted_{width}", cv2.bitwise_not(adaptive), scale)
-            break
 
     def opencv_candidates(self, frame, attempt_index: int = 0) -> Iterable[PreprocessedFrame]:
         if cv2 is None or np is None:
@@ -85,7 +84,7 @@ class QRPreprocessor:
         working = self._center_roi(frame)
         small, scale = self._resize_for_detection(
             working,
-            target_width=min(int(self._config_value("detection_width", 640)), 640),
+            target_width=min(int(self._config_value("detection_width", 720)), 720),
         )
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if len(small.shape) == 3 else small
         gray = self._safe_gray_image(self._with_quiet_zone(gray))
