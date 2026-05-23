@@ -22,7 +22,11 @@ class SecurityRelayState:
 
 
 class SecurityRelayManager:
-    """Single deadline-driven relay control loop for Relay 1 + Relay 4."""
+    """Single authoritative relay control loop for Relay 1 + Relay 4.
+
+    Relays stay ON while any supported detection source is active.
+    Once the last source clears, a single OFF deadline is scheduled.
+    """
 
     def __init__(self, relay_controller, *, config: RelayConfig | None = None) -> None:
         self.relay_controller = relay_controller
@@ -30,6 +34,7 @@ class SecurityRelayManager:
         self.state = SecurityRelayState()
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
+        self._last_off_check_log_at = 0.0
         self._worker = threading.Thread(target=self._worker_loop, daemon=True, name="security-relay-manager")
         self._worker.start()
 
@@ -44,6 +49,7 @@ class SecurityRelayManager:
         now = time.monotonic()
         with self._condition:
             if detection_type.endswith("_CLEARED"):
+                was_active = source_key in self.state.active_detection_sources
                 self.state.active_detection_sources.discard(source_key)
                 self.state.last_event_by_source.pop(source_key, None)
                 logger.info(
@@ -51,8 +57,19 @@ class SecurityRelayManager:
                     source_key,
                     sorted(self.state.active_detection_sources),
                 )
+                if was_active and not self.state.active_detection_sources and self.state.relay_active:
+                    self.state.off_deadline_ts = now + self.config.timeout_seconds
+                    logger.info(
+                        "ALL DETECTIONS CLEARED: off_deadline=%.2f hold=%.2fs",
+                        self.state.off_deadline_ts,
+                        self.config.timeout_seconds,
+                    )
                 self._condition.notify_all()
                 return True
+
+            if source_key in self.state.active_detection_sources:
+                logger.info("DETECTION IGNORED: reason=already_active source=%s", source_key)
+                return False
 
             last_seen = self.state.last_event_by_source.get(source_key, 0.0)
             age = now - last_seen
@@ -62,9 +79,9 @@ class SecurityRelayManager:
 
             self.state.last_event_by_source[source_key] = now
             self.state.last_detection_ts = now
-            self.state.off_deadline_ts = now + self.config.timeout_seconds
             self.state.active_detection_sources.add(source_key)
-            logger.info("DETECTION ACCEPTED: new_off_deadline=%.2f source=%s", self.state.off_deadline_ts, source_key)
+            self.state.off_deadline_ts = 0.0
+            logger.info("DETECTION ACCEPTED: source=%s hold_mode=active", source_key)
             logger.info(
                 "RELAY STATE: active=%s deadline=%.2f active_sources=%s",
                 self.state.relay_active,
@@ -102,13 +119,16 @@ class SecurityRelayManager:
         while True:
             with self._condition:
                 now = time.monotonic()
+                if self.state.relay_active and self.state.active_detection_sources:
+                    self._condition.wait(timeout=0.1)
+                    continue
                 if self.state.relay_active and self.state.off_deadline_ts > 0:
                     remaining = max(0.0, self.state.off_deadline_ts - now)
-                    logger.info("OFF CHECK: remaining=%.2fs", remaining)
+                    if now - self._last_off_check_log_at >= 1.0 or remaining <= 0.2:
+                        logger.info("OFF CHECK: remaining=%.2fs", remaining)
+                        self._last_off_check_log_at = now
                     if now >= self.state.off_deadline_ts:
                         self._set_relays_locked(False, reason="timeout_expired")
-                        self.state.active_detection_sources.clear()
-                        self.state.last_event_by_source.clear()
                         self.state.last_detection_ts = 0.0
                         self.state.off_deadline_ts = 0.0
                         logger.info("RELAY STATE: active=%s deadline=%.2f", self.state.relay_active, self.state.off_deadline_ts)
