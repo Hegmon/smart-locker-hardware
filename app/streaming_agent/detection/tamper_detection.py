@@ -354,18 +354,6 @@ class TamperDetection:
             elif previous_state == TAMPER_STATE_CLEARING:
                 self._tamper_state = TAMPER_STATE_ACTIVE
                 self._tamper_clearing_started_at = None
-                if self.detection_state_manager is not None:
-                    self.detection_state_manager.update_tamper(
-                        self.camera_role,
-                        tamper_detected=True,
-                        reason=reason,
-                    )
-            elif previous_state == TAMPER_STATE_ACTIVE and self.detection_state_manager is not None:
-                self.detection_state_manager.update_tamper(
-                    self.camera_role,
-                    tamper_detected=True,
-                    reason=reason,
-                )
             self._log_state_transition(previous_state, self._tamper_state, reason)
             return
 
