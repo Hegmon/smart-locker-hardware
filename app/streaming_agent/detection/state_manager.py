@@ -34,6 +34,7 @@ class DetectionStateManager:
         relay_manager: SecurityRelayManager | None = None,
     ):
         self.runtime_config = runtime_config or StreamingAgentRuntimeConfig.from_env()
+        self.motion_security_trigger_enabled = bool(self.runtime_config.person.motion_security_trigger_enabled)
         hold_seconds = self.runtime_config.relay.timeout_seconds
         if security_hold_seconds is not None:
             hold_seconds = max(0.0, float(security_hold_seconds))
@@ -93,7 +94,16 @@ class DetectionStateManager:
             self._update_signal_locked(state, camera_role, "face", bool(face_detected), now, reason)
             self._update_signal_locked(state, camera_role, "hand", bool(hand_detected), now, reason)
             self._update_signal_locked(state, camera_role, "person", bool(person_detected), now, reason, human_score=human_score)
-            self._update_signal_locked(state, camera_role, "motion", bool(motion_detected), now, reason, human_score=human_score)
+            self._update_signal_locked(
+                state,
+                camera_role,
+                "motion",
+                bool(motion_detected),
+                now,
+                reason,
+                human_score=human_score,
+                publish_security_event=self.motion_security_trigger_enabled,
+            )
             self._maybe_log_snapshot_locked(now)
 
     def update_tamper(self, camera_role, *, tamper_detected=False, reason=""):
@@ -122,7 +132,18 @@ class DetectionStateManager:
     def stop(self):
         self.relay_manager.stop()
 
-    def _update_signal_locked(self, state, camera_role, signal, active, now, reason, *, human_score=0.0):
+    def _update_signal_locked(
+        self,
+        state,
+        camera_role,
+        signal,
+        active,
+        now,
+        reason,
+        *,
+        human_score=0.0,
+        publish_security_event=True,
+    ):
         state_key = f"{signal}_detected"
         time_key = f"last_{signal}_time"
         previous = bool(state.get(state_key))
@@ -134,6 +155,14 @@ class DetectionStateManager:
         state[state_key] = active
         state[time_key] = now if active else 0.0
         self._log_signal_change(camera_role, signal, active, reason)
+        if not publish_security_event:
+            logger.info(
+                "Detection transition suppressed for relay: signal=%s camera=%s active=%s reason=motion_security_trigger_disabled",
+                signal,
+                camera_role,
+                active,
+            )
+            return
         detection_type = self._transition_event_type(signal, active)
         if detection_type is None:
             return
