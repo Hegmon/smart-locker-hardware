@@ -105,7 +105,7 @@ class PersonDetector:
         self.model_path = self._resolve_model_path(model_path)
         self.labels_path = Path(labels_path)
         self.confidence_threshold = (
-            max(0.6, self.runtime_config.person.confidence_threshold)
+            self.runtime_config.person.confidence_threshold
             if confidence_threshold is None
             else float(confidence_threshold)
         )
@@ -120,8 +120,16 @@ class PersonDetector:
         self.led_controller = led_controller or RelayController()
         self.detection_state_manager = detection_state_manager
         self._top_detection_log_seconds = _env_float("PERSON_DETECTOR_LOG_TOP_SECONDS", 10.0, minimum=0.0)
-        self._required_detection_frames = _env_int("PERSON_TRIGGER_FRAMES", PERSON_TRIGGER_FRAMES, minimum=1)
-        self._required_clear_frames = _env_int("PERSON_CLEAR_FRAMES", PERSON_CLEAR_FRAMES, minimum=1)
+        self._required_detection_frames = _env_int(
+            "PERSON_TRIGGER_FRAMES",
+            _env_int("PERSON_DETECTION_CONFIRM_FRAMES", PERSON_TRIGGER_FRAMES, minimum=1),
+            minimum=1,
+        )
+        self._required_clear_frames = _env_int(
+            "PERSON_CLEAR_FRAMES",
+            _env_int("PERSON_DETECTION_CLEAR_FRAMES", PERSON_CLEAR_FRAMES, minimum=1),
+            minimum=1,
+        )
         self._motion_trigger_frames = _env_int("MOTION_TRIGGER_FRAMES", MOTION_TRIGGER_FRAMES, minimum=1)
         self._motion_clear_frames = _env_int("MOTION_CLEAR_FRAMES", MOTION_CLEAR_FRAMES, minimum=1)
         self._face_trigger_frames = _env_int("FACE_TRIGGER_FRAMES", FACE_TRIGGER_FRAMES, minimum=1)
@@ -170,6 +178,7 @@ class PersonDetector:
         self._motion_suppressed_until = 0.0
         self._motion_started_at = time.monotonic()
         self._face_enabled = _env_bool("FACE_DETECTION_ENABLED", False)
+        self._face_security_trigger_enabled = _env_bool("FACE_SECURITY_TRIGGER_ENABLED", True)
         self._hand_enabled = _env_bool("HAND_DETECTION_ENABLED", False)
         self._face_cascade = self._load_face_cascade()
         self._face_min_area = _env_float("FACE_MIN_AREA", 0.006, minimum=0.0001, maximum=1.0)
@@ -188,6 +197,7 @@ class PersonDetector:
         self._person_class_ids = {0, 1}
         self._last_person_seen_at = 0.0
         self._last_motion_seen_at = 0.0
+        self._last_face_seen_at = 0.0
         self._last_sequence = -1
         self._processed_frames = 0
         self._fps_window_started_at = time.monotonic()
@@ -357,11 +367,8 @@ class PersonDetector:
     def _clear_stale_led_state(self):
         if not self._led_visible:
             return
-        last_seen_at = max(self._last_person_seen_at, self._last_motion_seen_at)
+        last_seen_at = max(self._last_person_seen_at, self._last_motion_seen_at, self._last_face_seen_at)
         if time.monotonic() - last_seen_at < self._stale_clear_seconds:
-            return
-        if self.detection_state_manager is not None:
-            self.detection_state_manager.check_timeouts()
             return
         logger.info("Internal presence state went stale; clearing detector state")
         self._clear_person_state()
@@ -399,6 +406,8 @@ class PersonDetector:
     @staticmethod
     def _human_score(face_detected, hand_detected, person_detected, motion_detected):
         score = 0.0
+        if face_detected:
+            score += 0.7
         if person_detected:
             score += 0.7
         if motion_detected:
@@ -640,6 +649,7 @@ class PersonDetector:
         self._hand_active = False
         self._last_person_seen_at = 0.0
         self._last_motion_seen_at = 0.0
+        self._last_face_seen_at = 0.0
         self._reset_presence_baselines()
 
     def _prepare_input(self, rgb_frame):
@@ -795,6 +805,7 @@ class PersonDetector:
 
         # face debouncing (prevents flicker from Haar false positives)
         if face_detected:
+            self._last_face_seen_at = now
             self._face_streak += 1
             self._face_clear_streak = 0
             if not self._face_active and self._face_streak >= self._face_trigger_frames:
@@ -862,15 +873,17 @@ class PersonDetector:
 
         # Person/tamper are authoritative security triggers. Motion is tracked for
         # diagnostics and can be enabled as a relay trigger with explicit config.
-        relay_active = self._person_active or (
+        face_security_active = self._face_security_trigger_enabled and self._face_active
+        relay_active = self._person_active or face_security_active or (
             self.runtime_config.person.motion_security_trigger_enabled and self._motion_active
         )
+        effective_person_active = self._person_active or face_security_active
         if self.detection_state_manager is not None:
             self.detection_state_manager.update_presence(
                 "internal",
                 face_detected=self._face_active,
                 hand_detected=self._hand_active,
-                person_detected=self._person_active,
+                person_detected=effective_person_active,
                 motion_detected=self._motion_active,
                 human_score=human_score,
                 reason=reason if relay_active else "",
