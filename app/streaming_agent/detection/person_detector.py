@@ -31,8 +31,6 @@ MODEL_INSTALLER = PROJECT_DIR / "app" / "scripts" / "install_detection_model.sh"
 DETECTION_HOLD_SECONDS = 8.0
 PERSON_TRIGGER_FRAMES = 3
 PERSON_CLEAR_FRAMES = 10
-MOTION_TRIGGER_FRAMES = 2
-MOTION_CLEAR_FRAMES = 8
 FACE_TRIGGER_FRAMES = 2
 FACE_CLEAR_FRAMES = 6
 HAND_TRIGGER_FRAMES = 2
@@ -130,8 +128,6 @@ class PersonDetector:
             _env_int("PERSON_DETECTION_CLEAR_FRAMES", PERSON_CLEAR_FRAMES, minimum=1),
             minimum=1,
         )
-        self._motion_trigger_frames = _env_int("MOTION_TRIGGER_FRAMES", MOTION_TRIGGER_FRAMES, minimum=1)
-        self._motion_clear_frames = _env_int("MOTION_CLEAR_FRAMES", MOTION_CLEAR_FRAMES, minimum=1)
         self._face_trigger_frames = _env_int("FACE_TRIGGER_FRAMES", FACE_TRIGGER_FRAMES, minimum=1)
         self._face_clear_frames = _env_int("FACE_CLEAR_FRAMES", FACE_CLEAR_FRAMES, minimum=1)
         self._hand_trigger_frames = _env_int("HAND_TRIGGER_FRAMES", HAND_TRIGGER_FRAMES, minimum=1)
@@ -143,7 +139,11 @@ class PersonDetector:
             minimum=0.01,
             maximum=1.0,
         )
-        self._stale_clear_seconds = _env_float("PERSON_DETECTION_STALE_CLEAR_SECONDS", 0.35, minimum=0.05)
+        self._stale_clear_seconds = _env_float(
+            "PERSON_DETECTION_STALE_CLEAR_SECONDS",
+            max(0.5, self._clear_seconds + 0.5),
+            minimum=0.05,
+        )
         self._min_box_area = _env_float("PERSON_DETECTION_MIN_BOX_AREA", 0.04, minimum=0.0, maximum=1.0)
         self._max_box_area = _env_float("PERSON_DETECTION_MAX_BOX_AREA", 0.95, minimum=0.01, maximum=1.0)
         self._near_object_enabled = _env_bool("PERSON_NEAR_OBJECT_ENABLED", False)
@@ -154,33 +154,8 @@ class PersonDetector:
         self._baseline_learning_rate = _env_float("PERSON_BASELINE_LEARNING_RATE", 0.01, minimum=0.0, maximum=1.0)
         self._near_baseline_gray = None
         self._near_baseline_brightness = None
-        self._motion_enabled = self.runtime_config.person.motion_enabled
-        self._motion_threshold = self.runtime_config.person.motion_threshold
-        legacy_motion_area = _env_float("PERSON_MOTION_MIN_CONTOUR_AREA", 0.02, minimum=0.0001, maximum=1.0)
-        self._motion_min_contour_area = _env_float(
-            "MOTION_MINIMUM_AREA",
-            self.runtime_config.person.motion_minimum_area or legacy_motion_area,
-            minimum=0.0001,
-            maximum=1.0,
-        )
-        self._motion_pixel_delta = _env_int("PERSON_MOTION_PIXEL_DELTA", 28, minimum=1)
-        self._motion_roi = _env_roi("PERSON_MOTION_ROI", "0.05,0.05,0.95,0.95")
-        self._motion_baseline_gray = None
-        self._motion_subtractor = cv2.createBackgroundSubtractorMOG2(history=80, varThreshold=20, detectShadows=False) if cv2 is not None else None
-        self._last_motion_roi = None
-        self._motion_settle_seconds = _env_float("PERSON_MOTION_SETTLE_SECONDS", 3.0, minimum=0.0)
-        self._motion_scene_shift_fraction = _env_float("PERSON_MOTION_SCENE_SHIFT_FRACTION", 0.75, minimum=0.05, maximum=1.0)
-        self._motion_scene_shift_area = _env_float("PERSON_MOTION_SCENE_SHIFT_AREA", 0.75, minimum=0.05, maximum=1.0)
-        self._last_motion_scene_shift_log_at = 0.0
-        self._motion_rebaseline_seconds = _env_float("PERSON_MOTION_REBASELINE_SECONDS", 1.5, minimum=0.1)
-        self._motion_candidate_started_at = None
-        self._motion_retrigger_cooldown_seconds = _env_float("PERSON_MOTION_RETRIGGER_COOLDOWN_SECONDS", 1.0, minimum=0.0)
-        self._motion_suppressed_until = 0.0
-        self._motion_started_at = time.monotonic()
         self._face_enabled = _env_bool("FACE_DETECTION_ENABLED", False)
-        self._face_security_trigger_enabled = _env_bool("FACE_SECURITY_TRIGGER_ENABLED", True)
         self._hand_enabled = _env_bool("HAND_DETECTION_ENABLED", False)
-        self._body_motion_requires_human_signal = _env_bool("BODY_MOTION_REQUIRES_HUMAN_SIGNAL", True)
         self._face_cascade = self._load_face_cascade()
         self._face_min_area = _env_float("FACE_MIN_AREA", 0.006, minimum=0.0001, maximum=1.0)
         self._hand_min_area = _env_float("HAND_MIN_AREA", 0.015, minimum=0.0001, maximum=1.0)
@@ -197,8 +172,8 @@ class PersonDetector:
         self._labels = []
         self._person_class_ids = {0, 1}
         self._last_person_seen_at = 0.0
-        self._last_motion_seen_at = 0.0
         self._last_face_seen_at = 0.0
+        self._last_hand_seen_at = 0.0
         self._last_sequence = -1
         self._processed_frames = 0
         self._fps_window_started_at = time.monotonic()
@@ -206,8 +181,6 @@ class PersonDetector:
         self._last_top_detection_log_at = 0.0
         self._detection_streak = 0
         self._clear_streak = 0
-        self._motion_streak = 0
-        self._motion_clear_streak = 0
         self._face_streak = 0
         self._face_clear_streak = 0
         self._hand_streak = 0
@@ -215,7 +188,6 @@ class PersonDetector:
         self._face_active = False
         self._hand_active = False
         self._person_active = False
-        self._motion_active = False
         self._person_confidence_ema = 0.0
 
     def start(self):
@@ -236,33 +208,33 @@ class PersonDetector:
             try:
                 self._load_model()
             except Exception as exc:
-                logger.warning("Person model disabled; body-motion detection will continue: %s", exc)
+                logger.warning("Person model disabled; only face/hand signals remain available: %s", exc)
                 self._disable_model()
         else:
             logger.warning(
                 "Person model disabled: model not found at %s. "
                 "Place detect.tflite in app/streaming_agent/detection/models/ "
-                "set PERSON_DETECTOR_MODEL_PATH, or run app/scripts/install_detection_model.sh. "
-                "Body-motion detection will continue without the model.",
+                "set PERSON_DETECTOR_MODEL_PATH, or run app/scripts/install_detection_model.sh.",
                 self.model_path,
             )
             self._disable_model()
 
         self.led_controller.start()
-        self._motion_started_at = time.monotonic()
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True, name="person-detector")
         self._thread.start()
         logger.info(
-            "Person/body detector started; model_enabled=%s model=%s hold=%.1fs threshold=%.2f person_frames=%s/%s motion_frames=%s/%s model_every=%s",
+            "Human presence detector started; model_enabled=%s model=%s clear_grace=%.1fs threshold=%.2f person_frames=%s/%s face_frames=%s/%s hand_frames=%s/%s model_every=%s",
             self._model_enabled(),
             self.model_path,
             self._clear_seconds,
             self.confidence_threshold,
             self._required_detection_frames,
             self._required_clear_frames,
-            self._motion_trigger_frames,
-            self._motion_clear_frames,
+            self._face_trigger_frames,
+            self._face_clear_frames,
+            self._hand_trigger_frames,
+            self._hand_clear_frames,
             self._model_every_n_frames,
         )
 
@@ -346,11 +318,10 @@ class PersonDetector:
             person_detected = False
             face_detected = False
             hand_detected = False
-            motion_detected = False
             human_score = 0.0
             reason = ""
             try:
-                face_detected, hand_detected, person_detected, motion_detected, human_score, reason = self._detect_presence(frame_bytes, sequence)
+                face_detected, hand_detected, person_detected, human_score, reason = self._detect_presence(frame_bytes, sequence)
             except Exception:
                 logger.exception("Person detection failed")
 
@@ -360,7 +331,6 @@ class PersonDetector:
                 face_detected=face_detected,
                 hand_detected=hand_detected,
                 person_detected=person_detected,
-                motion_detected=motion_detected,
                 human_score=human_score,
             )
             self._log_fps()
@@ -368,8 +338,8 @@ class PersonDetector:
     def _clear_stale_led_state(self):
         if not self._led_visible:
             return
-        last_seen_at = max(self._last_person_seen_at, self._last_motion_seen_at, self._last_face_seen_at)
-        if time.monotonic() - last_seen_at < self._stale_clear_seconds:
+        last_seen_at = max(self._last_person_seen_at, self._last_face_seen_at, self._last_hand_seen_at)
+        if not last_seen_at or time.monotonic() - last_seen_at < self._stale_clear_seconds:
             return
         logger.info("Internal presence state went stale; clearing detector state")
         self._clear_person_state()
@@ -383,29 +353,22 @@ class PersonDetector:
         face_detected, face_reason = self._detect_face(frame)
         hand_detected, hand_reason = self._detect_hand(frame)
         near_detected, near_reason = self._detect_near_object(frame)
-        motion_detected, motion_reason = self._detect_motion(frame)
-        if motion_detected and time.monotonic() < self._motion_suppressed_until:
-            motion_detected = False
-            motion_reason = ""
 
         model_detected = False
         model_reason = ""
-        run_model = self._model_enabled() and (
-            sequence % self._model_every_n_frames == 0
-            or motion_detected
-        )
+        run_model = self._model_enabled() and sequence % self._model_every_n_frames == 0
         if run_model:
             model_detected, model_reason = self._detect_model_person(frame)
 
         person_detected = near_detected or model_detected
-        human_score = self._human_score(face_detected, hand_detected, person_detected, motion_detected)
-        reasons = [reason for reason in (face_reason, hand_reason, near_reason, model_reason, motion_reason) if reason]
+        human_score = self._human_score(face_detected, hand_detected, person_detected)
+        reasons = [reason for reason in (face_reason, hand_reason, near_reason, model_reason) if reason]
         if human_score >= self._human_score_threshold:
-            logger.info("Human presence score=%.2f signals face=%s hand=%s person=%s motion=%s", human_score, face_detected, hand_detected, person_detected, motion_detected)
-        return face_detected, hand_detected, person_detected, motion_detected, human_score, "; ".join(reasons)
+            logger.info("Human detected: score=%.2f signals face=%s hand=%s person=%s", human_score, face_detected, hand_detected, person_detected)
+        return face_detected, hand_detected, person_detected, human_score, "; ".join(reasons)
 
     @staticmethod
-    def _human_score(face_detected, hand_detected, person_detected, motion_detected):
+    def _human_score(face_detected, hand_detected, person_detected):
         score = 0.0
         if face_detected:
             score += 0.7
@@ -413,8 +376,6 @@ class PersonDetector:
             score += 0.5
         if person_detected:
             score += 0.7
-        if motion_detected:
-            score += 0.4
         return score
 
     def _detect_model_person(self, frame):
@@ -531,110 +492,9 @@ class PersonDetector:
             )
         return False, ""
 
-    def _detect_motion(self, frame):
-        if not self._motion_enabled:
-            return False, ""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        left, top, right, bottom = self._motion_roi
-        height, width = gray.shape[:2]
-        x1 = int(width * left)
-        y1 = int(height * top)
-        x2 = max(x1 + 1, int(width * right))
-        y2 = max(y1 + 1, int(height * bottom))
-        roi = gray[y1:y2, x1:x2]
-        small = cv2.resize(roi, (160, 120), interpolation=cv2.INTER_AREA)
-        blurred = cv2.GaussianBlur(small, (5, 5), 0)
-
-        if self._motion_baseline_gray is None:
-            self._motion_baseline_gray = blurred.astype(np.float32)
-            if self._motion_subtractor is not None:
-                self._motion_subtractor.apply(blurred)
-            return False, ""
-
-        now = time.monotonic()
-        if self._motion_settle_seconds > 0 and now - self._motion_started_at < self._motion_settle_seconds:
-            cv2.accumulateWeighted(blurred.astype(np.float32), self._motion_baseline_gray, 0.2)
-            if self._motion_subtractor is not None:
-                self._motion_subtractor.apply(blurred, learningRate=0.2)
-            return False, ""
-
-        baseline_u8 = cv2.convertScaleAbs(self._motion_baseline_gray)
-        delta = cv2.absdiff(blurred, baseline_u8)
-        _, mask = cv2.threshold(delta, self._motion_pixel_delta, 255, cv2.THRESH_BINARY)
-        if self._motion_subtractor is not None:
-            fg_mask = self._motion_subtractor.apply(blurred, learningRate=0.01)
-            _, fg_mask = cv2.threshold(fg_mask, 180, 255, cv2.THRESH_BINARY)
-            mask = cv2.bitwise_or(mask, fg_mask)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), dtype=np.uint8))
-        mask = cv2.dilate(mask, None, iterations=2)
-
-        changed_fraction = float(np.count_nonzero(mask)) / float(mask.size)
-        largest_area = 0.0
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            largest_contour = max(contours, key=cv2.contourArea)
-            largest_area = float(cv2.contourArea(largest_contour)) / float(mask.size)
-            x, y, w, h = cv2.boundingRect(largest_contour)
-            self._last_motion_roi = (x / mask.shape[1], y / mask.shape[0], (x + w) / mask.shape[1], (y + h) / mask.shape[0])
-        else:
-            self._last_motion_roi = None
-
-        motion_detected = (
-            changed_fraction >= self._motion_threshold
-            and largest_area >= self._motion_min_contour_area
-        )
-        scene_shift = (
-            changed_fraction >= self._motion_scene_shift_fraction
-            and largest_area >= self._motion_scene_shift_area
-        )
-        if scene_shift:
-            # Whole-frame changes are almost always exposure/autofocus/camera settling,
-            # not body movement. Rebaseline instead of raising a security event.
-            self._motion_baseline_gray = blurred.astype(np.float32)
-            self._motion_candidate_started_at = None
-            if self._motion_subtractor is not None:
-                self._motion_subtractor.apply(blurred, learningRate=1.0)
-            if now - self._last_motion_scene_shift_log_at >= 5.0:
-                self._last_motion_scene_shift_log_at = now
-                logger.info(
-                    "Motion ignored as scene shift on internal camera: change=%.3f largest_area=%.3f roi=%s",
-                    changed_fraction,
-                    largest_area,
-                    self._motion_roi,
-                )
-            return False, ""
-        if motion_detected and self._motion_rebaseline_seconds > 0:
-            if self._motion_candidate_started_at is None:
-                self._motion_candidate_started_at = now
-            elif now - self._motion_candidate_started_at >= self._motion_rebaseline_seconds:
-                self._motion_baseline_gray = blurred.astype(np.float32)
-                self._motion_candidate_started_at = None
-                return False, ""
-        else:
-            self._motion_candidate_started_at = None
-
-        if not motion_detected and self._baseline_learning_rate > 0:
-            cv2.accumulateWeighted(
-                blurred.astype(np.float32),
-                self._motion_baseline_gray,
-                self._baseline_learning_rate,
-            )
-        if motion_detected:
-            return True, (
-                f"body_motion change={changed_fraction:.3f} "
-                f"largest_area={largest_area:.3f} roi={self._motion_roi}"
-            )
-        return False, ""
-
     def _reset_presence_baselines(self):
         self._near_baseline_gray = None
         self._near_baseline_brightness = None
-        self._motion_baseline_gray = None
-        self._motion_subtractor = cv2.createBackgroundSubtractorMOG2(history=80, varThreshold=20, detectShadows=False) if cv2 is not None else None
-        self._last_motion_roi = None
-        self._motion_candidate_started_at = None
-        self._motion_suppressed_until = 0.0
 
     def _clear_person_state(self):
         if self.detection_state_manager is not None:
@@ -643,19 +503,16 @@ class PersonDetector:
         self._led_visible = False
         self._detection_streak = 0
         self._clear_streak = 0
-        self._motion_streak = 0
-        self._motion_clear_streak = 0
         self._face_streak = 0
         self._face_clear_streak = 0
         self._hand_streak = 0
         self._hand_clear_streak = 0
         self._person_active = False
-        self._motion_active = False
         self._face_active = False
         self._hand_active = False
         self._last_person_seen_at = 0.0
-        self._last_motion_seen_at = 0.0
         self._last_face_seen_at = 0.0
+        self._last_hand_seen_at = 0.0
         self._reset_presence_baselines()
 
     def _prepare_input(self, rgb_frame):
@@ -796,7 +653,6 @@ class PersonDetector:
         face_detected=None,
         hand_detected=None,
         person_detected=None,
-        motion_detected=None,
         human_score=0.0,
     ):
         now = time.monotonic()
@@ -806,8 +662,6 @@ class PersonDetector:
             hand_detected = False
         if person_detected is None:
             person_detected = bool(detected)
-        if motion_detected is None:
-            motion_detected = bool(detected)
 
         # face debouncing (prevents flicker from Haar false positives)
         if face_detected:
@@ -820,12 +674,18 @@ class PersonDetector:
         else:
             self._face_clear_streak += 1
             self._face_streak = 0
-            if self._face_active and self._face_clear_streak >= self._face_clear_frames:
+            clear_age = now - self._last_face_seen_at if self._last_face_seen_at else 0.0
+            if (
+                self._face_active
+                and self._face_clear_streak >= self._face_clear_frames
+                and clear_age > self._clear_seconds
+            ):
                 self._face_active = False
-                logger.info("Face detection cleared after consecutive misses")
+                logger.info("Face detection cleared after %.2fs without face signal", clear_age)
 
         # hand debouncing (color blob can flicker)
         if hand_detected:
+            self._last_hand_seen_at = now
             self._hand_streak += 1
             self._hand_clear_streak = 0
             if not self._hand_active and self._hand_streak >= self._hand_trigger_frames:
@@ -834,9 +694,14 @@ class PersonDetector:
         else:
             self._hand_clear_streak += 1
             self._hand_streak = 0
-            if self._hand_active and self._hand_clear_streak >= self._hand_clear_frames:
+            clear_age = now - self._last_hand_seen_at if self._last_hand_seen_at else 0.0
+            if (
+                self._hand_active
+                and self._hand_clear_streak >= self._hand_clear_frames
+                and clear_age > self._clear_seconds
+            ):
                 self._hand_active = False
-                logger.info("Hand detection cleared after consecutive misses")
+                logger.info("Hand detection cleared after %.2fs without hand signal", clear_age)
 
         if person_detected:
             self._last_person_seen_at = now
@@ -855,46 +720,22 @@ class PersonDetector:
                 and clear_age > self._clear_seconds
             ):
                 self._person_active = False
-                logger.info("Person detection cleared after %.2fs", clear_age)
+                logger.info("Person detection cleared after %.2fs without person signal", clear_age)
 
-        if motion_detected:
-            self._last_motion_seen_at = now
-            self._motion_streak += 1
-            self._motion_clear_streak = 0
-            if not self._motion_active and self._motion_streak >= self._motion_trigger_frames:
-                self._motion_active = True
-                logger.info("Body movement detected on internal camera: %s", reason or "body_motion")
-        else:
-            self._motion_clear_streak += 1
-            self._motion_streak = 0
-            clear_age = now - self._last_motion_seen_at if self._last_motion_seen_at else 0.0
-            if (
-                self._motion_active
-                and self._motion_clear_streak >= self._motion_clear_frames
-                and clear_age > self._clear_seconds
-            ):
-                self._motion_active = False
-                self._motion_suppressed_until = now + self._motion_retrigger_cooldown_seconds
-                logger.info("Motion detection cleared after %.2fs", clear_age)
-
-        # Person/tamper are authoritative security triggers. Motion is tracked for
-        # diagnostics and can be enabled as a relay trigger with explicit config.
-        face_security_active = self._face_security_trigger_enabled and self._face_active
         body_part_active = self._person_active or self._face_active or self._hand_active
-        motion_security_active = self._motion_active and (
-            body_part_active or not self._body_motion_requires_human_signal
-        )
-        relay_active = self._person_active or face_security_active or (
-            self.runtime_config.person.motion_security_trigger_enabled and motion_security_active
-        )
-        effective_person_active = self._person_active or face_security_active
+        previous_relay_active = self._led_visible
+        relay_active = body_part_active
+        effective_person_active = body_part_active
+        if relay_active and not previous_relay_active:
+            logger.info("Human detected on internal camera; requesting Relay 1 + Relay 4 ON")
+        elif previous_relay_active and not relay_active:
+            logger.info("Human lost timeout on internal camera; requesting Relay 1 + Relay 4 OFF")
         if self.detection_state_manager is not None:
             self.detection_state_manager.update_presence(
                 "internal",
                 face_detected=self._face_active,
                 hand_detected=self._hand_active,
                 person_detected=effective_person_active,
-                motion_detected=motion_security_active,
                 human_score=human_score,
                 reason=reason if relay_active else "",
             )
