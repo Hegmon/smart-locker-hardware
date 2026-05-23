@@ -244,9 +244,18 @@ class RelayController:
             return "security_event" in self._red_sources or "security_event" in self._buzzer_sources
 
     def is_security_relays_on(self):
-        """Return True if the security source is requesting the relay pair."""
+        """Return True if Relay 1 or Relay 4 still appears physically active."""
         with self._lock:
-            return self.is_security_source_active()
+            if self._enabled and self._gpio is not None and hasattr(self._gpio, "input"):
+                try:
+                    red_state = self._gpio.input(self.red_led_pin)
+                    buzzer_state = self._gpio.input(self.buzzer_pin)
+                    if self.active_low:
+                        return (red_state == self._gpio.LOW) or (buzzer_state == self._gpio.LOW)
+                    return (red_state == self._gpio.HIGH) or (buzzer_state == self._gpio.HIGH)
+                except Exception:
+                    logger.exception("Failed to read GPIO inputs for security relay verification")
+            return bool(self._red_on or self._buzzer_on)
 
     def force_security_relays_off(self):
         """Force the security relays (red LED/buzzer) to OFF.
