@@ -22,7 +22,9 @@ QR_CAMERA_CONTROLS = (
     "white_balance_automatic=1",
     "white_balance_temperature_auto=1",
     "power_line_frequency=1",
-    "sharpness=160",
+    "sharpness=220",
+    "contrast=40",
+    "saturation=70",
     "backlight_compensation=0",
 )
 QR_CONTROL_COOLDOWN_SECONDS = float(os.getenv("QR_CAMERA_CONTROL_COOLDOWN_SECONDS", "15"))
