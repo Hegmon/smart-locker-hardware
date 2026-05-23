@@ -171,6 +171,7 @@ class PersonDetector:
         self._body_cascades = self._load_body_cascades()
         self._face_min_area = _env_float("FACE_MIN_AREA", 0.006, minimum=0.0001, maximum=1.0)
         self._hand_min_area = _env_float("HAND_MIN_AREA", 0.015, minimum=0.0001, maximum=1.0)
+        self._hand_standalone_min_area = _env_float("HAND_STANDALONE_MIN_AREA", 0.08, minimum=0.0001, maximum=1.0)
         self._body_min_area = _env_float("BODY_MIN_AREA", 0.02, minimum=0.0001, maximum=1.0)
         self._human_score_threshold = _env_float("HUMAN_SCORE_THRESHOLD", 0.7, minimum=0.1, maximum=1.0)
 
@@ -193,6 +194,7 @@ class PersonDetector:
         self._fps_window_started_at = time.monotonic()
         self._led_visible = False
         self._last_top_detection_log_at = 0.0
+        self._last_ignored_hand_log_at = 0.0
         self._detection_streak = 0
         self._clear_streak = 0
         self._face_streak = 0
@@ -384,7 +386,7 @@ class PersonDetector:
             self.frame_buffer.channels,
         )
         face_detected, face_reason = self._detect_face(frame)
-        hand_detected, hand_reason = self._detect_hand(frame)
+        raw_hand_detected, hand_reason, hand_area = self._detect_hand(frame)
         body_detected, body_reason = self._detect_body_parts(frame)
         near_detected, near_reason = self._detect_near_object(frame)
 
@@ -393,6 +395,14 @@ class PersonDetector:
         run_model = self._model_enabled() and sequence % self._model_every_n_frames == 0
         if run_model:
             model_detected, model_reason = self._detect_model_person(frame)
+
+        hand_detected = self._hand_signal_is_valid(
+            raw_hand_detected,
+            hand_area,
+            has_supporting_signal=face_detected or body_detected or near_detected or model_detected,
+        )
+        if raw_hand_detected and not hand_detected:
+            hand_reason = ""
 
         person_detected = near_detected or model_detected or body_detected
         human_score = self._human_score(
@@ -454,7 +464,7 @@ class PersonDetector:
         if (
             self._person_active
             and best_person_score >= self._confidence_hold_threshold
-            and self._person_confidence_ema >= self._confidence_hold_threshold
+            and self._person_confidence_ema >= self.confidence_threshold
         ):
             return True, f"person_model_hold score={best_person_score:.2f} smooth={self._person_confidence_ema:.2f}"
         return False, ""
@@ -483,7 +493,7 @@ class PersonDetector:
 
     def _detect_hand(self, frame):
         if not self._hand_enabled:
-            return False, ""
+            return False, "", 0.0
         height, width = frame.shape[:2]
         scale_width = 320
         scale = scale_width / float(width) if width > scale_width else 1.0
@@ -491,16 +501,42 @@ class PersonDetector:
         ycrcb = cv2.cvtColor(small, cv2.COLOR_BGR2YCrCb)
         lower = np.array([0, 133, 77], dtype=np.uint8)
         upper = np.array([255, 173, 127], dtype=np.uint8)
-        mask = cv2.inRange(ycrcb, lower, upper)
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        skin_mask = cv2.inRange(ycrcb, lower, upper)
+        hsv_mask = cv2.inRange(hsv, np.array([0, 20, 35], dtype=np.uint8), np.array([35, 210, 255], dtype=np.uint8))
+        mask = cv2.bitwise_and(skin_mask, hsv_mask)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), dtype=np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
-            return False, ""
-        area = max(float(cv2.contourArea(contour)) for contour in contours) / float(mask.size)
+            return False, "", 0.0
+        largest = max(contours, key=cv2.contourArea)
+        area_pixels = float(cv2.contourArea(largest))
+        area = area_pixels / float(mask.size)
+        x, y, w, h = cv2.boundingRect(largest)
+        rect_area = float(max(1, w * h))
+        extent = area_pixels / rect_area
+        aspect = w / float(max(1, h))
         if area >= self._hand_min_area:
-            return True, f"hand area={area:.3f}"
-        return False, ""
+            if 0.20 <= extent <= 0.95 and 0.25 <= aspect <= 4.0:
+                return True, f"hand area={area:.3f} extent={extent:.2f} aspect={aspect:.2f}", area
+        return False, "", area
+
+    def _hand_signal_is_valid(self, hand_detected, hand_area, *, has_supporting_signal):
+        if not hand_detected:
+            return False
+        if has_supporting_signal or hand_area >= self._hand_standalone_min_area:
+            return True
+        now = time.monotonic()
+        if now - self._last_ignored_hand_log_at >= 5.0:
+            self._last_ignored_hand_log_at = now
+            logger.info(
+                "Hand-like blob ignored on internal camera: area=%.3f standalone_min=%.3f supporting_signal=%s",
+                hand_area,
+                self._hand_standalone_min_area,
+                has_supporting_signal,
+            )
+        return False
 
     def _detect_body_parts(self, frame):
         if not self._body_part_enabled or not self._body_cascades:
