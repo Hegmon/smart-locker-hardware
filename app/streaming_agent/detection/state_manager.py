@@ -34,7 +34,6 @@ class DetectionStateManager:
         relay_manager: SecurityRelayManager | None = None,
     ):
         self.runtime_config = runtime_config or StreamingAgentRuntimeConfig.from_env()
-        self.motion_security_trigger_enabled = bool(self.runtime_config.person.motion_security_trigger_enabled)
         hold_seconds = self.runtime_config.relay.timeout_seconds
         if security_hold_seconds is not None:
             hold_seconds = max(0.0, float(security_hold_seconds))
@@ -66,13 +65,11 @@ class DetectionStateManager:
             "face_detected": False,
             "hand_detected": False,
             "person_detected": False,
-            "motion_detected": False,
             "tamper_detected": False,
             "human_score": 0.0,
             "last_face_time": 0.0,
             "last_hand_time": 0.0,
             "last_person_time": 0.0,
-            "last_motion_time": 0.0,
             "last_tamper_time": 0.0,
         }
 
@@ -83,7 +80,6 @@ class DetectionStateManager:
         face_detected=False,
         hand_detected=False,
         person_detected=False,
-        motion_detected=False,
         human_score=0.0,
         reason="",
     ):
@@ -94,22 +90,6 @@ class DetectionStateManager:
             self._update_signal_locked(state, camera_role, "face", bool(face_detected), now, reason)
             self._update_signal_locked(state, camera_role, "hand", bool(hand_detected), now, reason)
             self._update_signal_locked(state, camera_role, "person", bool(person_detected), now, reason, human_score=human_score)
-            body_signal_active = bool(face_detected or hand_detected or person_detected)
-            motion_active = (
-                str(camera_role or "internal") == "internal"
-                and self.motion_security_trigger_enabled
-                and bool(motion_detected)
-                and body_signal_active
-            )
-            self._update_signal_locked(
-                state,
-                camera_role,
-                "motion",
-                motion_active,
-                now,
-                reason if motion_active else "motion_disabled",
-                human_score=human_score,
-            )
             self._maybe_log_snapshot_locked(now)
 
     def update_tamper(self, camera_role, *, tamper_detected=False, reason=""):
@@ -122,7 +102,7 @@ class DetectionStateManager:
     def clear_presence(self, camera_role="internal"):
         with self._lock:
             state = self._state_for(camera_role)
-            for signal in ("face", "hand", "person", "motion"):
+            for signal in ("face", "hand", "person"):
                 self._update_signal_locked(state, camera_role, signal, False, time.monotonic(), "clear_presence")
             state["human_score"] = 0.0
 
@@ -163,7 +143,7 @@ class DetectionStateManager:
         self._log_signal_change(camera_role, signal, active, reason)
         if not publish_security_event:
             logger.info(
-                "Detection transition suppressed for relay: signal=%s camera=%s active=%s reason=motion_security_trigger_disabled",
+                "Detection transition suppressed for relay: signal=%s camera=%s active=%s reason=publish_security_event_disabled",
                 signal,
                 camera_role,
                 active,
@@ -206,12 +186,10 @@ class DetectionStateManager:
             return
         relay_snapshot = self.relay_manager.active_snapshot()
         logger.info(
-            "FINAL DETECTION STATE: internal:person=%s motion=%s tamper=%s | external:person=%s motion=%s tamper=%s | relay_active=%s gpio_state=%s relay_state=%s active_sources=%s",
+            "FINAL DETECTION STATE: internal:person=%s tamper=%s | external:person=%s tamper=%s | relay_active=%s gpio_state=%s relay_state=%s active_sources=%s",
             self.camera_state["internal"]["person_detected"],
-            self.camera_state["internal"]["motion_detected"],
             self.camera_state["internal"]["tamper_detected"],
             self.camera_state["external"]["person_detected"],
-            self.camera_state["external"]["motion_detected"],
             self.camera_state["external"]["tamper_detected"],
             relay_snapshot["relay_active"],
             relay_snapshot["gpio_state"],
@@ -225,8 +203,6 @@ class DetectionStateManager:
         mapping = {
             ("person", True): DetectionType.PERSON_DETECTED.value,
             ("person", False): DetectionType.PERSON_CLEARED.value,
-            ("motion", True): DetectionType.MOTION_DETECTED.value,
-            ("motion", False): DetectionType.MOTION_CLEARED.value,
             ("tamper", True): DetectionType.TAMPER_DETECTED.value,
             ("tamper", False): DetectionType.TAMPER_CLEARED.value,
         }
