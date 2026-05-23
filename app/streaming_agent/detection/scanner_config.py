@@ -105,6 +105,7 @@ class QRScannerConfig:
     gpio_active_low: bool = True
     default_unlock_seconds: int = 5
     failure_signal_seconds: float = 15.0
+    failure_signal_enabled: bool = False
     attention_hold_seconds: float = 2.5
     require_jwt_shape: bool = False
 
@@ -171,6 +172,7 @@ class QRScannerConfig:
                 _env_float("ALERT_DURATION", 15.0, minimum=0.1),
                 minimum=0.1,
             ),
+            failure_signal_enabled=_env_bool("QR_FAILURE_SIGNAL_ENABLED", False),
             attention_hold_seconds=_env_float("QR_ATTENTION_HOLD_SECONDS", 2.5, minimum=0.1),
             require_jwt_shape=_env_bool("QR_REQUIRE_JWT_SHAPE", False),
         )
