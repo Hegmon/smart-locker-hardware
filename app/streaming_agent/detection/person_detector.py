@@ -35,6 +35,8 @@ FACE_TRIGGER_FRAMES = 2
 FACE_CLEAR_FRAMES = 6
 HAND_TRIGGER_FRAMES = 2
 HAND_CLEAR_FRAMES = 6
+BODY_TRIGGER_FRAMES = 1
+BODY_CLEAR_FRAMES = 6
 
 # Hysteresis thresholds to eliminate oscillation around the decision boundary
 def _env_float(name, default, minimum=None, maximum=None):
@@ -132,12 +134,20 @@ class PersonDetector:
         self._face_clear_frames = _env_int("FACE_CLEAR_FRAMES", FACE_CLEAR_FRAMES, minimum=1)
         self._hand_trigger_frames = _env_int("HAND_TRIGGER_FRAMES", HAND_TRIGGER_FRAMES, minimum=1)
         self._hand_clear_frames = _env_int("HAND_CLEAR_FRAMES", HAND_CLEAR_FRAMES, minimum=1)
+        self._body_trigger_frames = _env_int("BODY_TRIGGER_FRAMES", BODY_TRIGGER_FRAMES, minimum=1)
+        self._body_clear_frames = _env_int("BODY_CLEAR_FRAMES", BODY_CLEAR_FRAMES, minimum=1)
         self._clear_seconds = _env_float("PERSON_DETECTION_CLEAR_SECONDS", self.led_off_delay_seconds, minimum=0.0)
         self._confidence_smoothing_alpha = _env_float(
             "PERSON_CONFIDENCE_SMOOTHING_ALPHA",
             0.4,
             minimum=0.01,
             maximum=1.0,
+        )
+        self._confidence_hold_threshold = _env_float(
+            "PERSON_CONFIDENCE_HOLD_THRESHOLD",
+            max(0.3, self.confidence_threshold - 0.12),
+            minimum=0.1,
+            maximum=0.95,
         )
         self._stale_clear_seconds = _env_float(
             "PERSON_DETECTION_STALE_CLEAR_SECONDS",
@@ -156,9 +166,12 @@ class PersonDetector:
         self._near_baseline_brightness = None
         self._face_enabled = _env_bool("FACE_DETECTION_ENABLED", False)
         self._hand_enabled = _env_bool("HAND_DETECTION_ENABLED", False)
+        self._body_part_enabled = _env_bool("BODY_PART_DETECTION_ENABLED", True)
         self._face_cascade = self._load_face_cascade()
+        self._body_cascades = self._load_body_cascades()
         self._face_min_area = _env_float("FACE_MIN_AREA", 0.006, minimum=0.0001, maximum=1.0)
         self._hand_min_area = _env_float("HAND_MIN_AREA", 0.015, minimum=0.0001, maximum=1.0)
+        self._body_min_area = _env_float("BODY_MIN_AREA", 0.02, minimum=0.0001, maximum=1.0)
         self._human_score_threshold = _env_float("HUMAN_SCORE_THRESHOLD", 0.7, minimum=0.1, maximum=1.0)
 
         self._running = False
@@ -174,6 +187,7 @@ class PersonDetector:
         self._last_person_seen_at = 0.0
         self._last_face_seen_at = 0.0
         self._last_hand_seen_at = 0.0
+        self._last_body_seen_at = 0.0
         self._last_sequence = -1
         self._processed_frames = 0
         self._fps_window_started_at = time.monotonic()
@@ -185,8 +199,11 @@ class PersonDetector:
         self._face_clear_streak = 0
         self._hand_streak = 0
         self._hand_clear_streak = 0
+        self._body_streak = 0
+        self._body_clear_streak = 0
         self._face_active = False
         self._hand_active = False
+        self._body_active = False
         self._person_active = False
         self._person_confidence_ema = 0.0
 
@@ -224,7 +241,7 @@ class PersonDetector:
         self._thread = threading.Thread(target=self._run, daemon=True, name="person-detector")
         self._thread.start()
         logger.info(
-            "Human presence detector started; model_enabled=%s model=%s clear_grace=%.1fs threshold=%.2f person_frames=%s/%s face_frames=%s/%s hand_frames=%s/%s model_every=%s",
+            "Human presence detector started; model_enabled=%s model=%s clear_grace=%.1fs threshold=%.2f person_frames=%s/%s face_frames=%s/%s hand_frames=%s/%s body_frames=%s/%s model_every=%s",
             self._model_enabled(),
             self.model_path,
             self._clear_seconds,
@@ -235,6 +252,8 @@ class PersonDetector:
             self._face_clear_frames,
             self._hand_trigger_frames,
             self._hand_clear_frames,
+            self._body_trigger_frames,
+            self._body_clear_frames,
             self._model_every_n_frames,
         )
 
@@ -318,10 +337,18 @@ class PersonDetector:
             person_detected = False
             face_detected = False
             hand_detected = False
+            body_detected = False
             human_score = 0.0
             reason = ""
             try:
-                face_detected, hand_detected, person_detected, human_score, reason = self._detect_presence(frame_bytes, sequence)
+                (
+                    face_detected,
+                    hand_detected,
+                    body_detected,
+                    person_detected,
+                    human_score,
+                    reason,
+                ) = self._detect_presence(frame_bytes, sequence)
             except Exception:
                 logger.exception("Person detection failed")
 
@@ -330,6 +357,7 @@ class PersonDetector:
                 reason,
                 face_detected=face_detected,
                 hand_detected=hand_detected,
+                body_detected=body_detected,
                 person_detected=person_detected,
                 human_score=human_score,
             )
@@ -338,7 +366,12 @@ class PersonDetector:
     def _clear_stale_led_state(self):
         if not self._led_visible:
             return
-        last_seen_at = max(self._last_person_seen_at, self._last_face_seen_at, self._last_hand_seen_at)
+        last_seen_at = max(
+            self._last_person_seen_at,
+            self._last_face_seen_at,
+            self._last_hand_seen_at,
+            self._last_body_seen_at,
+        )
         if not last_seen_at or time.monotonic() - last_seen_at < self._stale_clear_seconds:
             return
         logger.info("Internal presence state went stale; clearing detector state")
@@ -352,6 +385,7 @@ class PersonDetector:
         )
         face_detected, face_reason = self._detect_face(frame)
         hand_detected, hand_reason = self._detect_hand(frame)
+        body_detected, body_reason = self._detect_body_parts(frame)
         near_detected, near_reason = self._detect_near_object(frame)
 
         model_detected = False
@@ -360,22 +394,36 @@ class PersonDetector:
         if run_model:
             model_detected, model_reason = self._detect_model_person(frame)
 
-        person_detected = near_detected or model_detected
-        human_score = self._human_score(face_detected, hand_detected, person_detected)
-        reasons = [reason for reason in (face_reason, hand_reason, near_reason, model_reason) if reason]
+        person_detected = near_detected or model_detected or body_detected
+        human_score = self._human_score(
+            face_detected,
+            hand_detected,
+            model_detected or near_detected,
+            body_detected,
+        )
+        reasons = [reason for reason in (face_reason, hand_reason, body_reason, near_reason, model_reason) if reason]
         if human_score >= self._human_score_threshold:
-            logger.info("Human detected: score=%.2f signals face=%s hand=%s person=%s", human_score, face_detected, hand_detected, person_detected)
-        return face_detected, hand_detected, person_detected, human_score, "; ".join(reasons)
+            logger.info(
+                "Human detected: score=%.2f signals face=%s hand=%s body=%s person=%s",
+                human_score,
+                face_detected,
+                hand_detected,
+                body_detected,
+                person_detected,
+            )
+        return face_detected, hand_detected, body_detected, person_detected, human_score, "; ".join(reasons)
 
     @staticmethod
-    def _human_score(face_detected, hand_detected, person_detected):
+    def _human_score(face_detected, hand_detected, person_detected, body_detected=False):
         score = 0.0
         if face_detected:
             score += 0.7
         if hand_detected:
-            score += 0.5
+            score += 0.55
         if person_detected:
-            score += 0.7
+            score += 0.8
+        if body_detected:
+            score += 0.65
         return score
 
     def _detect_model_person(self, frame):
@@ -401,8 +449,14 @@ class PersonDetector:
 
         alpha = self._confidence_smoothing_alpha
         self._person_confidence_ema = alpha * best_person_score + (1.0 - alpha) * self._person_confidence_ema
-        if best_person_score >= self.confidence_threshold and self._person_confidence_ema >= self.confidence_threshold:
+        if best_person_score >= self.confidence_threshold and self._person_confidence_ema >= self._confidence_hold_threshold:
             return True, f"person_model score={best_person_score:.2f} smooth={self._person_confidence_ema:.2f}"
+        if (
+            self._person_active
+            and best_person_score >= self._confidence_hold_threshold
+            and self._person_confidence_ema >= self._confidence_hold_threshold
+        ):
+            return True, f"person_model_hold score={best_person_score:.2f} smooth={self._person_confidence_ema:.2f}"
         return False, ""
 
     def _detect_face(self, frame):
@@ -446,6 +500,41 @@ class PersonDetector:
         area = max(float(cv2.contourArea(contour)) for contour in contours) / float(mask.size)
         if area >= self._hand_min_area:
             return True, f"hand area={area:.3f}"
+        return False, ""
+
+    def _detect_body_parts(self, frame):
+        if not self._body_part_enabled or not self._body_cascades:
+            return False, ""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        height, width = gray.shape[:2]
+        scale_width = 384
+        scale = scale_width / float(width) if width > scale_width else 1.0
+        small = (
+            cv2.resize(gray, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+            if scale < 1.0
+            else gray
+        )
+        frame_area = float(small.shape[0] * small.shape[1])
+        best_name = ""
+        best_area = 0.0
+        for name, cascade in self._body_cascades:
+            try:
+                detections = cascade.detectMultiScale(
+                    small,
+                    scaleFactor=1.08,
+                    minNeighbors=3,
+                    minSize=(28, 28),
+                )
+            except Exception:
+                continue
+            if len(detections) == 0:
+                continue
+            largest = max((w * h for (_x, _y, w, h) in detections), default=0) / frame_area
+            if largest > best_area:
+                best_area = largest
+                best_name = name
+        if best_area >= self._body_min_area:
+            return True, f"{best_name} area={best_area:.3f}"
         return False, ""
 
     def _detect_near_object(self, frame):
@@ -507,12 +596,16 @@ class PersonDetector:
         self._face_clear_streak = 0
         self._hand_streak = 0
         self._hand_clear_streak = 0
+        self._body_streak = 0
+        self._body_clear_streak = 0
         self._person_active = False
         self._face_active = False
         self._hand_active = False
+        self._body_active = False
         self._last_person_seen_at = 0.0
         self._last_face_seen_at = 0.0
         self._last_hand_seen_at = 0.0
+        self._last_body_seen_at = 0.0
         self._reset_presence_baselines()
 
     def _prepare_input(self, rgb_frame):
@@ -652,6 +745,7 @@ class PersonDetector:
         *,
         face_detected=None,
         hand_detected=None,
+        body_detected=None,
         person_detected=None,
         human_score=0.0,
     ):
@@ -660,6 +754,8 @@ class PersonDetector:
             face_detected = False
         if hand_detected is None:
             hand_detected = False
+        if body_detected is None:
+            body_detected = False
         if person_detected is None:
             person_detected = bool(detected)
 
@@ -703,6 +799,25 @@ class PersonDetector:
                 self._hand_active = False
                 logger.info("Hand detection cleared after %.2fs without hand signal", clear_age)
 
+        if body_detected:
+            self._last_body_seen_at = now
+            self._body_streak += 1
+            self._body_clear_streak = 0
+            if not self._body_active and self._body_streak >= self._body_trigger_frames:
+                self._body_active = True
+                logger.info("Body part detected on internal camera: %s", reason or "body")
+        else:
+            self._body_clear_streak += 1
+            self._body_streak = 0
+            clear_age = now - self._last_body_seen_at if self._last_body_seen_at else 0.0
+            if (
+                self._body_active
+                and self._body_clear_streak >= self._body_clear_frames
+                and clear_age > self._clear_seconds
+            ):
+                self._body_active = False
+                logger.info("Body part detection cleared after %.2fs without body signal", clear_age)
+
         if person_detected:
             self._last_person_seen_at = now
             self._detection_streak += 1
@@ -722,7 +837,7 @@ class PersonDetector:
                 self._person_active = False
                 logger.info("Person detection cleared after %.2fs without person signal", clear_age)
 
-        body_part_active = self._person_active or self._face_active or self._hand_active
+        body_part_active = self._person_active or self._face_active or self._hand_active or self._body_active
         previous_relay_active = self._led_visible
         relay_active = body_part_active
         effective_person_active = body_part_active
@@ -783,16 +898,47 @@ class PersonDetector:
     def _load_face_cascade():
         if cv2 is None:
             return None
+        cascade = PersonDetector._load_cascade_file("haarcascade_frontalface_default.xml")
+        if cascade is not None:
+            logger.info("Face cascade loaded")
+            return cascade
+        logger.warning("Face cascade not found; face signal disabled")
+        return None
+
+    @staticmethod
+    def _load_body_cascades():
+        if cv2 is None:
+            return []
+        cascade_files = (
+            ("upper_body", "haarcascade_upperbody.xml"),
+            ("full_body", "haarcascade_fullbody.xml"),
+            ("lower_body", "haarcascade_lowerbody.xml"),
+        )
+        loaded = []
+        for name, filename in cascade_files:
+            cascade = PersonDetector._load_cascade_file(filename)
+            if cascade is not None:
+                loaded.append((name, cascade))
+        if loaded:
+            logger.info("Loaded body cascades: %s", [name for name, _cascade in loaded])
+        else:
+            logger.warning("Body cascades not found; body-part fallback will rely on person model and hand/face signals")
+        return loaded
+
+    @staticmethod
+    def _load_cascade_file(filename):
+        if cv2 is None:
+            return None
         cascade_candidates = []
         data_module = getattr(cv2, "data", None)
         haar_dir = getattr(data_module, "haarcascades", "") if data_module is not None else ""
         if haar_dir:
-            cascade_candidates.append(Path(haar_dir) / "haarcascade_frontalface_default.xml")
+            cascade_candidates.append(Path(haar_dir) / filename)
         cascade_candidates.extend(
             [
-                Path("/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"),
-                Path("/usr/share/opencv/haarcascades/haarcascade_frontalface_default.xml"),
-                Path("/usr/local/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"),
+                Path("/usr/share/opencv4/haarcascades") / filename,
+                Path("/usr/share/opencv/haarcascades") / filename,
+                Path("/usr/local/share/opencv4/haarcascades") / filename,
             ]
         )
         for cascade_path in cascade_candidates:
@@ -800,9 +946,8 @@ class PersonDetector:
                 continue
             cascade = cv2.CascadeClassifier(str(cascade_path))
             if not cascade.empty():
-                logger.info("Face cascade loaded from %s", cascade_path)
+                logger.info("Cascade loaded from %s", cascade_path)
                 return cascade
-        logger.warning("Face cascade not found; face signal disabled")
         return None
 
     def _install_missing_model(self):
