@@ -4,28 +4,43 @@ from urllib.parse import urljoin
 from app.streaming_agent.config_loader import get_device_id
 
 
+def _env_int(name, default, minimum=None):
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    return value
+
+
 MEDIAMTX_HOST = os.getenv("MEDIAMTX_HOST", "69.62.125.223").strip() or "69.62.125.223"
 MEDIAMTX_RTSP_PORT = int(os.getenv("MEDIAMTX_RTSP_PORT", "8554"))
 STREAM_PUBLIC_BASE_URL = os.getenv("STREAM_PUBLIC_BASE_URL", "").strip().rstrip("/")
-QR_FRAME_WIDTH = int(os.getenv("QR_FRAME_WIDTH", "1280"))
-QR_FRAME_HEIGHT = int(os.getenv("QR_FRAME_HEIGHT", "720"))
-QR_FRAME_CHANNELS = int(os.getenv("QR_FRAME_CHANNELS", "3"))
-QR_FRAME_FPS = max(1, int(os.getenv("QR_FRAME_FPS", "10")))
-INTERNAL_FRAME_FPS = max(1, int(os.getenv("INTERNAL_FRAME_FPS", "10")))
+QR_FRAME_WIDTH = _env_int("QR_FRAME_WIDTH", 1600, minimum=160)
+QR_FRAME_HEIGHT = _env_int("QR_FRAME_HEIGHT", 900, minimum=120)
+QR_FRAME_CHANNELS = _env_int("QR_FRAME_CHANNELS", 3, minimum=1)
+QR_FRAME_FPS = _env_int("QR_FRAME_FPS", 15, minimum=1)
+INTERNAL_FRAME_FPS = _env_int("INTERNAL_FRAME_FPS", 12, minimum=1)
 STREAM_VIDEO_ENCODER = os.getenv("STREAM_VIDEO_ENCODER", "libx264").strip() or "libx264"
 STREAM_INPUT_FORMAT = os.getenv("STREAM_INPUT_FORMAT", "mjpeg").strip() or "mjpeg"
 STREAM_INPUT_SIZE = os.getenv("STREAM_INPUT_SIZE", "1280x720").strip() or "1280x720"
-EXTERNAL_STREAM_INPUT_SIZE = os.getenv("EXTERNAL_STREAM_INPUT_SIZE", "1280x720").strip() or "1280x720"
-STREAM_INPUT_FPS = max(1, int(os.getenv("STREAM_INPUT_FPS", "20")))
-EXTERNAL_STREAM_INPUT_FPS = max(1, int(os.getenv("EXTERNAL_STREAM_INPUT_FPS", str(STREAM_INPUT_FPS))))
-STREAM_OUTPUT_WIDTH = max(160, int(os.getenv("STREAM_OUTPUT_WIDTH", "640")))
-STREAM_OUTPUT_HEIGHT = max(120, int(os.getenv("STREAM_OUTPUT_HEIGHT", "360")))
-STREAM_OUTPUT_FPS = max(1, int(os.getenv("STREAM_OUTPUT_FPS", "15")))
+EXTERNAL_STREAM_INPUT_SIZE = os.getenv("EXTERNAL_STREAM_INPUT_SIZE", "1920x1080").strip() or "1920x1080"
+STREAM_INPUT_FPS = _env_int("STREAM_INPUT_FPS", 20, minimum=1)
+EXTERNAL_STREAM_INPUT_FPS = _env_int("EXTERNAL_STREAM_INPUT_FPS", STREAM_INPUT_FPS, minimum=1)
+STREAM_OUTPUT_WIDTH = _env_int("STREAM_OUTPUT_WIDTH", 960, minimum=160)
+STREAM_OUTPUT_HEIGHT = _env_int("STREAM_OUTPUT_HEIGHT", 720, minimum=120)
+EXTERNAL_STREAM_OUTPUT_WIDTH = _env_int("EXTERNAL_STREAM_OUTPUT_WIDTH", 1280, minimum=160)
+EXTERNAL_STREAM_OUTPUT_HEIGHT = _env_int("EXTERNAL_STREAM_OUTPUT_HEIGHT", 720, minimum=120)
+STREAM_OUTPUT_FPS = _env_int("STREAM_OUTPUT_FPS", 20, minimum=1)
 STREAM_RTSP_TRANSPORT = os.getenv("STREAM_RTSP_TRANSPORT", "tcp").strip() or "tcp"
-STREAM_BITRATE = os.getenv("STREAM_VIDEO_BITRATE", "500k").strip() or "500k"
+STREAM_BITRATE = os.getenv("STREAM_VIDEO_BITRATE", "1200k").strip() or "1200k"
 STREAM_MAXRATE = os.getenv("STREAM_VIDEO_MAXRATE", STREAM_BITRATE).strip() or STREAM_BITRATE
-STREAM_BUFSIZE = os.getenv("STREAM_VIDEO_BUFSIZE", "100k").strip() or "100k"
-STREAM_GOP = max(1, int(os.getenv("STREAM_GOP", str(STREAM_OUTPUT_FPS))))
+STREAM_BUFSIZE = os.getenv("STREAM_VIDEO_BUFSIZE", "240k").strip() or "240k"
+EXTERNAL_STREAM_BITRATE = os.getenv("EXTERNAL_STREAM_VIDEO_BITRATE", "2200k").strip() or "2200k"
+EXTERNAL_STREAM_MAXRATE = os.getenv("EXTERNAL_STREAM_VIDEO_MAXRATE", EXTERNAL_STREAM_BITRATE).strip() or EXTERNAL_STREAM_BITRATE
+EXTERNAL_STREAM_BUFSIZE = os.getenv("EXTERNAL_STREAM_VIDEO_BUFSIZE", "400k").strip() or "400k"
+STREAM_GOP = _env_int("STREAM_GOP", STREAM_OUTPUT_FPS, minimum=1)
 
 
 def build_rtsp_url(camera_role):
@@ -55,8 +70,9 @@ def build_ffmpeg_command(
     frame_height=QR_FRAME_HEIGHT,
 ):
     rtsp_url = build_rtsp_url(camera_role)
-    encoder_args = _encoder_args()
+    encoder_args = _encoder_args(camera_role)
     detection_fps = QR_FRAME_FPS if camera_role == "external" else INTERNAL_FRAME_FPS
+    output_width, output_height = _output_dimensions(camera_role)
     if frame_pipe:
         return [
             "ffmpeg",
@@ -66,8 +82,8 @@ def build_ffmpeg_command(
             "-an",
             "-filter_complex",
             "[0:v]split=2[rtsp][detect];"
-            f"[rtsp]scale={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p[rtspout];"
+            f"[rtsp]scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+            f"pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p[rtspout];"
             f"[detect]fps={detection_fps},"
             f"scale={frame_width}:{frame_height}:force_original_aspect_ratio=decrease,"
             f"pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2,format=bgr24[raw]",
@@ -89,8 +105,8 @@ def build_ffmpeg_command(
     "-i", video_device,
     "-an",
     "-vf",
-    f"scale={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,"
-    f"pad={STREAM_OUTPUT_WIDTH}:{STREAM_OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+    f"scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+    f"pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
     *encoder_args,
     *_rtsp_low_latency_args(),
     "-f", "rtsp",
@@ -135,12 +151,21 @@ def _rtsp_low_latency_args():
     ]
 
 
-def _encoder_args():
+def _output_dimensions(camera_role):
+    if camera_role == "external":
+        return EXTERNAL_STREAM_OUTPUT_WIDTH, EXTERNAL_STREAM_OUTPUT_HEIGHT
+    return STREAM_OUTPUT_WIDTH, STREAM_OUTPUT_HEIGHT
+
+
+def _encoder_args(camera_role):
+    bitrate = EXTERNAL_STREAM_BITRATE if camera_role == "external" else STREAM_BITRATE
+    maxrate = EXTERNAL_STREAM_MAXRATE if camera_role == "external" else STREAM_MAXRATE
+    bufsize = EXTERNAL_STREAM_BUFSIZE if camera_role == "external" else STREAM_BUFSIZE
     common = [
         "-pix_fmt", "yuv420p",
-        "-b:v", STREAM_BITRATE,
-        "-maxrate", STREAM_MAXRATE,
-        "-bufsize", STREAM_BUFSIZE,
+        "-b:v", bitrate,
+        "-maxrate", maxrate,
+        "-bufsize", bufsize,
         "-g", str(STREAM_GOP),
         "-bf", "0",
     ]
