@@ -464,17 +464,18 @@ class RelayController:
         state = self._active_state() if active else self._inactive_state()
         for attempt in range(1, self._write_retry_count + 1):
             self._gpio.output(pin, state)
-            actual = self._readback_matches(pin, state)
+            actual_active = self._readback_active(pin)
+            matched = actual_active is None or actual_active == active
             logger.info(
                 "GPIO WRITE: label=%s pin=%s target=%s actual=%s attempt=%s/%s",
                 label,
                 pin,
                 "ON" if active else "OFF",
-                "ON" if actual else "MISMATCH",
+                "UNKNOWN" if actual_active is None else ("ON" if actual_active else "OFF"),
                 attempt,
                 self._write_retry_count,
             )
-            if actual:
+            if matched:
                 logger.info("%s %s on BCM GPIO%s", label, "ON" if active else "OFF", pin)
                 return
             time.sleep(0.05)
@@ -503,14 +504,17 @@ class RelayController:
             return None
         return self._gpio.HIGH if self.active_low else self._gpio.LOW
 
-    def _readback_matches(self, pin, expected_state):
+    def _readback_active(self, pin):
         if self._gpio is None or not hasattr(self._gpio, "input"):
-            return True
+            return None
         try:
-            return self._gpio.input(pin) == expected_state
+            state = self._gpio.input(pin)
+            if self.active_low:
+                return state == self._gpio.LOW
+            return state == self._gpio.HIGH
         except Exception:
             logger.exception("GPIO readback failed for GPIO%s", pin)
-            return False
+            return None
 
 
 class _LgpioCompat:
