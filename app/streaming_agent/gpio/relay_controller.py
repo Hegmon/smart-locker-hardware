@@ -96,6 +96,7 @@ class RelayController:
         self.locker_pin = _env_int("RELAY_LOCKER_PIN", locker_pin)
         self.buzzer_pin = _env_int("RELAY_BUZZER_PIN", buzzer_pin)
         self.active_low = _env_bool("RELAY_ACTIVE_LOW", True) if active_low is None else bool(active_low)
+        self.allow_shared_alert_outputs = _env_bool("RELAY_ALLOW_SHARED_ALERT_OUTPUTS", False)
         self.unlock_seconds = _env_float("QR_SUCCESS_UNLOCK_TIME", QR_SUCCESS_UNLOCK_TIME, minimum=0.1)
         self.alert_duration = _env_float("ALERT_DURATION", ALERT_DURATION, minimum=0.1)
         if unlock_seconds is not None:
@@ -115,6 +116,7 @@ class RelayController:
         self._buzzer_on = False
         self._green_on = False
         self._locker_unlocked = False
+        self._write_retry_count = max(1, _env_int("RELAY_GPIO_WRITE_RETRY_COUNT", 3))
 
     @property
     def pins(self):
@@ -322,6 +324,9 @@ class RelayController:
 
     def trigger_alert(self, source, duration_seconds=None, *, log_name="Relay alert"):
         source = str(source or "alert")
+        if not self.allow_shared_alert_outputs:
+            logger.warning("%s suppressed because security relays are exclusive to SecurityRelayManager source=%s", log_name, source)
+            return
         duration = self.alert_duration if duration_seconds is None else max(0.1, float(duration_seconds))
         until = time.monotonic() + duration
         with self._lock:
@@ -457,8 +462,23 @@ class RelayController:
             logger.info("Relay dry-run: %s %s on BCM GPIO%s", label, "ON" if active else "OFF", pin)
             return
         state = self._active_state() if active else self._inactive_state()
-        self._gpio.output(pin, state)
-        logger.info("%s %s on BCM GPIO%s", label, "ON" if active else "OFF", pin)
+        for attempt in range(1, self._write_retry_count + 1):
+            self._gpio.output(pin, state)
+            actual = self._readback_matches(pin, state)
+            logger.info(
+                "GPIO WRITE: label=%s pin=%s target=%s actual=%s attempt=%s/%s",
+                label,
+                pin,
+                "ON" if active else "OFF",
+                "ON" if actual else "MISMATCH",
+                attempt,
+                self._write_retry_count,
+            )
+            if actual:
+                logger.info("%s %s on BCM GPIO%s", label, "ON" if active else "OFF", pin)
+                return
+            time.sleep(0.05)
+        logger.error("GPIO write verification failed label=%s pin=%s target=%s", label, pin, "ON" if active else "OFF")
 
     def _configure_gpio(self, gpio):
         self._gpio = gpio
@@ -482,6 +502,15 @@ class RelayController:
         if self._gpio is None:
             return None
         return self._gpio.HIGH if self.active_low else self._gpio.LOW
+
+    def _readback_matches(self, pin, expected_state):
+        if self._gpio is None or not hasattr(self._gpio, "input"):
+            return True
+        try:
+            return self._gpio.input(pin) == expected_state
+        except Exception:
+            logger.exception("GPIO readback failed for GPIO%s", pin)
+            return False
 
 
 class _LgpioCompat:
