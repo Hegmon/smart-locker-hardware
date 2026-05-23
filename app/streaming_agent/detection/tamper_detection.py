@@ -20,6 +20,10 @@ logger = LoggingManager.get_logger(__name__)
 TAMPER_HOLD_SECONDS = 5.0
 TAMPER_TRIGGER_FRAMES = 5
 TAMPER_CLEAR_FRAMES = 15
+TAMPER_STATE_IDLE = "IDLE"
+TAMPER_STATE_CANDIDATE = "TAMPER_CANDIDATE"
+TAMPER_STATE_ACTIVE = "TAMPER_ACTIVE"
+TAMPER_STATE_CLEARING = "TAMPER_CLEARING"
 
 
 def _env_float(name, default, minimum=None, maximum=None):
@@ -134,14 +138,16 @@ class TamperDetection:
         self._baseline_gray = None
         self._baseline_brightness = None
         self._baseline_frames_seen = 0
+        self._tamper_state = TAMPER_STATE_IDLE
         self._tamper_started_at = None
-        self._last_tamper_seen_at = time.monotonic()
-        self._tamper_active = False
+        self._tamper_clearing_started_at = None
+        self._last_tamper_reason = ""
         self._tamper_streak = 0
         self._clear_streak = 0
         self._processed_frames = 0
         self._fps_window_started_at = time.monotonic()
         self._last_metrics_log_at = 0.0
+        self._last_frame_seen_at = 0.0
 
     def start(self):
         if self._running:
@@ -185,6 +191,7 @@ class TamperDetection:
                 continue
 
             self._last_sequence = sequence
+            self._last_frame_seen_at = time.monotonic()
             if sequence % self.process_every_n_frames != 0:
                 continue
 
@@ -208,31 +215,26 @@ class TamperDetection:
             return False
 
     def _pause_tamper_state(self, reason):
+        previous_state = self._tamper_state
         self._tamper_started_at = None
-        self._last_tamper_seen_at = time.monotonic()
+        self._tamper_clearing_started_at = None
+        self._last_tamper_reason = ""
         self._tamper_streak = 0
         self._clear_streak = 0
-        if self._tamper_active:
-            self._tamper_active = False
+        if previous_state in {TAMPER_STATE_ACTIVE, TAMPER_STATE_CLEARING}:
             if self.detection_state_manager is not None:
                 self.detection_state_manager.clear_tamper(self.camera_role)
-            # detectors do not directly control relays
-            logger.info("Tamper paused for %s camera while %s", self.camera_role, reason)
+        self._tamper_state = TAMPER_STATE_IDLE
+        logger.info("Tamper state changed on %s camera: %s -> %s reason=%s", self.camera_role, previous_state, self._tamper_state, reason)
 
     def _clear_stale_tamper_state(self):
-        if not self._tamper_active:
+        if self._tamper_state == TAMPER_STATE_IDLE:
             return
-        if self.detection_state_manager is not None:
-            self.detection_state_manager.check_timeouts()
+        if self._last_sequence < 0:
             return
-        if time.monotonic() - self._last_tamper_seen_at < self._stale_clear_seconds:
+        if time.monotonic() - self._last_frame_seen_at < self._stale_clear_seconds:
             return
-        self._tamper_active = False
-        self._tamper_started_at = None
-        self._tamper_streak = 0
-        self._clear_streak = 0
-        # detectors do not directly control relays (state manager owns relay state)
-        logger.info("No fresh tamper detection on %s camera; Relay 4 OFF", self.camera_role)
+        self._update_tamper_state(False, "stale_frame")
 
     def _detect_tamper(self, frame_bytes):
         frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
@@ -325,53 +327,71 @@ class TamperDetection:
 
     def _update_tamper_state(self, tampered, reason):
         now = time.monotonic()
+        previous_state = self._tamper_state
+
         if tampered:
-            self._last_tamper_seen_at = now
+            self._last_tamper_reason = reason
             self._tamper_streak += 1
             self._clear_streak = 0
-            if self._tamper_started_at is None:
+            if previous_state == TAMPER_STATE_IDLE:
+                self._tamper_state = TAMPER_STATE_CANDIDATE
                 self._tamper_started_at = now
-                logger.warning("Tamper detection candidate start on %s camera: %s", self.camera_role, reason)
+                self._tamper_clearing_started_at = None
+            elif previous_state == TAMPER_STATE_CANDIDATE:
+                if (
+                    self._tamper_started_at is not None
+                    and self._tamper_streak >= self._required_tamper_frames
+                    and now - self._tamper_started_at >= self.tamper_confirm_seconds
+                ):
+                    self._tamper_state = TAMPER_STATE_ACTIVE
+                    self._tamper_clearing_started_at = None
+                    if self.detection_state_manager is not None:
+                        self.detection_state_manager.update_tamper(
+                            self.camera_role,
+                            tamper_detected=True,
+                            reason=reason,
+                        )
+            elif previous_state == TAMPER_STATE_CLEARING:
+                self._tamper_state = TAMPER_STATE_ACTIVE
+                self._tamper_clearing_started_at = None
+            self._log_state_transition(previous_state, self._tamper_state, reason)
+            return
+
+        self._tamper_streak = 0
+        self._clear_streak += 1
+        if previous_state == TAMPER_STATE_CANDIDATE:
+            self._tamper_state = TAMPER_STATE_IDLE
+            self._tamper_started_at = None
+        elif previous_state == TAMPER_STATE_ACTIVE:
+            self._tamper_state = TAMPER_STATE_CLEARING
+            self._tamper_clearing_started_at = now
+        elif previous_state == TAMPER_STATE_CLEARING:
             if (
-                not self._tamper_active
-                and (self._tamper_streak >= self._required_tamper_frames or self._is_immediate_tamper(reason))
-                and now - self._tamper_started_at >= self.tamper_confirm_seconds
+                self._tamper_clearing_started_at is not None
+                and self._clear_streak >= self._required_clear_frames
+                and now - self._tamper_clearing_started_at >= self.tamper_clear_seconds
             ):
-                self._tamper_active = True
+                self._tamper_state = TAMPER_STATE_IDLE
+                self._tamper_started_at = None
+                self._tamper_clearing_started_at = None
                 if self.detection_state_manager is not None:
                     self.detection_state_manager.update_tamper(
                         self.camera_role,
-                        tamper_detected=True,
-                        reason=reason,
+                        tamper_detected=False,
+                        reason=self._last_tamper_reason or reason,
                     )
-                # no direct relay control when no state manager (centralized authority)
-                logger.warning("Tamper confirmed on %s camera; Relay 4 ON: %s", self.camera_role, reason)
-            elif self._tamper_active and self.detection_state_manager is not None:
-                self.detection_state_manager.update_tamper(
-                    self.camera_role,
-                    tamper_detected=True,
-                    reason=reason,
-                )
+        self._log_state_transition(previous_state, self._tamper_state, reason)
+
+    def _log_state_transition(self, previous_state, current_state, reason):
+        if previous_state == current_state:
             return
-
-        self._tamper_started_at = None
-        self._clear_streak += 1
-        self._tamper_streak = 0
-        if (
-            self._tamper_active
-            and self._clear_streak >= self._required_clear_frames
-            and now - self._last_tamper_seen_at >= self.tamper_clear_seconds
-        ):
-            self._tamper_active = False
-            if self.detection_state_manager is not None:
-                self.detection_state_manager.update_tamper(self.camera_role, tamper_detected=False)
-            # no direct relay control when no state manager (centralized authority)
-            clear_age = now - self._last_tamper_seen_at
-            logger.info("Tamper cleared on %s camera for %.2fs; Relay 4 OFF", self.camera_role, clear_age)
-
-    @staticmethod
-    def _is_immediate_tamper(reason):
-        return "covered/" in str(reason or "")
+        logger.info(
+            "Tamper state changed on %s camera: %s -> %s reason=%s",
+            self.camera_role,
+            previous_state,
+            current_state,
+            reason or self._last_tamper_reason or "n/a",
+        )
 
     def _log_fps(self):
         self._processed_frames += 1
