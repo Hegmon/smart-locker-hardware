@@ -58,9 +58,6 @@ class DetectionStateManager:
         }
         self._lock = threading.RLock()
         self._last_debug_log_at = 0.0
-        self._running = True
-        self._monitor = threading.Thread(target=self._monitor_loop, daemon=True, name="detection-state-monitor")
-        self._monitor.start()
 
     @staticmethod
     def _new_camera_state():
@@ -123,9 +120,7 @@ class DetectionStateManager:
             self._maybe_log_snapshot_locked(time.monotonic())
 
     def stop(self):
-        self._running = False
         self.relay_manager.stop()
-        self._monitor.join(timeout=2.0)
 
     def _update_signal_locked(self, state, camera_role, signal, active, now, reason, *, human_score=0.0):
         state_key = f"{signal}_detected"
@@ -189,15 +184,6 @@ class DetectionStateManager:
             relay_snapshot["active_detection_sources"],
         )
         self._last_debug_log_at = now
-
-    def _monitor_loop(self):
-        while self._running:
-            try:
-                with self._lock:
-                    self._maybe_log_snapshot_locked(time.monotonic())
-            except Exception:
-                logger.exception("Detection state monitor failed")
-            time.sleep(1.0)
 
     @staticmethod
     def _transition_event_type(signal, active):
