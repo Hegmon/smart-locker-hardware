@@ -9,6 +9,7 @@ except Exception:
     fcntl = None
 
 from app.core.config import MQTT_HOST, MQTT_PASSWORD, MQTT_PORT, MQTT_USERNAME
+from app.streaming_agent.config.runtime import StreamingAgentRuntimeConfig
 from app.streaming_agent.detection import person_detector as person_detector_module
 from app.streaming_agent.detection import qr_scanner as qr_scanner_module
 from app.streaming_agent.detection.person_detector import PersonDetector
@@ -40,7 +41,11 @@ class StreamingAgent:
         self.qr_scanner_config = QRScannerConfig.from_env()
         self.tamper_detectors = []
         self.relay_controller = RelayController()
-        self.detection_state_manager = DetectionStateManager(self.relay_controller)
+        self.runtime_config = StreamingAgentRuntimeConfig.from_env()
+        self.detection_state_manager = DetectionStateManager(
+            self.relay_controller,
+            runtime_config=self.runtime_config,
+        )
         self.keyboard_thread = None
         self.running = False
         self._stopping = False
@@ -58,6 +63,7 @@ class StreamingAgent:
             led_controller=self.relay_controller,
             detection_state_manager=self.detection_state_manager,
             led_off_delay_seconds=DETECTION_LED_HOLD_SECONDS,
+            runtime_config=self.runtime_config,
         )
         self.qr_scanner = QrScanner(
             self.stream_manager.get_frame_buffer("external"),
@@ -86,6 +92,7 @@ class StreamingAgent:
                     led_controller=self.relay_controller,
                     detection_state_manager=self.detection_state_manager,
                     skip_when=skip_when,
+                    runtime_config=self.runtime_config,
                 )
             )
         self.health_monitor = HealthMonitor(stream_registry=self.stream_manager.streams)
