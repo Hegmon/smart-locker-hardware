@@ -36,7 +36,7 @@ def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
 @dataclass(frozen=True)
 class RelayConfig:
     timeout_seconds: float
-    cooldown_seconds: float
+    detection_debounce_seconds: float
     retry_count: int
     retry_delay_seconds: float
 
@@ -44,12 +44,12 @@ class RelayConfig:
     def from_env(cls) -> "RelayConfig":
         timeout = _env_float(
             "SECURITY_HOLD_SECONDS",
-            _env_float("DETECTION_HOLD_SECONDS", 8.0, minimum=0.0),
+            _env_float("DETECTION_HOLD_SECONDS", 5.0, minimum=0.0),
             minimum=0.0,
         )
         return cls(
             timeout_seconds=timeout,
-            cooldown_seconds=_env_float("DETECTION_EVENT_COOLDOWN_SECONDS", 0.25, minimum=0.0),
+            detection_debounce_seconds=_env_float("DETECTION_EVENT_DEBOUNCE_SECONDS", 1.0, minimum=0.0),
             retry_count=_env_int("SECURITY_RELAY_RETRY_COUNT", 3, minimum=1),
             retry_delay_seconds=_env_float("SECURITY_RELAY_RETRY_DELAY_SECONDS", 0.2, minimum=0.0),
         )
