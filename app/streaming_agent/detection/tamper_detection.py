@@ -12,6 +12,7 @@ try:
 except Exception:
     cv2 = None
     np = None
+from app.streaming_agent.config.runtime import StreamingAgentRuntimeConfig
 from app.streaming_agent.gpio.relay_controller import RelayController
 from app.streaming_agent.logs.streaming_agent_logs import LoggingManager
 logger = LoggingManager.get_logger(__name__)
@@ -69,7 +70,9 @@ class TamperDetection:
         large_change_threshold=None,
         skip_when=None,
         detection_state_manager=None,
+        runtime_config: StreamingAgentRuntimeConfig | None = None,
     ):
+        self.runtime_config = runtime_config or StreamingAgentRuntimeConfig.from_env()
         self.frame_buffer = frame_buffer
         self.camera_role = camera_role
         self._owns_led_controller = led_controller is None
@@ -81,44 +84,44 @@ class TamperDetection:
             else max(1, int(process_every_n_frames))
         )
         self.tamper_confirm_seconds = (
-            _env_float("TAMPER_CONFIRM_SECONDS", 0.2, minimum=0.0)
+            self.runtime_config.tamper.confirm_seconds
             if tamper_confirm_seconds is None
             else max(0.0, float(tamper_confirm_seconds))
         )
         self.tamper_clear_seconds = (
-            _env_float("TAMPER_HOLD_SECONDS", _env_float("TAMPER_CLEAR_SECONDS", TAMPER_HOLD_SECONDS, minimum=0.0), minimum=0.0)
+            self.runtime_config.tamper.clear_seconds
             if tamper_clear_seconds is None
             else max(0.0, float(tamper_clear_seconds))
         )
         self.dark_brightness_threshold = (
-            _env_float("TAMPER_DARK_BRIGHTNESS_THRESHOLD", 28.0, minimum=0.0, maximum=255.0)
+            self.runtime_config.tamper.dark_brightness_threshold
             if dark_brightness_threshold is None
             else float(dark_brightness_threshold)
         )
         self.bright_brightness_threshold = (
-            _env_float("TAMPER_BRIGHT_BRIGHTNESS_THRESHOLD", 242.0, minimum=0.0, maximum=255.0)
+            self.runtime_config.tamper.bright_brightness_threshold
             if bright_brightness_threshold is None
             else float(bright_brightness_threshold)
         )
         self.blur_threshold = (
-            _env_float("TAMPER_BLUR_THRESHOLD", 12.0, minimum=0.0)
+            self.runtime_config.tamper.blur_threshold
             if blur_threshold is None
             else float(blur_threshold)
         )
         self.edge_density_threshold = (
-            _env_float("TAMPER_EDGE_DENSITY_THRESHOLD", 0.005, minimum=0.0, maximum=1.0)
+            self.runtime_config.tamper.edge_density_threshold
             if edge_density_threshold is None
             else float(edge_density_threshold)
         )
         self.large_change_threshold = (
-            _env_float("TAMPER_LARGE_CHANGE_THRESHOLD", 0.58, minimum=0.0, maximum=1.0)
+            self.runtime_config.tamper.large_change_threshold
             if large_change_threshold is None
             else float(large_change_threshold)
         )
         self.hard_change_threshold = _env_float("TAMPER_HARD_CHANGE_THRESHOLD", 0.82, minimum=0.0, maximum=1.0)
         self.change_brightness_delta = _env_float("TAMPER_CHANGE_BRIGHTNESS_DELTA", 28.0, minimum=0.0, maximum=255.0)
         self.cover_brightness_delta = _env_float("TAMPER_COVER_BRIGHTNESS_DELTA", 35.0, minimum=0.0, maximum=255.0)
-        self.scene_change_tamper_enabled = _env_bool("TAMPER_SCENE_CHANGE_ENABLED", True)
+        self.scene_change_tamper_enabled = self.runtime_config.tamper.scene_change_enabled
         self._stale_clear_seconds = _env_float("TAMPER_STALE_CLEAR_SECONDS", 0.5, minimum=0.05)
         self._baseline_frame_target = _env_int("TAMPER_BASELINE_FRAMES", 5, minimum=1)
         self._required_tamper_frames = _env_int("TAMPER_TRIGGER_FRAMES", TAMPER_TRIGGER_FRAMES, minimum=1)
