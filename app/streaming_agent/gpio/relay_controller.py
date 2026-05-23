@@ -29,11 +29,11 @@ logger = LoggingManager.get_logger(__name__)
 # completely removed. Only set_security_relays() (via DetectionStateManager)
 # is allowed to control the security relays (IN1 + IN4).
 #
-# All "stuck ON" problems are prevented by:
-#   - strict hold + stale watchdog in DetectionStateManager
-#   - hysteresis in PersonDetector (0.60 activate / 0.40 clear)
-#   - the verifier thread that calls set_security_relays(False) + force_security_relays_off()
-#     every single second whenever security_active is False.
+# All "stuck ON" problems are now prevented by:
+#   - a centralized detection event path
+#   - a single SecurityRelayManager auto-off timer
+#   - source-aware OFF recovery that only clears the security source and does not
+#     stomp QR failure alerts or other non-security users of Relay 1 / Relay 4.
 # =============================================================================
 
 RED_LED_PIN = 21
@@ -49,9 +49,6 @@ RELAY_INPUTS = {
 
 QR_SUCCESS_UNLOCK_TIME = 5
 ALERT_DURATION = 15
-DETECTION_SOURCE_TTL_SECONDS = 6.0
-
-
 def _env_bool(name, default):
     value = os.getenv(name)
     if value is None:
@@ -113,8 +110,6 @@ class RelayController:
         self._buzzer_sources = set()
         self._alert_until = {}
         self._alert_threads = set()
-        self._detection_source_until = {}
-        self._detection_expiry_thread = None
         self._qr_success_running = False
         self._red_on = False
         self._buzzer_on = False
@@ -165,7 +160,6 @@ class RelayController:
             self._enabled = True
             self._red_sources.clear()
             self._buzzer_sources.clear()
-            self._detection_source_until.clear()
             self._red_on = False
             self._buzzer_on = False
             self._green_on = False
@@ -241,27 +235,18 @@ class RelayController:
     # The two methods above were the old bypass paths that caused stuck relays.
 
     def set_security_relays(self, active):
-        changed = self._set_detection_source("security_event", active, red=True, buzzer=True)
+        changed = self._set_security_source(active)
         if changed:
             logger.info("Relays synchronized %s", "ON" if active else "OFF")
 
-    def is_security_relays_on(self):
-        """Return True if either the red LED or buzzer is currently on."""
+    def is_security_source_active(self):
         with self._lock:
-            # Prefer reading GPIO pins when available to detect hardware-level mismatches
-            if self._enabled and self._gpio is not None:
-                try:
-                    # RPi.GPIO provides `input`; lgpio compat may expose `gpio_read` via wrapper
-                    if hasattr(self._gpio, "input"):
-                        red_state = self._gpio.input(self.red_led_pin)
-                        buz_state = self._gpio.input(self.buzzer_pin)
-                        if self.active_low:
-                            return (red_state == self._gpio.LOW) or (buz_state == self._gpio.LOW)
-                        return (red_state == self._gpio.HIGH) or (buz_state == self._gpio.HIGH)
-                    # fallback: use stored flags
-                except Exception:
-                    logger.exception("Failed to read GPIO inputs for security relay verification")
-            return bool(self._red_on or self._buzzer_on)
+            return "security_event" in self._red_sources or "security_event" in self._buzzer_sources
+
+    def is_security_relays_on(self):
+        """Return True if the security source is requesting the relay pair."""
+        with self._lock:
+            return self.is_security_source_active()
 
     def force_security_relays_off(self):
         """Force the security relays (red LED/buzzer) to OFF.
@@ -279,37 +264,22 @@ class RelayController:
                     logger.exception("Failed to initialize GPIO backend while forcing relays off")
 
             with self._lock:
-                # remove security-related detection sources so apply_* will clear outputs
-                try:
-                    keys = list(self._detection_source_until.keys())
-                except Exception:
-                    keys = []
-                # Only "security_event" is the authoritative source for surveillance security relays now.
-                for k in keys:
-                    if k == "security_event":
-                        self._detection_source_until.pop(k, None)
-                for src in list(self._red_sources):
-                    if src == "security_event":
-                        self._red_sources.discard(src)
-                for src in list(self._buzzer_sources):
-                    if src == "security_event":
-                        self._buzzer_sources.discard(src)
-                # apply the logical state; this will call _write if flags change
+                self._red_sources.discard("security_event")
+                self._buzzer_sources.discard("security_event")
                 self._apply_red_locked()
                 self._apply_buzzer_locked()
-                # Ultimate recovery: unconditionally drive the two security pins to their inactive level.
-                # This is the final hammer that guarantees Relay 1 and Relay 4 are physically OFF
-                # even if every other mechanism failed or a race left a source behind.
-                self._red_on = False
-                self._buzzer_on = False
-                try:
-                    self._write(self.red_led_pin, False, "Red LED (force-off)")
-                except Exception:
-                    logger.exception("Failed direct Red LED force-off write")
-                try:
-                    self._write(self.buzzer_pin, False, "Buzzer (force-off)")
-                except Exception:
-                    logger.exception("Failed direct Buzzer force-off write")
+                if not self._red_sources:
+                    self._red_on = False
+                    try:
+                        self._write(self.red_led_pin, False, "Red LED (force-off)")
+                    except Exception:
+                        logger.exception("Failed direct Red LED force-off write")
+                if not self._buzzer_sources:
+                    self._buzzer_on = False
+                    try:
+                        self._write(self.buzzer_pin, False, "Buzzer (force-off)")
+                    except Exception:
+                        logger.exception("Failed direct Buzzer force-off write")
         except Exception:
             logger.exception("force_security_relays_off failed")
 
@@ -366,7 +336,6 @@ class RelayController:
             self._buzzer_sources.clear()
             self._alert_until.clear()
             self._alert_threads.clear()
-            self._detection_source_until.clear()
             self._qr_success_running = False
             try:
                 self.lock_locker()
@@ -416,73 +385,24 @@ class RelayController:
                 self._set_buzzer_source(source, False)
             logger.info("Relay alert cleared for source=%s", source)
 
-    def _set_detection_source(self, source, active, *, red=True, buzzer=True):
-        source = str(source or "detection")
-        ttl = _env_float("DETECTION_RELAY_SOURCE_TTL_SECONDS", DETECTION_SOURCE_TTL_SECONDS, minimum=0.0)
+    def _set_security_source(self, active):
         with self._lock:
-            if active:
-                changed = (
-                    (red and source not in self._red_sources)
-                    or (buzzer and source not in self._buzzer_sources)
-                )
-                if ttl > 0:
-                    self._detection_source_until[source] = time.monotonic() + ttl
-                else:
-                    self._detection_source_until.pop(source, None)
-                if red:
-                    self._red_sources.add(source)
-                if buzzer:
-                    self._buzzer_sources.add(source)
-                self._apply_red_locked()
-                self._apply_buzzer_locked()
-                if ttl > 0:
-                    self._ensure_detection_expiry_thread_locked()
-                return changed
-
             changed = (
-                (red and source in self._red_sources)
-                or (buzzer and source in self._buzzer_sources)
+                ("security_event" not in self._red_sources)
+                or ("security_event" not in self._buzzer_sources)
+            ) if active else (
+                ("security_event" in self._red_sources)
+                or ("security_event" in self._buzzer_sources)
             )
-            self._detection_source_until.pop(source, None)
-            if red:
-                self._red_sources.discard(source)
-            if buzzer:
-                self._buzzer_sources.discard(source)
+            if active:
+                self._red_sources.add("security_event")
+                self._buzzer_sources.add("security_event")
+            else:
+                self._red_sources.discard("security_event")
+                self._buzzer_sources.discard("security_event")
             self._apply_red_locked()
             self._apply_buzzer_locked()
             return changed
-
-    def _ensure_detection_expiry_thread_locked(self):
-        if self._detection_expiry_thread and self._detection_expiry_thread.is_alive():
-            return
-        self._detection_expiry_thread = threading.Thread(
-            target=self._detection_expiry_worker,
-            daemon=True,
-            name="relay-detection-expiry",
-        )
-        self._detection_expiry_thread.start()
-
-    def _detection_expiry_worker(self):
-        while True:
-            with self._lock:
-                now = time.monotonic()
-                expired = [
-                    source
-                    for source, until in self._detection_source_until.items()
-                    if until <= now
-                ]
-                for source in expired:
-                    self._detection_source_until.pop(source, None)
-                    self._red_sources.discard(source)
-                    self._buzzer_sources.discard(source)
-                    logger.warning("Detection relay source expired without refresh: %s", source)
-                if expired:
-                    self._apply_red_locked()
-                    self._apply_buzzer_locked()
-                if not self._detection_source_until:
-                    return
-                sleep_for = max(0.05, min(self._detection_source_until.values()) - now)
-            time.sleep(min(sleep_for, 0.25))
 
     def _set_red_source(self, source, active):
         with self._lock:
