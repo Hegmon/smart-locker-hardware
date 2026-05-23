@@ -162,6 +162,8 @@ class PersonDetector:
         self._last_motion_roi = None
         self._motion_rebaseline_seconds = _env_float("PERSON_MOTION_REBASELINE_SECONDS", 1.5, minimum=0.1)
         self._motion_candidate_started_at = None
+        self._motion_retrigger_cooldown_seconds = _env_float("PERSON_MOTION_RETRIGGER_COOLDOWN_SECONDS", 1.0, minimum=0.0)
+        self._motion_suppressed_until = 0.0
         self._face_enabled = _env_bool("FACE_DETECTION_ENABLED", False)
         self._hand_enabled = _env_bool("HAND_DETECTION_ENABLED", False)
         self._face_cascade = self._load_face_cascade()
@@ -368,6 +370,9 @@ class PersonDetector:
         hand_detected, hand_reason = self._detect_hand(frame)
         near_detected, near_reason = self._detect_near_object(frame)
         motion_detected, motion_reason = self._detect_motion(frame)
+        if motion_detected and time.monotonic() < self._motion_suppressed_until:
+            motion_detected = False
+            motion_reason = ""
 
         model_detected = False
         model_reason = ""
@@ -582,6 +587,7 @@ class PersonDetector:
         self._motion_subtractor = cv2.createBackgroundSubtractorMOG2(history=80, varThreshold=20, detectShadows=False) if cv2 is not None else None
         self._last_motion_roi = None
         self._motion_candidate_started_at = None
+        self._motion_suppressed_until = 0.0
 
     def _clear_person_state(self):
         if self.detection_state_manager is not None:
@@ -819,6 +825,7 @@ class PersonDetector:
                 and clear_age > self._clear_seconds
             ):
                 self._motion_active = False
+                self._motion_suppressed_until = now + self._motion_retrigger_cooldown_seconds
                 logger.info("Motion detection cleared after %.2fs", clear_age)
 
         # Only person and motion are valid security triggers for the internal camera.
