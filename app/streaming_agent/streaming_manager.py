@@ -1,3 +1,5 @@
+import os
+
 from app.streaming_agent.camera_roles import assign_camera_roles
 from app.streaming_agent.camera_controls import CameraControlManager
 from app.streaming_agent.ffmpeg_builder import (
@@ -14,8 +16,8 @@ from app.streaming_agent.watchdog import StreamWatchdog
 
 
 logger = LoggingManager.get_logger(__name__)
-INTERNAL_FRAME_WIDTH = 640
-INTERNAL_FRAME_HEIGHT = 480
+INTERNAL_FRAME_WIDTH = max(160, int(os.getenv("INTERNAL_FRAME_WIDTH", "960")))
+INTERNAL_FRAME_HEIGHT = max(120, int(os.getenv("INTERNAL_FRAME_HEIGHT", "720")))
 INTERNAL_FRAME_CHANNELS = 3
 
 
