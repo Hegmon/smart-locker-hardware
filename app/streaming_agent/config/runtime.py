@@ -39,6 +39,9 @@ class RelayConfig:
     detection_debounce_seconds: float
     retry_count: int
     retry_delay_seconds: float
+    poll_interval_seconds: float
+    stale_on_failsafe_seconds: float
+    state_log_interval_seconds: float
 
     @classmethod
     def from_env(cls) -> "RelayConfig":
@@ -52,6 +55,9 @@ class RelayConfig:
             detection_debounce_seconds=_env_float("DETECTION_EVENT_DEBOUNCE_SECONDS", 1.0, minimum=0.0),
             retry_count=_env_int("SECURITY_RELAY_RETRY_COUNT", 3, minimum=1),
             retry_delay_seconds=_env_float("SECURITY_RELAY_RETRY_DELAY_SECONDS", 0.2, minimum=0.0),
+            poll_interval_seconds=_env_float("SECURITY_RELAY_POLL_INTERVAL_SECONDS", 0.1, minimum=0.01),
+            stale_on_failsafe_seconds=_env_float("SECURITY_RELAY_FAILSAFE_SECONDS", 10.0, minimum=1.0),
+            state_log_interval_seconds=_env_float("SECURITY_RELAY_STATE_LOG_INTERVAL_SECONDS", 1.0, minimum=0.1),
         )
 
 
