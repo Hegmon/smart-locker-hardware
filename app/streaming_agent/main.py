@@ -233,6 +233,8 @@ class StreamingAgent:
                 tamper_detector.stop()
             if self.qr_scanner:
                 self.qr_scanner.stop()
+            if self.detection_state_manager:
+                self.detection_state_manager.stop()
             self.relay_controller.cleanup()
             if self.stream_manager:
                 self.stream_manager.stop_all()
