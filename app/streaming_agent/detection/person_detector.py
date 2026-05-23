@@ -109,7 +109,7 @@ class PersonDetector:
         self.model_path = self._resolve_model_path(model_path)
         self.labels_path = Path(labels_path)
         self.confidence_threshold = (
-            self.runtime_config.person.confidence_threshold
+            max(0.6, self.runtime_config.person.confidence_threshold)
             if confidence_threshold is None
             else float(confidence_threshold)
         )
