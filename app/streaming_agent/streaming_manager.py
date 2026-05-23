@@ -43,7 +43,7 @@ class StreamingManager:
 
             video_device = camera["video_device"]
             if role == "external":
-                self.camera_controls.enable_autofocus(video_device, reason="external camera startup", force=True)
+                self.camera_controls.prepare_for_qr_scan(video_device, reason="external camera startup", force=True)
             logger.info("Building ffmpeg command for %s camera at %s", role, video_device)
             is_external = role == "external"
             frame_width = QR_FRAME_WIDTH if is_external else INTERNAL_FRAME_WIDTH
