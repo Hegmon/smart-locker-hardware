@@ -97,10 +97,10 @@ class TamperDetectionConfig:
     @classmethod
     def from_env(cls) -> "TamperDetectionConfig":
         return cls(
-            confirm_seconds=_env_float("TAMPER_CONFIRM_SECONDS", 0.2, minimum=0.0),
+            confirm_seconds=_env_float("TAMPER_CONFIRM_SECONDS", 1.5, minimum=0.0),
             clear_seconds=_env_float(
                 "TAMPER_HOLD_SECONDS",
-                _env_float("TAMPER_CLEAR_SECONDS", 5.0, minimum=0.0),
+                _env_float("TAMPER_CLEAR_SECONDS", 3.0, minimum=0.0),
                 minimum=0.0,
             ),
             dark_brightness_threshold=_env_float("TAMPER_DARK_BRIGHTNESS_THRESHOLD", 28.0, minimum=0.0, maximum=255.0),
