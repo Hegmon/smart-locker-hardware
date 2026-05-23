@@ -12,6 +12,7 @@ from typing import Callable, Optional
 
 import requests
 
+from app.core.mqtt_manager import get_shared_mqtt_manager
 from app.utils.python_path import add_system_dist_packages
 
 add_system_dist_packages()
@@ -173,6 +174,7 @@ class QRScanner:
         self._opencv_worker_running = False
         self._opencv_worker_lock = threading.Lock()
         self._duplicate_log_last_at = {}
+        self._mqtt_publish_enabled = os.getenv("QR_MQTT_PUBLISH_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
 
     @property
     def latest_result(self) -> QRScanResult | None:
@@ -555,6 +557,29 @@ class QRScanner:
         with self._event_condition:
             self._latest_result = updated
             self._event_condition.notify_all()
+        self._publish_result_mqtt(updated)
+
+    def _publish_result_mqtt(self, result: QRScanResult) -> None:
+        if not self._mqtt_publish_enabled:
+            return
+        try:
+            mqtt = get_shared_mqtt_manager()
+            topic = f"devices/{mqtt.device_id}/qr/scan"
+            payload = {
+                "timestamp": result.detected_at.isoformat(),
+                "accepted": result.accepted,
+                "error": result.error,
+                "token": result.debounce_key,
+                "payload_keys": sorted(result.payload.keys()) if isinstance(result.payload, dict) else [],
+                "backend": summarize_backend_response(result.backend_response),
+            }
+            published = mqtt.publish_json(topic, payload, qos=1, retain=False)
+            if published:
+                logger.info("Published QR scan result to MQTT topic %s", topic)
+            else:
+                logger.info("Queued QR scan result to MQTT topic %s", topic)
+        except Exception:
+            logger.exception("QR scan MQTT publish failed")
 
     def _handle_scan_timeout(self):
         now = time.monotonic()
