@@ -58,6 +58,9 @@ class DetectionStateManager:
         }
         self._lock = threading.RLock()
         self._last_debug_log_at = 0.0
+        self._running = True
+        self._monitor = threading.Thread(target=self._monitor_loop, daemon=True, name="detection-state-monitor")
+        self._monitor.start()
 
     @staticmethod
     def _new_camera_state():
@@ -119,6 +122,11 @@ class DetectionStateManager:
         with self._lock:
             self._maybe_log_snapshot_locked(time.monotonic())
 
+    def stop(self):
+        self._running = False
+        self.relay_manager.stop()
+        self._monitor.join(timeout=2.0)
+
     def _update_signal_locked(self, state, camera_role, signal, active, now, reason, *, human_score=0.0):
         state_key = f"{signal}_detected"
         time_key = f"last_{signal}_time"
@@ -166,14 +174,30 @@ class DetectionStateManager:
     def _maybe_log_snapshot_locked(self, now):
         if now - self._last_debug_log_at < DEBUG_LOG_INTERVAL:
             return
-        parts = []
-        for role, state in self.camera_state.items():
-            parts.append(
-                f"{role}:person={state['person_detected']} motion={state['motion_detected']} "
-                f"tamper={state['tamper_detected']}"
-            )
-        logger.info("Detection snapshot %s", " | ".join(parts))
+        relay_snapshot = self.relay_manager.active_snapshot()
+        logger.info(
+            "FINAL DETECTION STATE: internal:person=%s motion=%s tamper=%s | external:person=%s motion=%s tamper=%s | relay_active=%s gpio_state=%s relay_state=%s active_sources=%s",
+            self.camera_state["internal"]["person_detected"],
+            self.camera_state["internal"]["motion_detected"],
+            self.camera_state["internal"]["tamper_detected"],
+            self.camera_state["external"]["person_detected"],
+            self.camera_state["external"]["motion_detected"],
+            self.camera_state["external"]["tamper_detected"],
+            relay_snapshot["relay_active"],
+            relay_snapshot["gpio_state"],
+            relay_snapshot["lifecycle_state"],
+            relay_snapshot["active_detection_sources"],
+        )
         self._last_debug_log_at = now
+
+    def _monitor_loop(self):
+        while self._running:
+            try:
+                with self._lock:
+                    self._maybe_log_snapshot_locked(time.monotonic())
+            except Exception:
+                logger.exception("Detection state monitor failed")
+            time.sleep(1.0)
 
     @staticmethod
     def _transition_event_type(signal, active):
