@@ -149,6 +149,12 @@ class PersonDetector:
             minimum=0.1,
             maximum=0.95,
         )
+        self._model_hold_confidence_threshold = _env_float(
+            "PERSON_MODEL_HOLD_CONFIDENCE",
+            max(self.confidence_threshold, self._confidence_hold_threshold),
+            minimum=0.1,
+            maximum=0.95,
+        )
         self._stale_clear_seconds = _env_float(
             "PERSON_DETECTION_STALE_CLEAR_SECONDS",
             max(0.5, self._clear_seconds + 0.5),
@@ -481,8 +487,8 @@ class PersonDetector:
             return True, f"person_model score={best_person_score:.2f} smooth={self._person_confidence_ema:.2f}"
         if (
             self._person_active
-            and best_person_score >= self._confidence_hold_threshold
-            and self._person_confidence_ema >= self.confidence_threshold
+            and best_person_score >= self._model_hold_confidence_threshold
+            and self._person_confidence_ema >= self._model_hold_confidence_threshold
         ):
             return True, f"person_model_hold score={best_person_score:.2f} smooth={self._person_confidence_ema:.2f}"
         return False, ""
