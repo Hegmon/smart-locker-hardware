@@ -40,7 +40,7 @@ class MQTTPublisher:
         self.mqtt.add_connect_listener(self._on_connect)
         self.mqtt.add_disconnect_listener(self._on_disconnect)
 
-    def _on_connect(self):
+    def _on_connect(self, *args):
         was_connected = self.connected
         self.connected = True
         logger.info(
@@ -56,7 +56,7 @@ class MQTTPublisher:
                 logger.exception("Failed to restart streams after MQTT reconnect")
         self._ever_connected = True
 
-    def _on_disconnect(self):
+    def _on_disconnect(self, *args):
         self.connected = False
         if self.running:
             logger.warning("Streaming publisher observed shared MQTT disconnect")
