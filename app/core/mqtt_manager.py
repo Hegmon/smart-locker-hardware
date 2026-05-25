@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import socket
 import threading
 import time
 from collections import OrderedDict
@@ -11,6 +13,9 @@ from typing import Any, Callable
 
 import paho.mqtt.client as mqtt
 
+from app.deployment.device_identity import LOCAL_DEVICE_ID_FILE, ensure_device_id, read_device_id
+from app.deployment.runtime_config import get_float_setting, get_int_setting, get_str_setting
+from app.utils.system_info import utc_timestamp
 from app.utils.logger import get_logger
 
 
@@ -23,6 +28,7 @@ DEFAULT_MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 DEFAULT_MQTT_KEEPALIVE = int(os.getenv("MQTT_KEEPALIVE", "60"))
 DEFAULT_MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
 DEFAULT_MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
+DEFAULT_MQTT_STATUS_PREFIX = get_str_setting("MQTT_DEVICE_TOPIC_PREFIX", "device").strip("/")
 
 MessageHandler = Callable[[str, bytes], None]
 ConnectionHandler = Callable[[], None]
@@ -36,33 +42,60 @@ class MQTTConfig:
     username: str = ""
     password: str = ""
     keepalive: int = 60
+    topic_prefix: str = DEFAULT_MQTT_STATUS_PREFIX
+    reconnect_min_delay: float = 1.0
+    reconnect_max_delay: float = 60.0
+    internet_check_host: str = "1.1.1.1"
+    internet_check_port: int = 53
+    internet_check_timeout: float = 2.0
 
 
 def load_mqtt_config(config_path: Path | None = None) -> MQTTConfig:
     path = config_path or CONFIG_DIR / "backend_device.json"
-    if not path.exists():
-        raise FileNotFoundError(f"MQTT backend config not found: {path}")
-
-    with path.open("r", encoding="utf-8") as config_file:
-        raw_config = json.load(config_file)
+    raw_config: dict[str, Any] = {}
+    if path.exists():
+        with path.open("r", encoding="utf-8") as config_file:
+            loaded = json.load(config_file)
+            if isinstance(loaded, dict):
+                raw_config = loaded
 
     mqtt_config = raw_config.get("mqtt") or {}
-    device_id = str(raw_config.get("device_id") or "").strip()
+    device_id = str(
+        get_str_setting("DEVICE_ID", "", aliases=("SMARTLOCKER_DEVICE_ID",))
+        or raw_config.get("device_uuid")
+        or raw_config.get("device_id")
+        or read_device_id()
+        or _read_local_device_id()
+        or ensure_device_id()
+    ).strip()
     if not device_id:
-        raise ValueError(f"Missing device_id in {path}")
+        raise ValueError("Missing MQTT device_id")
 
-    host = str(mqtt_config.get("host") or DEFAULT_MQTT_HOST).strip()
+    host = str(get_str_setting("MQTT_HOST", "") or mqtt_config.get("host") or DEFAULT_MQTT_HOST).strip()
     if not host:
-        raise ValueError(f"Missing mqtt.host in {path}")
+        raise ValueError("Missing MQTT host")
 
     return MQTTConfig(
         device_id=device_id,
         host=host,
-        port=int(mqtt_config.get("port") or DEFAULT_MQTT_PORT),
-        username=str(mqtt_config.get("username", DEFAULT_MQTT_USERNAME) or ""),
-        password=str(mqtt_config.get("password", DEFAULT_MQTT_PASSWORD) or ""),
-        keepalive=int(mqtt_config.get("keepalive") or DEFAULT_MQTT_KEEPALIVE),
+        port=get_int_setting("MQTT_PORT", int(mqtt_config.get("port") or DEFAULT_MQTT_PORT)),
+        username=str(get_str_setting("MQTT_USERNAME", "") or mqtt_config.get("username", DEFAULT_MQTT_USERNAME) or ""),
+        password=str(get_str_setting("MQTT_PASSWORD", "") or mqtt_config.get("password", DEFAULT_MQTT_PASSWORD) or ""),
+        keepalive=get_int_setting("MQTT_KEEPALIVE", int(mqtt_config.get("keepalive") or DEFAULT_MQTT_KEEPALIVE)),
+        topic_prefix=get_str_setting("MQTT_DEVICE_TOPIC_PREFIX", DEFAULT_MQTT_STATUS_PREFIX).strip("/") or "device",
+        reconnect_min_delay=get_float_setting("MQTT_RECONNECT_MIN_DELAY_SECONDS", 1.0),
+        reconnect_max_delay=get_float_setting("MQTT_RECONNECT_MAX_DELAY_SECONDS", 60.0),
+        internet_check_host=get_str_setting("MQTT_INTERNET_CHECK_HOST", "1.1.1.1"),
+        internet_check_port=get_int_setting("MQTT_INTERNET_CHECK_PORT", 53),
+        internet_check_timeout=get_float_setting("MQTT_INTERNET_CHECK_TIMEOUT_SECONDS", 2.0),
     )
+
+
+def _read_local_device_id() -> str:
+    try:
+        return LOCAL_DEVICE_ID_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 class MQTTManager:
@@ -72,22 +105,32 @@ class MQTTManager:
         self,
         config: MQTTConfig,
         *,
-        reconnect_interval: float = 5.0,
         max_pending_messages: int = 500,
     ):
         self.config = config
         self.device_id = config.device_id
-        self.reconnect_interval = max(1.0, reconnect_interval)
+        self.reconnect_min_delay = max(0.5, config.reconnect_min_delay)
+        self.reconnect_max_delay = max(self.reconnect_min_delay, config.reconnect_max_delay)
         self.max_pending_messages = max(1, max_pending_messages)
 
-        self.status_topic = f"devices/{self.device_id}/status"
+        self.topic_prefix = config.topic_prefix.strip("/") or "device"
+        self.status_topic = f"{self.topic_prefix}/{self.device_id}/status"
+        self.mqtt_status_topic = f"{self.topic_prefix}/{self.device_id}/mqtt_status"
         self.client_id = f"smart-locker-{self.device_id}"
         self.client = self._create_client(self.client_id)
         if config.username:
             self.client.username_pw_set(config.username, config.password or None)
-        self.client.will_set(self.status_topic, payload="offline", qos=1, retain=True)
+        self.client.will_set(
+            self.status_topic,
+            payload=self.dumps(self._device_status_payload("offline")),
+            qos=1,
+            retain=True,
+        )
         try:
-            self.client.reconnect_delay_set(min_delay=1, max_delay=30)
+            self.client.reconnect_delay_set(
+                min_delay=int(self.reconnect_min_delay),
+                max_delay=int(self.reconnect_max_delay),
+            )
         except Exception:
             logger.debug("MQTT reconnect delay setup skipped", exc_info=True)
 
@@ -98,6 +141,7 @@ class MQTTManager:
         self._running = False
         self._loop_started = False
         self._connected = False
+        self._mqtt_status = "disconnected"
         self._connected_event = threading.Event()
         self._state_lock = threading.RLock()
         self._publish_lock = threading.Lock()
@@ -111,13 +155,14 @@ class MQTTManager:
         self._connect_listeners: list[ConnectionHandler] = []
         self._disconnect_listeners: list[ConnectionHandler] = []
         self._pending_messages: OrderedDict[str, tuple[str, int, bool]] = OrderedDict()
+        self._reconnect_attempt = 0
 
     @staticmethod
     def _create_client(client_id: str):
         try:
-            return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id, clean_session=True)
+            return mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id, clean_session=False)
         except (AttributeError, TypeError):
-            return mqtt.Client(client_id=client_id, clean_session=True)
+            return mqtt.Client(client_id=client_id, clean_session=False)
 
     def start(self) -> None:
         with self._state_lock:
@@ -129,6 +174,7 @@ class MQTTManager:
                 self._loop_started = True
 
         logger.info("Starting shared MQTT manager for %s:%s", self.config.host, self.config.port)
+        self._set_mqtt_status("reconnecting", publish=False)
         self._connect_async()
         self._reconnect_thread = threading.Thread(target=self._reconnect_loop, daemon=True, name="mqtt-reconnect")
         self._reconnect_thread.start()
@@ -142,8 +188,20 @@ class MQTTManager:
         self._reconnect_wake.set()
         if publish_offline and self.is_connected():
             try:
-                info = self.client.publish(self.status_topic, "offline", qos=1, retain=True)
+                info = self.client.publish(
+                    self.status_topic,
+                    self.dumps(self._device_status_payload("offline")),
+                    qos=1,
+                    retain=True,
+                )
                 info.wait_for_publish(2.0)
+                mqtt_info = self.client.publish(
+                    self.mqtt_status_topic,
+                    self.dumps(self._mqtt_status_payload("disconnected")),
+                    qos=1,
+                    retain=True,
+                )
+                mqtt_info.wait_for_publish(1.0)
             except Exception:
                 logger.debug("Graceful MQTT offline status publish failed", exc_info=True)
 
@@ -162,6 +220,7 @@ class MQTTManager:
 
         with self._state_lock:
             self._connected = False
+            self._mqtt_status = "disconnected"
             self._connected_event.clear()
         logger.info("Shared MQTT manager stopped")
 
@@ -169,12 +228,17 @@ class MQTTManager:
         with self._state_lock:
             return self._connected
 
+    def mqtt_status(self) -> str:
+        with self._state_lock:
+            return self._mqtt_status
+
     def wait_until_connected(self, timeout_seconds: float = 5.0) -> bool:
         return self._connected_event.wait(timeout=max(0.0, timeout_seconds)) or self.is_connected()
 
     def ensure_connected(self, timeout_seconds: float = 5.0, *, force_reconnect: bool = False) -> bool:
         if self.is_connected() and not force_reconnect:
             return True
+        self._set_mqtt_status("reconnecting")
         if force_reconnect:
             try:
                 self.client.disconnect()
@@ -260,12 +324,24 @@ class MQTTManager:
     def _reconnect_loop(self) -> None:
         while self._running:
             if not self.is_connected():
+                self._reconnect_attempt += 1
+                self._set_mqtt_status("reconnecting")
+                if not self._internet_available():
+                    logger.warning("MQTT reconnect attempt %s delayed because internet is unavailable", self._reconnect_attempt)
+                else:
+                    logger.info(
+                        "MQTT reconnect attempt %s to %s:%s",
+                        self._reconnect_attempt,
+                        self.config.host,
+                        self.config.port,
+                    )
                 try:
                     self.client.reconnect()
                 except Exception:
-                    logger.debug("MQTT reconnect attempt failed", exc_info=True)
+                    logger.warning("MQTT reconnect attempt %s failed", self._reconnect_attempt, exc_info=True)
                     self._connect_async()
-            self._reconnect_wake.wait(timeout=self.reconnect_interval)
+            delay = self._next_reconnect_delay()
+            self._reconnect_wake.wait(timeout=delay)
             self._reconnect_wake.clear()
 
     def _on_connect(self, client, userdata, flags, rc):
@@ -275,10 +351,13 @@ class MQTTManager:
 
         with self._state_lock:
             self._connected = True
+            self._mqtt_status = "connected"
+            self._reconnect_attempt = 0
             self._connected_event.set()
 
         logger.info("MQTT connected to %s:%s as %s", self.config.host, self.config.port, self.client_id)
-        self.publish(self.status_topic, "online", qos=1, retain=True, queue=False)
+        self.publish(self.status_topic, self._device_status_payload("online"), qos=1, retain=True, queue=False)
+        self.publish(self.mqtt_status_topic, self._mqtt_status_payload("connected"), qos=1, retain=True, queue=False)
         self._resubscribe()
         self._flush_pending_messages()
         self._notify_connect()
@@ -287,6 +366,7 @@ class MQTTManager:
         was_connected = self.is_connected()
         with self._state_lock:
             self._connected = False
+            self._mqtt_status = "disconnected" if not self._running else "reconnecting"
             self._connected_event.clear()
         if was_connected or self._running:
             logger.warning("MQTT disconnected with rc=%s", rc)
@@ -354,6 +434,46 @@ class MQTTManager:
                 listener()
             except Exception:
                 logger.exception("MQTT disconnect listener failed")
+
+    def _next_reconnect_delay(self) -> float:
+        attempt = max(0, self._reconnect_attempt - 1)
+        base = min(self.reconnect_max_delay, self.reconnect_min_delay * (2 ** min(attempt, 8)))
+        jitter = random.uniform(0, min(1.0, base * 0.2))
+        return min(self.reconnect_max_delay, base + jitter)
+
+    def _internet_available(self) -> bool:
+        try:
+            with socket.create_connection(
+                (self.config.internet_check_host, self.config.internet_check_port),
+                timeout=self.config.internet_check_timeout,
+            ):
+                return True
+        except OSError:
+            return False
+
+    def _set_mqtt_status(self, status: str, *, publish: bool = True) -> None:
+        with self._state_lock:
+            if self._mqtt_status == status:
+                return
+            self._mqtt_status = status
+        logger.info("MQTT status changed to %s", status)
+        if publish and self.is_connected():
+            self.publish(self.mqtt_status_topic, self._mqtt_status_payload(status), qos=1, retain=True, queue=False)
+
+    def _device_status_payload(self, status: str) -> dict[str, Any]:
+        return {
+            "device_id": self.device_id,
+            "status": status,
+            "timestamp": utc_timestamp(),
+        }
+
+    def _mqtt_status_payload(self, status: str) -> dict[str, Any]:
+        return {
+            "device_id": self.device_id,
+            "mqtt_status": status,
+            "broker": f"{self.config.host}:{self.config.port}",
+            "timestamp": utc_timestamp(),
+        }
 
 
 _shared_manager_lock = threading.Lock()
