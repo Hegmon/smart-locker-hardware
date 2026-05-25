@@ -61,9 +61,10 @@ def load_mqtt_config(config_path: Path | None = None) -> MQTTConfig:
 
     mqtt_config = raw_config.get("mqtt") or {}
     device_id = str(
-        get_str_setting("DEVICE_ID", "", aliases=("SMARTLOCKER_DEVICE_ID",))
-        or raw_config.get("device_uuid")
+        get_str_setting("DEVICE_ID", "", aliases=("SMARTLOCKER_DEVICE_ID", "QBOX_DEVICE_ID"))
         or raw_config.get("device_id")
+        or raw_config.get("locker_id")
+        or raw_config.get("device_uuid")
         or read_device_id()
         or _read_local_device_id()
         or ensure_device_id()
