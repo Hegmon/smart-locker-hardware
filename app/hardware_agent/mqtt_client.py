@@ -98,6 +98,19 @@ class MqttClient:
     def _handle_message(self, topic: str, payload: bytes) -> None:
         self._on_message(None, None, _Message(topic, payload))
 
+    def _on_connect(self, client, userdata, flags, rc):
+        """Compatibility callback for tests and older direct-paho integrations."""
+        if rc != 0:
+            logger.warning("Hardware MQTT adapter direct connect failed rc=%s", rc)
+            return
+        if self.device_uuid:
+            client.subscribe(f"devices/{self.device_uuid}/services/+/request", qos=1)
+            client.subscribe(f"devices/{self.device_uuid}/commands", qos=1)
+        client.subscribe("devices/+/services/+/request", qos=1)
+        client.subscribe("devices/+/commands", qos=1)
+        client.subscribe("hardware_agent/request/+", qos=1)
+        self._on_manager_connect()
+
     def _on_manager_connect(self) -> None:
         self._fallback_notified = False
         logger.info("Hardware MQTT adapter connected through shared manager")
