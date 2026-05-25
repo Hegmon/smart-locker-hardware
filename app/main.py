@@ -13,6 +13,8 @@ from app.deployment.bootstrap import bootstrap_device
 from app.deployment.device_identity import ensure_device_id
 from app.deployment.validation import validate_runtime_configuration
 from app.services.backend_sync import register_device_if_needed
+from app.services.device_actions import DeviceActionService
+from app.services.health_monitor import HealthMonitor
 from app.utils.logger import get_logger
 
 
@@ -22,12 +24,15 @@ logger = get_logger(__name__)
 class DeviceApplication:
     def __init__(self):
         self.mqtt = get_shared_mqtt_manager()
-        self.telemetry = TelemetryAgent(self.mqtt, interval_seconds=30)
+        self.telemetry = TelemetryAgent(self.mqtt)
         self.heartbeat = HeartbeatAgent(self.mqtt, interval_seconds=60)
         self.control = ControlAgent(self.mqtt)
+        self.health = HealthMonitor(self.mqtt)
+        self.actions = DeviceActionService(self.mqtt, shutdown_callback=self._stop_services_before_remote_action)
         self.wifi_agent = None
         self.streaming_agent = None
         self._stop_event = threading.Event()
+        self._shutdown_lock = threading.RLock()
 
     def start(self) -> None:
         logger.info("Starting Smart Locker device runtime")
@@ -37,8 +42,10 @@ class DeviceApplication:
 
         self.mqtt.start()
         self.control.start()
+        self.actions.start()
         self.telemetry.start()
         self.heartbeat.start()
+        self.health.start()
 
         self._start_wifi_agent()
         self._start_streaming_agent()
@@ -65,17 +72,25 @@ class DeviceApplication:
             logger.exception("Streaming agent failed to start; continuing device runtime")
 
     def stop(self) -> None:
-        logger.info("Stopping Smart Locker device runtime")
-        self._stop_event.set()
-        for agent in (self.streaming_agent, self.wifi_agent, self.control, self.heartbeat, self.telemetry):
+        with self._shutdown_lock:
+            logger.info("Stopping Smart Locker device runtime")
+            self._stop_event.set()
+            self._stop_services_before_remote_action()
+            try:
+                self.actions.stop()
+            except Exception:
+                logger.exception("Agent shutdown failed: %s", self.actions.__class__.__name__)
+            self.mqtt.stop(publish_offline=True)
+            logger.info("Smart Locker device runtime stopped")
+
+    def _stop_services_before_remote_action(self) -> None:
+        for agent in (self.streaming_agent, self.wifi_agent, self.control, self.health, self.heartbeat, self.telemetry):
             if agent is None:
                 continue
             try:
                 agent.stop()
             except Exception:
                 logger.exception("Agent shutdown failed: %s", agent.__class__.__name__)
-        self.mqtt.stop(publish_offline=True)
-        logger.info("Smart Locker device runtime stopped")
 
     def run_forever(self) -> None:
         self.start()
