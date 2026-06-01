@@ -81,6 +81,41 @@ class InspectionManagerTests(unittest.TestCase):
         self.assertGreaterEqual(len(candidates), 2)
         self.assertEqual(candidates[0], "/dev/video2")
 
+    def test_camera_tests_pause_and_restore_streaming_services(self) -> None:
+        manager = InspectionAgentManager(device_id="SL001")
+
+        class _FakeStreamingServices:
+            def __init__(self) -> None:
+                self.stopped = []
+                self.started = []
+
+            def stop_streaming_services(self, *, timeout_seconds: float = 12.0):
+                self.stopped.append(timeout_seconds)
+                return type("_Control", (), {"stopped_services": ("qbox-device.service",)})()
+
+            def start_streaming_services(self, services, *, timeout_seconds: float = 12.0):
+                self.started.append((services, timeout_seconds))
+
+        class _FakeCameraTest:
+            def __init__(self, *, device_id: str, camera_controller, relay_controller) -> None:
+                pass
+
+            def run(self, *, request_id: str = "") -> InspectionResult:
+                return InspectionResult.success(
+                    request_id=request_id,
+                    device_id="SL001",
+                    module="internal_camera",
+                    message="ok",
+                )
+
+        manager.streaming_services = _FakeStreamingServices()
+        with patch("app.inspection_agent.manager.TESTS", {"internal_camera": _FakeCameraTest}):
+            result = manager.run_test("internal_camera", request_id="req-3")
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(manager.streaming_services.stopped, [12.0])
+        self.assertEqual(manager.streaming_services.started, [(("qbox-device.service",), 12.0)])
+
 
 if __name__ == "__main__":
     unittest.main()
