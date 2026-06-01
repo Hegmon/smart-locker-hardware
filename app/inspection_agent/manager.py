@@ -129,11 +129,13 @@ class InspectionAgentManager:
                     failed += 1
 
                 if module_name == "external_camera" and camera_runtime_stopped:
-                    self.streaming_services.start_service(self.camera_runtime_service)
+                    if not self.streaming_services.start_service(self.camera_runtime_service):
+                        logger.warning("Failed to restart camera runtime service after inspection: %s", self.camera_runtime_service)
                     camera_runtime_stopped = False
         finally:
             if camera_runtime_stopped:
-                self.streaming_services.start_service(self.camera_runtime_service)
+                if not self.streaming_services.start_service(self.camera_runtime_service):
+                    logger.warning("Failed to restart camera runtime service during cleanup: %s", self.camera_runtime_service)
 
         summary = InspectionSummary.from_counts(
             request_id=request_id,
@@ -169,4 +171,5 @@ class InspectionAgentManager:
             yield
         finally:
             if was_active:
-                self.streaming_services.start_service(self.camera_runtime_service)
+                if not self.streaming_services.start_service(self.camera_runtime_service):
+                    logger.warning("Failed to restart camera runtime service after single inspection: %s", self.camera_runtime_service)
