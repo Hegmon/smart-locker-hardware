@@ -1,4 +1,5 @@
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -49,11 +50,17 @@ class LoggingManager:
             if file_path in existing_files:
                 continue
 
-            file_handler = RotatingFileHandler(
-                filename=file_path,
-                maxBytes=MAX_LOG_SIZE,
-                backupCount=BACKUP_COUNT,
-            )
+            try:
+                os.makedirs(LOG_DIR, exist_ok=True)
+                file_handler = RotatingFileHandler(
+                    filename=file_path,
+                    maxBytes=MAX_LOG_SIZE,
+                    backupCount=BACKUP_COUNT,
+                )
+            except OSError:
+                root_logger.debug("Unable to open streaming log file %s", file_path, exc_info=True)
+                continue
+
             file_handler.setLevel(level)
             file_handler.setFormatter(formatter)
             root_logger.addHandler(file_handler)
