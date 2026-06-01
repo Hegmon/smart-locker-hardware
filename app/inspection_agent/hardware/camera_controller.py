@@ -78,11 +78,13 @@ class CameraController:
         normalized = self._normalize_role(role)
         candidates: list[str] = []
 
-        def add_candidate(device: str | None) -> None:
+        def add_candidate(device: str | None, *, must_exist: bool = True) -> None:
             if not device:
                 return
             candidate = str(device).strip()
             if not candidate or candidate in candidates:
+                return
+            if must_exist and not Path(candidate).exists():
                 return
             candidates.append(candidate)
 
@@ -97,10 +99,50 @@ class CameraController:
         except Exception:
             logger.debug("Camera role assignment unavailable", exc_info=True)
 
+        try:
+            from app.streaming_agent.camera_detector import detect_usb_cameras
+
+            detected_cameras = detect_usb_cameras(retries=2, retry_delay=0.5)
+            role_cameras = self._select_detected_cameras_for_role(normalized, detected_cameras)
+            for camera in role_cameras:
+                add_candidate(camera.get("video_device"))
+            for camera in detected_cameras:
+                add_candidate(camera.get("video_device"))
+        except Exception:
+            logger.debug("USB camera detection unavailable", exc_info=True)
+
         for index in range(8):
             add_candidate(f"/dev/video{index}")
 
         return candidates
+
+    def _select_detected_cameras_for_role(self, role: str, detected_cameras: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not detected_cameras:
+            return []
+
+        normalized = self._normalize_role(role)
+        internal_keywords = ("1.2", "internal")
+        external_keywords = ("1.4", "external")
+
+        if normalized == "internal":
+            preferred = [
+                camera
+                for camera in detected_cameras
+                if any(keyword in str(camera.get("usb_path", "")).lower() for keyword in internal_keywords)
+            ]
+            return preferred or detected_cameras[:1]
+
+        if normalized == "external":
+            preferred = [
+                camera
+                for camera in detected_cameras
+                if any(keyword in str(camera.get("usb_path", "")).lower() for keyword in external_keywords)
+            ]
+            if preferred:
+                return preferred
+            return detected_cameras[1:2] or detected_cameras[:1]
+
+        return detected_cameras[:1]
 
     def _capture_via_opencv(self, role: str, device: str) -> CameraCaptureResult:
         if not Path(device).exists():
