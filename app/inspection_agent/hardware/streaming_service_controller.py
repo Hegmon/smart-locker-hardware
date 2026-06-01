@@ -26,15 +26,27 @@ SUDOERS_INSPECTION_COMMANDS = (
     "/bin/systemctl stop qbox-device.service",
     "/bin/systemctl start qbox-device.service",
     "/bin/systemctl restart qbox-device.service",
+    "/usr/bin/systemctl stop qbox-device.service",
+    "/usr/bin/systemctl start qbox-device.service",
+    "/usr/bin/systemctl restart qbox-device.service",
     "/bin/systemctl stop qbox-streams.service",
     "/bin/systemctl start qbox-streams.service",
     "/bin/systemctl restart qbox-streams.service",
+    "/usr/bin/systemctl stop qbox-streams.service",
+    "/usr/bin/systemctl start qbox-streams.service",
+    "/usr/bin/systemctl restart qbox-streams.service",
     "/bin/systemctl stop qbox-streaming-agent.service",
     "/bin/systemctl start qbox-streaming-agent.service",
     "/bin/systemctl restart qbox-streaming-agent.service",
+    "/usr/bin/systemctl stop qbox-streaming-agent.service",
+    "/usr/bin/systemctl start qbox-streaming-agent.service",
+    "/usr/bin/systemctl restart qbox-streaming-agent.service",
     "/bin/systemctl stop smartlocker-streaming-agent.service",
     "/bin/systemctl start smartlocker-streaming-agent.service",
     "/bin/systemctl restart smartlocker-streaming-agent.service",
+    "/usr/bin/systemctl stop smartlocker-streaming-agent.service",
+    "/usr/bin/systemctl start smartlocker-streaming-agent.service",
+    "/usr/bin/systemctl restart smartlocker-streaming-agent.service",
 )
 
 
@@ -79,12 +91,14 @@ class StreamingServiceController:
     def stop_service(self, service: str, *, timeout_seconds: float = 12.0) -> bool:
         if not self._is_active(service):
             return False
+        logger.info("Stopping service for inspection: %s", service)
         if not self._systemctl("stop", service):
             return False
         self._wait_for_state(service, active=False, timeout_seconds=timeout_seconds)
         return True
 
     def start_service(self, service: str, *, timeout_seconds: float = 12.0) -> bool:
+        logger.info("Starting service after inspection: %s", service)
         if not self._systemctl("start", service):
             return False
         self._wait_for_state(service, active=True, timeout_seconds=timeout_seconds)
@@ -122,7 +136,8 @@ class StreamingServiceController:
         return True
 
     def _systemctl_command(self, action: str, service: str) -> list[str]:
-        base_command = ["systemctl", action]
+        systemctl_binary = self._systemctl_binary()
+        base_command = [systemctl_binary, action]
         if action == "stop":
             base_command.append("--no-block")
         base_command.append(service)
@@ -132,6 +147,10 @@ class StreamingServiceController:
         if shutil.which("sudo") is not None:
             return ["sudo", "-n", *base_command]
         return base_command
+
+    @staticmethod
+    def _systemctl_binary() -> str:
+        return shutil.which("systemctl") or "/bin/systemctl"
 
     def _is_active(self, service: str) -> bool:
         try:
