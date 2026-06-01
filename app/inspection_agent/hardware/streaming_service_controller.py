@@ -140,6 +140,8 @@ class StreamingServiceController:
         base_command = [systemctl_binary, action]
         if action == "stop":
             base_command.append("--no-block")
+        if action == "start":
+            base_command.append("--no-block")
         base_command.append(service)
 
         if os.geteuid() == 0:
