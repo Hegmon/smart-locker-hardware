@@ -111,9 +111,6 @@ class CameraController:
         except Exception:
             logger.debug("USB camera detection unavailable", exc_info=True)
 
-        for index in range(8):
-            add_candidate(f"/dev/video{index}")
-
         return candidates
 
     def _select_detected_cameras_for_role(self, role: str, detected_cameras: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -150,7 +147,8 @@ class CameraController:
 
         capture = None
         try:
-            capture = cv2.VideoCapture(device, cv2.CAP_V4L2)
+            capture_target: str | int = self._video_capture_target(device)
+            capture = cv2.VideoCapture(capture_target, cv2.CAP_V4L2)
             if not capture.isOpened():
                 return CameraCaptureResult(role=role, device=device, captured=False, message=f"Unable to open camera: {device}")
             ok, frame = capture.read()
@@ -174,6 +172,17 @@ class CameraController:
                     capture.release()
                 except Exception:
                     logger.debug("Camera release failed", exc_info=True)
+
+    @staticmethod
+    def _video_capture_target(device: str) -> str | int:
+        candidate = str(device).strip()
+        if candidate.startswith("/dev/video"):
+            suffix = candidate.rsplit("video", maxsplit=1)[-1]
+            if suffix.isdigit():
+                return int(suffix)
+        if candidate.isdigit():
+            return int(candidate)
+        return candidate
 
     def _capture_via_libcamera(self, role: str) -> CameraCaptureResult | None:
         command = self._libcamera_command()
