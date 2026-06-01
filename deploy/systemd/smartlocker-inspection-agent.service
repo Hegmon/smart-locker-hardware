@@ -1,0 +1,58 @@
+[Unit]
+Description=Smart Locker Inspection Agent
+After=network-online.target qbox-device.service NetworkManager.service dbus.service
+Wants=network-online.target qbox-device.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__PROJECT_DIR__
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=__PROJECT_DIR__:/usr/lib/python3/dist-packages
+Environment=SMARTLOCKER_CONFIG_JSON=/etc/smartlocker/config.json
+Environment=SMARTLOCKER_DEVICE_ID_FILE=/etc/smartlocker/device_id
+Environment=SMARTLOCKER_BACKEND_STATE_FILE=/var/lib/smartlocker/backend_device.json
+Environment=DEVICE_MODE=production
+Environment=MQTT_DEVICE_TOPIC_PREFIX=device
+Environment=MQTT_RECONNECT_MIN_DELAY_SECONDS=1
+Environment=MQTT_RECONNECT_MAX_DELAY_SECONDS=60
+Environment=LOG_LEVEL=INFO
+Environment=SMARTLOCKER_LOG_FILE=/var/log/smartlocker/inspection-agent.log
+EnvironmentFile=-/etc/qbox-device.conf
+EnvironmentFile=-/etc/smartlocker/.env
+EnvironmentFile=-__PROJECT_DIR__/.env
+ExecStart=__PROJECT_DIR__/.venv/bin/python -m inspection_agent.main
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+StateDirectory=smartlocker
+LogsDirectory=smartlocker
+SupplementaryGroups=gpio kmem
+ProtectSystem=false
+ProtectHome=false
+PrivateTmp=true
+PrivateDevices=false
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+DeviceAllow=/dev/rfkill rw
+DeviceAllow=/dev/ttyAMA0 rw
+DeviceAllow=/dev/mem rw
+DeviceAllow=/dev/gpiomem rw
+DeviceAllow=/dev/gpiochip0 rw
+DeviceAllow=/dev/gpiochip1 rw
+DeviceAllow=/dev/gpiochip2 rw
+DeviceAllow=/dev/gpiochip3 rw
+DeviceAllow=/dev/gpiochip4 rw
+DeviceAllow=/dev/gpiochip5 rw
+DeviceAllow=/dev/gpiochip6 rw
+DeviceAllow=/dev/gpiochip7 rw
+DeviceAllow=/dev/video0 rw
+DeviceAllow=/dev/video1 rw
+DeviceAllow=/dev/video2 rw
+DeviceAllow=/dev/video3 rw
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
