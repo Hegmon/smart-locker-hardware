@@ -22,7 +22,7 @@ Environment=SMARTLOCKER_LOG_FILE=/var/log/smartlocker/inspection-agent.log
 EnvironmentFile=-/etc/qbox-device.conf
 EnvironmentFile=-/etc/smartlocker/.env
 EnvironmentFile=-__PROJECT_DIR__/.env
-ExecStart=__PROJECT_DIR__/.venv/bin/python -m inspection_agent.main
+ExecStart=__PROJECT_DIR__/.venv/bin/python -m app.inspection_agent.main
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=300
