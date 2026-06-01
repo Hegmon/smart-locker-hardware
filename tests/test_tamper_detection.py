@@ -1,79 +1,92 @@
 from __future__ import annotations
 
+import time
 import unittest
 
 from app.streaming_agent.detection import tamper_detection
-from app.streaming_agent.detection.tamper_detection import TamperDetection
+from app.streaming_agent.detection.tamper_detection import (
+    TAMPER_STATE_ACTIVE,
+    TAMPER_STATE_CANDIDATE,
+    TAMPER_STATE_CLEARING,
+    TAMPER_STATE_IDLE,
+    TamperDetection,
+)
 
 
 class TamperDetectionTests(unittest.TestCase):
-    def test_update_tamper_state_turns_led_on_after_confirm_window(self) -> None:
-        led = _Led()
+    def test_update_tamper_state_publishes_once_on_active_transition(self) -> None:
+        manager = _StateManager()
         detector = TamperDetection(
             None,
             camera_role="internal",
-            led_controller=led,
+            led_controller=_Led(),
+            detection_state_manager=manager,
             tamper_confirm_seconds=0.1,
         )
-        detector._tamper_started_at = 0.0
         detector._required_tamper_frames = 1
+        detector._update_tamper_state(True, "covered")
+        self.assertEqual(detector._tamper_state, TAMPER_STATE_CANDIDATE)
+        self.assertEqual(manager.calls, [])
 
+        time.sleep(0.11)
+        detector._update_tamper_state(True, "covered")
         detector._update_tamper_state(True, "covered")
 
-        # direct led calls removed; tamper state is now reported via detection_state_manager when present
-        self.assertTrue(detector._tamper_active)
-        self.assertIsNone(led.active)  # no direct call in new architecture
-        self.assertIsNone(led.role)
+        self.assertEqual(detector._tamper_state, TAMPER_STATE_ACTIVE)
+        self.assertEqual(manager.calls[0], ("internal", True, "covered"))
 
-    def test_update_tamper_state_turns_led_off_after_clear_window(self) -> None:
-        led = _Led()
+    def test_update_tamper_state_enters_clearing_then_idles(self) -> None:
+        manager = _StateManager()
         detector = TamperDetection(
             None,
             camera_role="external",
-            led_controller=led,
+            led_controller=_Led(),
+            detection_state_manager=manager,
             tamper_clear_seconds=0.1,
         )
-        detector._tamper_active = True
-        detector._last_tamper_seen_at = 0.0
+        detector._tamper_state = TAMPER_STATE_ACTIVE
         detector._required_clear_frames = 1
 
         detector._update_tamper_state(False, "")
+        self.assertEqual(detector._tamper_state, TAMPER_STATE_CLEARING)
+        self.assertEqual(manager.calls, [])
 
-        self.assertFalse(detector._tamper_active)
-        self.assertIsNone(led.active)  # no direct call
-        self.assertIsNone(led.role)
+        time.sleep(0.11)
+        detector._update_tamper_state(False, "")
+
+        self.assertEqual(detector._tamper_state, TAMPER_STATE_IDLE)
+        self.assertEqual(manager.calls, [("external", False, "")])
 
     def test_update_tamper_state_waits_for_default_clear_timeout(self) -> None:
-        led = _Led()
         detector = TamperDetection(
             None,
             camera_role="internal",
-            led_controller=led,
+            led_controller=_Led(),
         )
-        detector._tamper_active = True
+        detector._tamper_state = TAMPER_STATE_ACTIVE
         detector._required_clear_frames = 1
 
         detector._update_tamper_state(False, "")
 
-        self.assertIsNone(led.active)
-        self.assertTrue(detector._tamper_active)
+        self.assertEqual(detector._tamper_state, TAMPER_STATE_CLEARING)
 
     def test_update_tamper_state_can_clear_immediately_when_configured(self) -> None:
-        led = _Led()
+        manager = _StateManager()
         detector = TamperDetection(
             None,
             camera_role="internal",
-            led_controller=led,
+            led_controller=_Led(),
+            detection_state_manager=manager,
             tamper_clear_seconds=0.0,
         )
-        detector._tamper_active = True
+        detector._tamper_state = TAMPER_STATE_ACTIVE
         detector._required_clear_frames = 1
 
         detector._update_tamper_state(False, "")
+        detector._update_tamper_state(False, "")
 
-        self.assertFalse(detector._tamper_active)
-        self.assertIsNone(led.active)
-        self.assertIsNone(led.role)
+        self.assertEqual(detector._tamper_state, TAMPER_STATE_IDLE)
+        self.assertEqual(manager.calls, [("internal", False, "")])
 
     @unittest.skipIf(tamper_detection.np is None, "numpy unavailable")
     def test_dark_frame_is_tamper(self) -> None:
@@ -131,13 +144,10 @@ class TamperDetectionTests(unittest.TestCase):
 
 
 class _Led:
+    """Minimal legacy mock so existing tamper tests can assert 'no direct call happened'."""
     def __init__(self):
         self.role = None
         self.active = None
-
-    def set_tamper_active(self, camera_role, active):
-        self.role = camera_role
-        self.active = active
 
 
 class _Buffer:
@@ -145,6 +155,17 @@ class _Buffer:
     height = 8
     channels = 3
     frame_size = width * height * channels
+
+
+class _StateManager:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def update_tamper(self, camera_role, *, tamper_detected=False, reason=""):
+        self.calls.append((camera_role, tamper_detected, reason))
+
+    def clear_tamper(self, camera_role):
+        self.calls.append((camera_role, False, ""))
 
 
 if __name__ == "__main__":
