@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 from typing import Type
 
+from app.deployment.runtime_config import get_float_setting, get_str_setting
 from app.inspection_agent.hardware.camera_controller import CameraController
 from app.inspection_agent.hardware.relay_controller import RelayController
 from app.inspection_agent.hardware.streaming_service_controller import StreamingServiceController
@@ -17,7 +18,6 @@ from app.inspection_agent.tests.green_led_test import GreenLedTest
 from app.inspection_agent.tests.internal_camera_test import InternalCameraTest
 from app.inspection_agent.tests.red_led_test import RedLedTest
 from app.inspection_agent.tests.solenoid_test import SolenoidTest
-from app.deployment.runtime_config import get_str_setting
 from app.utils.logger import get_logger
 
 
@@ -48,6 +48,7 @@ class InspectionAgentManager:
     def __init__(self, device_id: str) -> None:
         self.device_id = device_id
         self.camera_runtime_service = get_str_setting("INSPECTION_CAMERA_RUNTIME_SERVICE", "qbox-device.service")
+        self.camera_settle_seconds = get_float_setting("INSPECTION_CAMERA_SETTLE_SECONDS", 2.0)
         self.hardware = InspectionHardwareBundle(
             camera_controller=CameraController(),
             relay_controller=RelayController(),
@@ -89,14 +90,50 @@ class InspectionAgentManager:
         results: list[InspectionResult] = []
         passed = 0
         failed = 0
+        camera_runtime_active = self.streaming_services.is_active(self.camera_runtime_service)
+        camera_runtime_stopped = False
 
-        for module_name in TESTS:
-            result = self.run_test(module_name, request_id=request_id)
-            results.append(result)
-            if result.status == "PASS":
-                passed += 1
-            else:
-                failed += 1
+        if camera_runtime_active:
+            camera_runtime_stopped = self.streaming_services.stop_service(self.camera_runtime_service)
+            if camera_runtime_stopped and self.camera_settle_seconds > 0:
+                import time
+
+                time.sleep(self.camera_settle_seconds)
+
+        try:
+            for module_name in TESTS:
+                test_class = TESTS.get(module_name)
+                if test_class is None:
+                    continue
+
+                test = test_class(
+                    device_id=self.device_id,
+                    camera_controller=self.hardware.camera_controller,
+                    relay_controller=self.hardware.relay_controller,
+                )
+                try:
+                    result = test.run(request_id=request_id)
+                except Exception as exc:
+                    logger.exception("Inspection test crashed: module=%s", module_name)
+                    result = InspectionResult.failure(
+                        request_id=request_id,
+                        device_id=self.device_id,
+                        module=module_name,
+                        message=f"Inspection test raised an exception: {exc}",
+                    )
+
+                results.append(result)
+                if result.status == "PASS":
+                    passed += 1
+                else:
+                    failed += 1
+
+                if module_name == "external_camera" and camera_runtime_stopped:
+                    self.streaming_services.start_service(self.camera_runtime_service)
+                    camera_runtime_stopped = False
+        finally:
+            if camera_runtime_stopped:
+                self.streaming_services.start_service(self.camera_runtime_service)
 
         summary = InspectionSummary.from_counts(
             request_id=request_id,
@@ -124,6 +161,10 @@ class InspectionAgentManager:
         was_active = self.streaming_services.is_active(self.camera_runtime_service)
         if was_active:
             self.streaming_services.stop_service(self.camera_runtime_service)
+            if self.camera_settle_seconds > 0:
+                import time
+
+                time.sleep(self.camera_settle_seconds)
         try:
             yield
         finally:
