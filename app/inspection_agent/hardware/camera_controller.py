@@ -3,6 +3,9 @@ from __future__ import annotations
 """Camera capture utilities for inspection tests."""
 
 import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,16 +37,72 @@ class CameraController:
 
     def __init__(self) -> None:
         self._defaults = {
-            "internal": os.getenv("INTERNAL_CAMERA_DEVICE", "/dev/video0").strip(),
-            "external": os.getenv("EXTERNAL_CAMERA_DEVICE", "/dev/video2").strip(),
+            "internal": os.getenv("INTERNAL_CAMERA_DEVICE", "").strip(),
+            "external": os.getenv("EXTERNAL_CAMERA_DEVICE", "").strip(),
         }
 
     def capture_frame(self, role: str) -> CameraCaptureResult:
-        device = self.resolve_device(role)
+        normalized_role = self._normalize_role(role)
+
+        if normalized_role == "internal":
+            libcamera_result = self._capture_via_libcamera(normalized_role)
+            if libcamera_result is not None:
+                return libcamera_result
+
+        candidates = self.resolve_device_candidates(normalized_role)
         if cv2 is None:
-            return CameraCaptureResult(role=role, device=device, captured=False, message="OpenCV is unavailable")
-        if not device:
-            return CameraCaptureResult(role=role, device="", captured=False, message=f"No camera device resolved for {role}")
+            device = candidates[0] if candidates else ""
+            return CameraCaptureResult(role=normalized_role, device=device, captured=False, message="OpenCV is unavailable")
+
+        last_message = f"No camera device resolved for {normalized_role}"
+        for device in candidates:
+            if not device:
+                continue
+            result = self._capture_via_opencv(normalized_role, device)
+            if result.captured:
+                return result
+            last_message = result.message
+
+        return CameraCaptureResult(
+            role=normalized_role,
+            device=candidates[0] if candidates else "",
+            captured=False,
+            message=last_message,
+        )
+
+    def resolve_device(self, role: str) -> str:
+        candidates = self.resolve_device_candidates(role)
+        return candidates[0] if candidates else ""
+
+    def resolve_device_candidates(self, role: str) -> list[str]:
+        normalized = self._normalize_role(role)
+        candidates: list[str] = []
+
+        def add_candidate(device: str | None) -> None:
+            if not device:
+                return
+            candidate = str(device).strip()
+            if not candidate or candidate in candidates:
+                return
+            candidates.append(candidate)
+
+        add_candidate(self._defaults.get(normalized))
+
+        try:
+            from app.streaming_agent.camera_roles import assign_camera_roles
+
+            roles = assign_camera_roles()
+            role_entry = roles.get(normalized) or {}
+            add_candidate(role_entry.get("video_device"))
+        except Exception:
+            logger.debug("Camera role assignment unavailable", exc_info=True)
+
+        for index in range(8):
+            add_candidate(f"/dev/video{index}")
+
+        return candidates
+
+    def _capture_via_opencv(self, role: str, device: str) -> CameraCaptureResult:
         if not Path(device).exists():
             return CameraCaptureResult(role=role, device=device, captured=False, message=f"Camera device not found: {device}")
 
@@ -65,7 +124,7 @@ class CameraController:
                 details={"width": width, "height": height},
             )
         except Exception as exc:
-            logger.exception("Camera capture failed for role=%s device=%s", role, device)
+            logger.debug("Camera capture failed for role=%s device=%s", role, device, exc_info=True)
             return CameraCaptureResult(role=role, device=device, captured=False, message=str(exc))
         finally:
             if capture is not None:
@@ -74,7 +133,56 @@ class CameraController:
                 except Exception:
                     logger.debug("Camera release failed", exc_info=True)
 
-    def resolve_device(self, role: str) -> str:
-        normalized = str(role or "").strip().lower()
-        device = self._defaults.get(normalized, "")
-        return device if device else ""
+    def _capture_via_libcamera(self, role: str) -> CameraCaptureResult | None:
+        command = self._libcamera_command()
+        if command is None:
+            return None
+
+        output_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix=f"inspection-{role}-", suffix=".jpg", delete=False) as temp_file:
+                output_path = temp_file.name
+
+            result = subprocess.run(
+                [*command, "--nopreview", "--timeout", "500", "--output", output_path],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10.0,
+            )
+            if result.returncode != 0:
+                logger.debug("libcamera capture failed for %s: %s", role, result.stderr.strip())
+                return None
+
+            if not output_path or not Path(output_path).exists() or Path(output_path).stat().st_size <= 0:
+                return None
+
+            return CameraCaptureResult(
+                role=role,
+                device=command[0],
+                captured=True,
+                message="Frame captured via libcamera",
+                details={"method": command[0]},
+            )
+        except FileNotFoundError:
+            return None
+        except Exception:
+            logger.debug("libcamera capture path failed for role=%s", role, exc_info=True)
+            return None
+        finally:
+            if output_path:
+                try:
+                    Path(output_path).unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to clean up temporary libcamera image %s", output_path, exc_info=True)
+
+    @staticmethod
+    def _libcamera_command() -> list[str] | None:
+        for command in ("rpicam-still", "libcamera-still"):
+            if shutil.which(command):
+                return [command]
+        return None
+
+    @staticmethod
+    def _normalize_role(role: str) -> str:
+        return str(role or "").strip().lower()
