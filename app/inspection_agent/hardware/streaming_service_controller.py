@@ -94,15 +94,13 @@ class StreamingServiceController:
         logger.info("Stopping service for inspection: %s", service)
         if not self._systemctl("stop", service):
             return False
-        self._wait_for_state(service, active=False, timeout_seconds=timeout_seconds)
-        return True
+        return self._wait_for_state(service, active=False, timeout_seconds=timeout_seconds)
 
     def start_service(self, service: str, *, timeout_seconds: float = 12.0) -> bool:
         logger.info("Starting service after inspection: %s", service)
         if not self._systemctl("start", service):
             return False
-        self._wait_for_state(service, active=True, timeout_seconds=timeout_seconds)
-        return True
+        return self._wait_for_state(service, active=True, timeout_seconds=timeout_seconds)
 
     def is_active(self, service: str) -> bool:
         return self._is_active(service)
@@ -110,24 +108,25 @@ class StreamingServiceController:
     def _systemctl(self, action: str, service: str) -> bool:
         try:
             command = self._systemctl_command(action, service)
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=15.0,
-            )
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                stdout, stderr = process.communicate(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+                logger.debug("systemctl %s for %s still running after fire-and-forget timeout", action, service)
+                return True
         except Exception as exc:
             logger.warning("systemctl %s failed for %s: %s", action, service, exc)
             return False
 
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            stdout = result.stdout.strip()
+        if process.returncode != 0:
+            stderr = (stderr or "").strip()
+            stdout = (stdout or "").strip()
             logger.warning(
                 "systemctl %s returned rc=%s for %s stdout=%s stderr=%s",
                 action,
-                result.returncode,
+                process.returncode,
                 service,
                 stdout,
                 stderr,
