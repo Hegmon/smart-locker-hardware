@@ -5,7 +5,7 @@ from __future__ import annotations
 import signal
 import time
 
-from app.core.mqtt_manager import get_shared_mqtt_manager
+from app.core.mqtt_manager import MQTTManager, load_mqtt_config
 from app.inspection_agent.manager import InspectionAgentManager
 from app.inspection_agent.mqtt.inspection_subscriber import InspectionSubscriber
 from app.utils.logger import get_logger
@@ -18,7 +18,12 @@ class InspectionAgentRuntime:
     """Long-running MQTT inspection runtime with automatic reconnect support."""
 
     def __init__(self) -> None:
-        self.mqtt = get_shared_mqtt_manager()
+        config = load_mqtt_config()
+        self.mqtt = MQTTManager(
+            config,
+            client_id=f"smart-locker-{config.device_id}-inspection",
+            publish_status_topics=False,
+        )
         self.manager = InspectionAgentManager(device_id=self.mqtt.device_id)
         self.subscriber = InspectionSubscriber(
             mqtt_manager=self.mqtt,
