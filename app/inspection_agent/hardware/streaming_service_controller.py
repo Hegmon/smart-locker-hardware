@@ -2,8 +2,10 @@ from __future__ import annotations
 
 """Best-effort systemd control for the streaming runtime during camera tests."""
 
+import os
 import subprocess
 import time
+import shutil
 from dataclasses import dataclass
 
 from app.deployment.runtime_config import get_str_setting
@@ -18,6 +20,21 @@ DEFAULT_STREAMING_SERVICE_NAMES = (
     "qbox-streaming-agent.service",
     "smartlocker-streaming-agent.service",
     "qbox-streams.service",
+)
+
+SUDOERS_INSPECTION_COMMANDS = (
+    "/bin/systemctl stop qbox-device.service",
+    "/bin/systemctl start qbox-device.service",
+    "/bin/systemctl restart qbox-device.service",
+    "/bin/systemctl stop qbox-streams.service",
+    "/bin/systemctl start qbox-streams.service",
+    "/bin/systemctl restart qbox-streams.service",
+    "/bin/systemctl stop qbox-streaming-agent.service",
+    "/bin/systemctl start qbox-streaming-agent.service",
+    "/bin/systemctl restart qbox-streaming-agent.service",
+    "/bin/systemctl stop smartlocker-streaming-agent.service",
+    "/bin/systemctl start smartlocker-streaming-agent.service",
+    "/bin/systemctl restart smartlocker-streaming-agent.service",
 )
 
 
@@ -63,8 +80,9 @@ class StreamingServiceController:
 
     def _systemctl(self, action: str, service: str) -> bool:
         try:
+            command = self._systemctl_command(action, service)
             result = subprocess.run(
-                ["systemctl", action, service],
+                command,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -87,6 +105,18 @@ class StreamingServiceController:
             )
             return False
         return True
+
+    def _systemctl_command(self, action: str, service: str) -> list[str]:
+        base_command = ["systemctl", action]
+        if action == "stop":
+            base_command.append("--no-block")
+        base_command.append(service)
+
+        if os.geteuid() == 0:
+            return base_command
+        if shutil.which("sudo") is not None:
+            return ["sudo", "-n", *base_command]
+        return base_command
 
     def _is_active(self, service: str) -> bool:
         try:
