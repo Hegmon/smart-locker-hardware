@@ -106,10 +106,13 @@ class MQTTManager:
         self,
         config: MQTTConfig,
         *,
+        client_id: str | None = None,
+        publish_status_topics: bool = True,
         max_pending_messages: int = 500,
     ):
         self.config = config
         self.device_id = config.device_id
+        self.publish_status_topics = bool(publish_status_topics)
         self.reconnect_min_delay = max(0.5, config.reconnect_min_delay)
         self.reconnect_max_delay = max(self.reconnect_min_delay, config.reconnect_max_delay)
         self.max_pending_messages = max(1, max_pending_messages)
@@ -117,16 +120,17 @@ class MQTTManager:
         self.topic_prefix = config.topic_prefix.strip("/") or "device"
         self.status_topic = f"{self.topic_prefix}/{self.device_id}/status"
         self.mqtt_status_topic = f"{self.topic_prefix}/{self.device_id}/mqtt_status"
-        self.client_id = f"smart-locker-{self.device_id}"
+        self.client_id = client_id or f"smart-locker-{self.device_id}"
         self.client = self._create_client(self.client_id)
         if config.username:
             self.client.username_pw_set(config.username, config.password or None)
-        self.client.will_set(
-            self.status_topic,
-            payload=self.dumps(self._device_status_payload("offline")),
-            qos=1,
-            retain=True,
-        )
+        if self.publish_status_topics:
+            self.client.will_set(
+                self.status_topic,
+                payload=self.dumps(self._device_status_payload("offline")),
+                qos=1,
+                retain=True,
+            )
         try:
             self.client.reconnect_delay_set(
                 min_delay=int(self.reconnect_min_delay),
@@ -187,7 +191,7 @@ class MQTTManager:
             self._running = False
 
         self._reconnect_wake.set()
-        if publish_offline and self.is_connected():
+        if publish_offline and self.is_connected() and self.publish_status_topics:
             try:
                 info = self.client.publish(
                     self.status_topic,
@@ -357,8 +361,9 @@ class MQTTManager:
             self._connected_event.set()
 
         logger.info("MQTT connected to %s:%s as %s", self.config.host, self.config.port, self.client_id)
-        self.publish(self.status_topic, self._device_status_payload("online"), qos=1, retain=True, queue=False)
-        self.publish(self.mqtt_status_topic, self._mqtt_status_payload("connected"), qos=1, retain=True, queue=False)
+        if self.publish_status_topics:
+            self.publish(self.status_topic, self._device_status_payload("online"), qos=1, retain=True, queue=False)
+            self.publish(self.mqtt_status_topic, self._mqtt_status_payload("connected"), qos=1, retain=True, queue=False)
         self._resubscribe()
         self._flush_pending_messages()
         self._notify_connect()
@@ -458,7 +463,7 @@ class MQTTManager:
                 return
             self._mqtt_status = status
         logger.info("MQTT status changed to %s", status)
-        if publish and self.is_connected():
+        if publish and self.is_connected() and self.publish_status_topics:
             self.publish(self.mqtt_status_topic, self._mqtt_status_payload(status), qos=1, retain=True, queue=False)
 
     def _device_status_payload(self, status: str) -> dict[str, Any]:
