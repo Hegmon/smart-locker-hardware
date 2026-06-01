@@ -89,12 +89,16 @@ class InspectionManagerTests(unittest.TestCase):
                 self.stopped = []
                 self.started = []
 
-            def stop_streaming_services(self, *, timeout_seconds: float = 12.0):
-                self.stopped.append(timeout_seconds)
-                return type("_Control", (), {"stopped_services": ("qbox-device.service",)})()
+            def is_active(self, service: str) -> bool:
+                return True
 
-            def start_streaming_services(self, services, *, timeout_seconds: float = 12.0):
-                self.started.append((services, timeout_seconds))
+            def stop_service(self, service: str, *, timeout_seconds: float = 12.0):
+                self.stopped.append((service, timeout_seconds))
+                return True
+
+            def start_service(self, service: str, *, timeout_seconds: float = 12.0):
+                self.started.append((service, timeout_seconds))
+                return True
 
         class _FakeCameraTest:
             def __init__(self, *, device_id: str, camera_controller, relay_controller) -> None:
@@ -113,8 +117,8 @@ class InspectionManagerTests(unittest.TestCase):
             result = manager.run_test("internal_camera", request_id="req-3")
 
         self.assertEqual(result.status, "PASS")
-        self.assertEqual(manager.streaming_services.stopped, [12.0])
-        self.assertEqual(manager.streaming_services.started, [(("qbox-device.service",), 12.0)])
+        self.assertEqual(manager.streaming_services.stopped, [("qbox-device.service", 12.0)])
+        self.assertEqual(manager.streaming_services.started, [("qbox-device.service", 12.0)])
 
 
 if __name__ == "__main__":
