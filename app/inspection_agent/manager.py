@@ -3,10 +3,12 @@ from __future__ import annotations
 """Registry-based inspection test manager."""
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 from typing import Type
 
 from app.inspection_agent.hardware.camera_controller import CameraController
 from app.inspection_agent.hardware.relay_controller import RelayController
+from app.inspection_agent.hardware.streaming_service_controller import StreamingServiceController
 from app.inspection_agent.schemas.inspection_response import InspectionResult, InspectionSummary
 from app.inspection_agent.tests.base_test import BaseInspectionTest
 from app.inspection_agent.tests.buzzer_test import BuzzerTest
@@ -48,6 +50,7 @@ class InspectionAgentManager:
             camera_controller=CameraController(),
             relay_controller=RelayController(),
         )
+        self.streaming_services = StreamingServiceController()
 
     def run_test(self, module_name: str, *, request_id: str = "") -> InspectionResult:
         module_key = self._normalize_module_name(module_name)
@@ -68,7 +71,8 @@ class InspectionAgentManager:
             relay_controller=self.hardware.relay_controller,
         )
         try:
-            result = test.run(request_id=request_id)
+            with self._camera_runtime_guard(module_key):
+                result = test.run(request_id=request_id)
         except Exception as exc:
             logger.exception("Inspection test crashed: module=%s", module_key)
             result = InspectionResult.failure(
@@ -108,3 +112,16 @@ class InspectionAgentManager:
     @staticmethod
     def _normalize_module_name(module_name: str) -> str:
         return str(module_name or "").strip().lower()
+
+    @contextmanager
+    def _camera_runtime_guard(self, module_name: str):
+        if module_name not in {"internal_camera", "external_camera"}:
+            yield
+            return
+
+        control = self.streaming_services.stop_streaming_services()
+        try:
+            yield
+        finally:
+            if control.stopped_services:
+                self.streaming_services.start_streaming_services(control.stopped_services)
