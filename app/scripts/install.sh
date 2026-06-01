@@ -13,6 +13,7 @@ FASTAPI_UNIT_TMP="$(mktemp)"
 WIFI_UNIT_TMP="$(mktemp)"
 WIFI_UPLOAD_UNIT_TMP="$(mktemp)"
 POLKIT_RULE_SRC="$PROJECT_DIR/deploy/polkit/49-smartlocker-networkmanager.rules"
+SUDOERS_RULE_SRC="$PROJECT_DIR/deploy/sudoers/smartlocker-inspection-agent"
 
 cleanup() {
   rm -f "$FASTAPI_UNIT_TMP" "$WIFI_UNIT_TMP" "$WIFI_UPLOAD_UNIT_TMP"
@@ -74,6 +75,15 @@ if [ -f "$POLKIT_RULE_SRC" ]; then
   sudo systemctl restart polkit || sudo systemctl restart polkit.service || true
 else
   echo "⚠️ Polkit rule not found at $POLKIT_RULE_SRC"
+fi
+
+echo "🔐 Configuring passwordless inspection service control..."
+sudo groupadd -f smartlocker
+sudo usermod -aG smartlocker "$(whoami)" || true
+if [ -f "$SUDOERS_RULE_SRC" ]; then
+  sudo install -m 0440 "$SUDOERS_RULE_SRC" /etc/sudoers.d/smartlocker-inspection-agent
+else
+  echo "⚠️ Sudoers rule not found at $SUDOERS_RULE_SRC"
 fi
 
 echo "🐍 Creating Python virtual environment..."
