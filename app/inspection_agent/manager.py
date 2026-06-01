@@ -17,6 +17,7 @@ from app.inspection_agent.tests.green_led_test import GreenLedTest
 from app.inspection_agent.tests.internal_camera_test import InternalCameraTest
 from app.inspection_agent.tests.red_led_test import RedLedTest
 from app.inspection_agent.tests.solenoid_test import SolenoidTest
+from app.deployment.runtime_config import get_str_setting
 from app.utils.logger import get_logger
 
 
@@ -46,6 +47,7 @@ class InspectionAgentManager:
 
     def __init__(self, device_id: str) -> None:
         self.device_id = device_id
+        self.camera_runtime_service = get_str_setting("INSPECTION_CAMERA_RUNTIME_SERVICE", "qbox-device.service")
         self.hardware = InspectionHardwareBundle(
             camera_controller=CameraController(),
             relay_controller=RelayController(),
@@ -119,9 +121,11 @@ class InspectionAgentManager:
             yield
             return
 
-        control = self.streaming_services.stop_streaming_services()
+        was_active = self.streaming_services.is_active(self.camera_runtime_service)
+        if was_active:
+            self.streaming_services.stop_service(self.camera_runtime_service)
         try:
             yield
         finally:
-            if control.stopped_services:
-                self.streaming_services.start_streaming_services(control.stopped_services)
+            if was_active:
+                self.streaming_services.start_service(self.camera_runtime_service)
