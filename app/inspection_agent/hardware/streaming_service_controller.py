@@ -64,19 +64,34 @@ class StreamingServiceController:
         for service in self.service_names:
             if not self._is_active(service):
                 continue
-            if self._systemctl("stop", service):
+            if self.stop_service(service, timeout_seconds=timeout_seconds):
                 stopped.append(service)
-                self._wait_for_state(service, active=False, timeout_seconds=timeout_seconds)
         if stopped:
             logger.info("Temporarily stopped streaming services for inspection: %s", stopped)
         return StreamingServiceControlResult(stopped_services=tuple(stopped))
 
     def start_streaming_services(self, services: tuple[str, ...], *, timeout_seconds: float = 12.0) -> None:
         for service in services:
-            if self._systemctl("start", service):
-                self._wait_for_state(service, active=True, timeout_seconds=timeout_seconds)
+            self.start_service(service, timeout_seconds=timeout_seconds)
         if services:
             logger.info("Restored streaming services after inspection: %s", services)
+
+    def stop_service(self, service: str, *, timeout_seconds: float = 12.0) -> bool:
+        if not self._is_active(service):
+            return False
+        if not self._systemctl("stop", service):
+            return False
+        self._wait_for_state(service, active=False, timeout_seconds=timeout_seconds)
+        return True
+
+    def start_service(self, service: str, *, timeout_seconds: float = 12.0) -> bool:
+        if not self._systemctl("start", service):
+            return False
+        self._wait_for_state(service, active=True, timeout_seconds=timeout_seconds)
+        return True
+
+    def is_active(self, service: str) -> bool:
+        return self._is_active(service)
 
     def _systemctl(self, action: str, service: str) -> bool:
         try:
