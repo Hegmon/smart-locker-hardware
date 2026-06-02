@@ -16,6 +16,7 @@ from app.services.backend_sync import register_device_if_needed
 from app.services.device_actions import DeviceActionService
 from app.services.health_monitor import HealthMonitor
 from app.services.qbox_control import QBoxControlService
+from app.services.runtime_registry import set_streaming_agent
 from app.utils.logger import get_logger
 
 
@@ -70,8 +71,10 @@ class DeviceApplication:
 
             self.streaming_agent = StreamingAgent()
             self.streaming_agent.start()
+            set_streaming_agent(self.streaming_agent)
         except Exception:
             self.streaming_agent = None
+            set_streaming_agent(None)
             logger.exception("Streaming agent failed to start; continuing device runtime")
 
     def stop(self) -> None:
@@ -98,6 +101,7 @@ class DeviceApplication:
             self.qbox_control.stop()
         except Exception:
             logger.exception("Agent shutdown failed: %s", self.qbox_control.__class__.__name__)
+        set_streaming_agent(None)
 
     def run_forever(self) -> None:
         self.start()
