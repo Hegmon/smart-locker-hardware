@@ -9,8 +9,8 @@ from urllib.request import urlopen
 from app.core.mqtt_manager import get_shared_mqtt_manager
 from app.deployment.device_identity import ensure_device_id
 from app.deployment.runtime_config import get_int_setting, get_str_setting
-from app.inspection_agent.hardware.camera_controller import CameraController
 from app.services.qbox_runtime import get_qbox_runtime_state
+from app.services.hardware_manager import get_camera_inventory
 from app.utils.logger import get_logger
 from app.utils.system_info import utc_timestamp
 
@@ -46,15 +46,6 @@ def _service_running(service_name: str) -> bool:
         return False
 
 
-def _camera_healthy(role: str, controller: CameraController) -> bool:
-    try:
-        result = controller.capture_frame(role)
-        return bool(result.captured)
-    except Exception:
-        logger.exception("Camera health check failed for role=%s", role)
-        return False
-
-
 def _camera_status(is_healthy: bool) -> str:
     return "working" if is_healthy else "not working"
 
@@ -65,9 +56,9 @@ def build_system_status() -> dict[str, Any]:
     service_name = get_str_setting("SMARTLOCKER_SERVICE_NAME", "qbox-device.service")
     mqtt_manager = get_shared_mqtt_manager()
     runtime_state = get_qbox_runtime_state().snapshot()
-    camera_controller = CameraController()
-    internal_camera_healthy = _camera_healthy("internal", camera_controller)
-    external_camera_healthy = _camera_healthy("external", camera_controller)
+    camera_inventory = get_camera_inventory()
+    internal_camera_healthy = bool(camera_inventory.get("internal_camera", {}).get("connected"))
+    external_camera_healthy = bool(camera_inventory.get("external_camera", {}).get("connected"))
     service_status = "running" if _service_running(service_name) else "unhealthy"
     mqtt_connected = mqtt_manager.is_connected()
     mqtt_status = mqtt_manager.mqtt_status()
