@@ -253,6 +253,28 @@ class MQTTManager:
         self._reconnect_wake.set()
         return self.wait_until_connected(timeout_seconds)
 
+    def restart_connection(self, timeout_seconds: float = 10.0) -> bool:
+        logger.info("MQTT connection restart requested")
+        with self._state_lock:
+            if not self._running:
+                logger.warning("MQTT restart requested while manager is stopped")
+                return False
+
+        try:
+            self.client.disconnect()
+        except Exception:
+            logger.debug("MQTT disconnect during restart failed", exc_info=True)
+
+        self._set_mqtt_status("reconnecting")
+        self._connect_async()
+        self._reconnect_wake.set()
+        connected = self.wait_until_connected(timeout_seconds)
+        if connected:
+            logger.info("MQTT connection restart completed successfully")
+        else:
+            logger.warning("MQTT connection restart timed out")
+        return connected
+
     def publish(
         self,
         topic: str,
