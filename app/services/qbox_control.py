@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.mqtt_manager import MQTTManager
 from app.services.qbox_runtime import get_qbox_runtime_state
+from app.services.system_status import build_system_status
 from app.streaming_agent.gpio.relay_controller import RelayController
 from app.utils.logger import get_logger
 from app.utils.system_info import utc_timestamp
@@ -97,9 +98,20 @@ class QBoxControlService:
         else:
             logger.warning("MQTT reconnect did not complete successfully")
 
+        status_snapshot = build_system_status()
         return {
+            "device_id": self.mqtt.device_id,
             "connected": connected,
             "last_reconnect": last_reconnect,
+            "mqtt_status": status_snapshot.get("mqtt_status", ""),
+            "mqtt_connected": bool(status_snapshot.get("mqtt_connected", connected)),
+            "mqtt_online": bool(status_snapshot.get("mqtt_connected", connected)),
+            "internal_camera_status": status_snapshot.get("internal_camera_status", "OFFLINE"),
+            "external_camera_status": status_snapshot.get("external_camera_status", "OFFLINE"),
+            "qbox_status": status_snapshot.get("qbox_status", "offline"),
+            "alarm_active": bool(status_snapshot.get("alarm_active", self.runtime_state.alarm_active)),
+            "service_status": status_snapshot.get("service_status"),
+            "last_health_at": status_snapshot.get("timestamp"),
         }
 
     def handle_service_restart(self, payload: dict[str, Any]) -> dict[str, Any]:
