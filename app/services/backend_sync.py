@@ -22,6 +22,7 @@ from app.deployment.device_identity import ensure_device_id
 from app.deployment.runtime_config import get_str_setting
 from app.services.backend_state import load_backend_state, save_backend_state
 from app.services.hardware_manager import get_camera_inventory, get_system_metrics
+from app.services.system_status import build_system_status
 from app.utils.logger import get_logger
 
 
@@ -100,8 +101,16 @@ def _camera_status(connected: bool) -> str:
     return "ONLINE" if connected else "OFFLINE"
 
 
+def _normalize_qbox_status(status: Any) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized in {"online", "degraded", "offline"}:
+        return normalized
+    return "offline"
+
+
 def get_backend_sync_status() -> dict[str, Any]:
     state = load_backend_state()
+    live_status = build_system_status()
     return {
         "auto_register_enabled": QBOX_AUTO_REGISTER,
         "registered": bool(state.get("device_uuid")),
@@ -112,6 +121,16 @@ def get_backend_sync_status() -> dict[str, Any]:
         "telemetry_url": QBOX_TELEMETRY_URL,
         "last_registration_at": state.get("registered_at"),
         "last_telemetry_at": state.get("last_telemetry_at"),
+        "last_health_at": state.get("last_health_at"),
+        "last_seen_at": state.get("last_seen_at"),
+        "status": state.get("status") or "Online",
+        "mqtt_status": state.get("mqtt_status") or live_status.get("mqtt_status", ""),
+        "mqtt_connected": bool(state.get("mqtt_connected", live_status.get("mqtt_connected", False))),
+        "mqtt_online": bool(state.get("mqtt_online", live_status.get("mqtt_connected", False))),
+        "internal_camera_status": state.get("internal_camera_status") or live_status.get("internal_camera_status", "OFFLINE"),
+        "external_camera_status": state.get("external_camera_status") or live_status.get("external_camera_status", "OFFLINE"),
+        "qbox_status": _normalize_qbox_status(state.get("qbox_status") or live_status.get("qbox_status")),
+        "alarm_active": bool(state.get("alarm_active", live_status.get("alarm_active", False))),
     }
 
 
@@ -260,6 +279,8 @@ def build_telemetry_payload() -> dict[str, Any]:
 
 def send_telemetry() -> dict[str, Any]:
     payload = build_telemetry_payload()
+    live_status = build_system_status()
+    now = _utc_now_iso()
     response = requests.post(
         QBOX_TELEMETRY_URL,
         json=payload,
@@ -269,6 +290,16 @@ def send_telemetry() -> dict[str, Any]:
 
     state = load_backend_state()
     state["last_telemetry_at"] = _utc_now_iso()
+    state["last_seen_at"] = now
+    state["last_health_at"] = now
+    state["status"] = "Online"
+    state["mqtt_status"] = live_status.get("mqtt_status", "")
+    state["mqtt_connected"] = bool(live_status.get("mqtt_connected", False))
+    state["mqtt_online"] = bool(live_status.get("mqtt_connected", False))
+    state["internal_camera_status"] = live_status.get("internal_camera_status", "OFFLINE")
+    state["external_camera_status"] = live_status.get("external_camera_status", "OFFLINE")
+    state["qbox_status"] = _normalize_qbox_status(live_status.get("qbox_status"))
+    state["alarm_active"] = bool(live_status.get("alarm_active", False))
     save_backend_state(state)
     logger.info("Telemetry sent for device %s", payload["device"])
 
