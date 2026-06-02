@@ -98,14 +98,16 @@ def _normalize_locker_status(status: str) -> str:
 
 
 def _camera_status(connected: bool) -> str:
-    return "ONLINE" if connected else "OFFLINE"
+    return "working" if connected else "not working"
 
 
 def _normalize_qbox_status(status: Any) -> str:
     normalized = str(status or "").strip().lower()
-    if normalized in {"online", "degraded", "offline"}:
-        return normalized
-    return "offline"
+    if normalized == "online":
+        return "Online"
+    if normalized == "offline":
+        return "Offline"
+    return "Offline"
 
 
 def get_backend_sync_status() -> dict[str, Any]:
@@ -127,8 +129,8 @@ def get_backend_sync_status() -> dict[str, Any]:
         "mqtt_status": state.get("mqtt_status") or live_status.get("mqtt_status", ""),
         "mqtt_connected": bool(state.get("mqtt_connected", live_status.get("mqtt_connected", False))),
         "mqtt_online": bool(state.get("mqtt_online", live_status.get("mqtt_connected", False))),
-        "internal_camera_status": state.get("internal_camera_status") or live_status.get("internal_camera_status", "OFFLINE"),
-        "external_camera_status": state.get("external_camera_status") or live_status.get("external_camera_status", "OFFLINE"),
+        "internal_camera_status": state.get("internal_camera_status") or live_status.get("internal_camera_status", "not working"),
+        "external_camera_status": state.get("external_camera_status") or live_status.get("external_camera_status", "not working"),
         "qbox_status": _normalize_qbox_status(state.get("qbox_status") or live_status.get("qbox_status")),
         "alarm_active": bool(state.get("alarm_active", live_status.get("alarm_active", False))),
     }
@@ -296,8 +298,8 @@ def send_telemetry() -> dict[str, Any]:
     state["mqtt_status"] = live_status.get("mqtt_status", "")
     state["mqtt_connected"] = bool(live_status.get("mqtt_connected", False))
     state["mqtt_online"] = bool(live_status.get("mqtt_connected", False))
-    state["internal_camera_status"] = live_status.get("internal_camera_status", "OFFLINE")
-    state["external_camera_status"] = live_status.get("external_camera_status", "OFFLINE")
+    state["internal_camera_status"] = live_status.get("internal_camera_status", "not working")
+    state["external_camera_status"] = live_status.get("external_camera_status", "not working")
     state["qbox_status"] = _normalize_qbox_status(live_status.get("qbox_status"))
     state["alarm_active"] = bool(live_status.get("alarm_active", False))
     save_backend_state(state)
