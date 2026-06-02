@@ -12,9 +12,9 @@ class BackendSyncTests(unittest.TestCase):
         live_status = {
             "mqtt_status": "connected",
             "mqtt_connected": True,
-            "internal_camera_status": "ONLINE",
-            "external_camera_status": "OFFLINE",
-            "qbox_status": "degraded",
+            "internal_camera_status": "working",
+            "external_camera_status": "working",
+            "qbox_status": "Online",
             "alarm_active": False,
         }
 
@@ -31,9 +31,9 @@ class BackendSyncTests(unittest.TestCase):
         self.assertEqual(payload["mqtt_status"], "connected")
         self.assertTrue(payload["mqtt_connected"])
         self.assertTrue(payload["mqtt_online"])
-        self.assertEqual(payload["internal_camera_status"], "ONLINE")
-        self.assertEqual(payload["external_camera_status"], "OFFLINE")
-        self.assertEqual(payload["qbox_status"], "degraded")
+        self.assertEqual(payload["internal_camera_status"], "working")
+        self.assertEqual(payload["external_camera_status"], "working")
+        self.assertEqual(payload["qbox_status"], "Online")
         self.assertFalse(payload["alarm_active"])
 
     def test_send_telemetry_persists_live_health_snapshot(self) -> None:
@@ -41,9 +41,9 @@ class BackendSyncTests(unittest.TestCase):
         live_status = {
             "mqtt_status": "connected",
             "mqtt_connected": True,
-            "internal_camera_status": "ONLINE",
-            "external_camera_status": "ONLINE",
-            "qbox_status": "online",
+            "internal_camera_status": "working",
+            "external_camera_status": "working",
+            "qbox_status": "Online",
             "alarm_active": True,
         }
         saved_state: dict[str, object] = {}
@@ -67,9 +67,9 @@ class BackendSyncTests(unittest.TestCase):
         self.assertEqual(saved_state["mqtt_status"], "connected")
         self.assertTrue(saved_state["mqtt_connected"])
         self.assertTrue(saved_state["mqtt_online"])
-        self.assertEqual(saved_state["internal_camera_status"], "ONLINE")
-        self.assertEqual(saved_state["external_camera_status"], "ONLINE")
-        self.assertEqual(saved_state["qbox_status"], "online")
+        self.assertEqual(saved_state["internal_camera_status"], "working")
+        self.assertEqual(saved_state["external_camera_status"], "working")
+        self.assertEqual(saved_state["qbox_status"], "Online")
         self.assertTrue(saved_state["alarm_active"])
 
 
