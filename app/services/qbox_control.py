@@ -6,6 +6,7 @@ import threading
 from typing import Any
 
 from app.core.mqtt_manager import MQTTManager
+from app.deployment.runtime_config import get_float_setting
 from app.services.qbox_runtime import get_qbox_runtime_state
 from app.services.system_status import build_system_status
 from app.streaming_agent.gpio.relay_controller import RelayController
@@ -17,6 +18,7 @@ logger = get_logger(__name__)
 
 QBOX_TOPIC_PREFIX = "qbox"
 ALLOWED_SERVICE_NAME = "qbox-device.service"
+QBOX_MQTT_STATUS_PUBLISH_INTERVAL_SECONDS = get_float_setting("QBOX_MQTT_STATUS_PUBLISH_INTERVAL_SECONDS", 15.0)
 
 
 class QBoxControlService:
@@ -37,6 +39,8 @@ class QBoxControlService:
         self.service_status_topic = f"{QBOX_TOPIC_PREFIX}/{self.mqtt.device_id}/service/status"
         self._started = False
         self._lock = threading.RLock()
+        self._stop_event = threading.Event()
+        self._status_thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self._started:
@@ -49,6 +53,10 @@ class QBoxControlService:
         self.mqtt.subscribe(self.mqtt_reconnect_topic, self._handle_mqtt_reconnect_message, qos=1)
         self.mqtt.subscribe(self.service_restart_topic, self._handle_service_restart_message, qos=1)
         self._started = True
+        self._stop_event.clear()
+        self._publish_mqtt_status_snapshot()
+        self._status_thread = threading.Thread(target=self._mqtt_status_loop, daemon=True, name="qbox-mqtt-status")
+        self._status_thread.start()
         logger.info(
             "QBox control service subscribed alarm=%s mqtt_reconnect=%s service_restart=%s",
             self.alarm_control_topic,
@@ -58,6 +66,10 @@ class QBoxControlService:
 
     def stop(self) -> None:
         self._started = False
+        self._stop_event.set()
+        if self._status_thread:
+            self._status_thread.join(timeout=2.0)
+            self._status_thread = None
 
     def handle_alarm_control(self, payload: dict[str, Any]) -> dict[str, Any]:
         action = str(payload.get("action") or "").strip().lower()
@@ -99,7 +111,7 @@ class QBoxControlService:
             logger.warning("MQTT reconnect did not complete successfully")
 
         status_snapshot = build_system_status()
-        return {
+        response = {
             "device_id": self.mqtt.device_id,
             "connected": connected,
             "last_reconnect": last_reconnect,
@@ -113,6 +125,8 @@ class QBoxControlService:
             "service_status": status_snapshot.get("service_status"),
             "last_health_at": status_snapshot.get("timestamp"),
         }
+        self.mqtt.publish_json(self.mqtt_status_topic, response, qos=1, retain=True)
+        return response
 
     def handle_service_restart(self, payload: dict[str, Any]) -> dict[str, Any]:
         service_name = str(payload.get("service") or "").strip()
@@ -140,13 +154,37 @@ class QBoxControlService:
 
     def _handle_mqtt_reconnect_message(self, topic: str, payload: bytes) -> None:
         command = self.mqtt.loads(payload)
-        response = self.handle_mqtt_reconnect(command)
-        self.mqtt.publish_json(self.mqtt_status_topic, response, qos=1, retain=True)
+        self.handle_mqtt_reconnect(command)
 
     def _handle_service_restart_message(self, topic: str, payload: bytes) -> None:
         command = self.mqtt.loads(payload)
         response = self.handle_service_restart(command)
         self.mqtt.publish_json(self.service_status_topic, response, qos=1, retain=True)
+
+    def _publish_mqtt_status_snapshot(self) -> None:
+        status_snapshot = build_system_status()
+        payload = {
+            "device_id": self.mqtt.device_id,
+            "connected": self.mqtt.is_connected(),
+            "last_reconnect": self.runtime_state.last_mqtt_reconnect,
+            "mqtt_status": status_snapshot.get("mqtt_status", ""),
+            "mqtt_connected": bool(status_snapshot.get("mqtt_connected", self.mqtt.is_connected())),
+            "mqtt_online": bool(status_snapshot.get("mqtt_connected", self.mqtt.is_connected())),
+            "internal_camera_status": status_snapshot.get("internal_camera_status", "OFFLINE"),
+            "external_camera_status": status_snapshot.get("external_camera_status", "OFFLINE"),
+            "qbox_status": status_snapshot.get("qbox_status", "offline"),
+            "alarm_active": bool(status_snapshot.get("alarm_active", self.runtime_state.alarm_active)),
+            "service_status": status_snapshot.get("service_status"),
+            "last_health_at": status_snapshot.get("timestamp"),
+        }
+        self.mqtt.publish_json(self.mqtt_status_topic, payload, qos=1, retain=True)
+
+    def _mqtt_status_loop(self) -> None:
+        while self._started and not self._stop_event.wait(QBOX_MQTT_STATUS_PUBLISH_INTERVAL_SECONDS):
+            try:
+                self._publish_mqtt_status_snapshot()
+            except Exception:
+                logger.exception("Failed to publish periodic MQTT status snapshot")
 
     def _alarm_response(self, success: bool, alarm_active: bool, *, detail: str | None = None) -> dict[str, Any]:
         response: dict[str, Any] = {
