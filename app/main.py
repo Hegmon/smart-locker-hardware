@@ -15,6 +15,7 @@ from app.deployment.validation import validate_runtime_configuration
 from app.services.backend_sync import register_device_if_needed
 from app.services.device_actions import DeviceActionService
 from app.services.health_monitor import HealthMonitor
+from app.services.qbox_control import QBoxControlService
 from app.utils.logger import get_logger
 
 
@@ -29,6 +30,7 @@ class DeviceApplication:
         self.control = ControlAgent(self.mqtt)
         self.health = HealthMonitor(self.mqtt)
         self.actions = DeviceActionService(self.mqtt, shutdown_callback=self._stop_services_before_remote_action)
+        self.qbox_control = QBoxControlService(self.mqtt)
         self.wifi_agent = None
         self.streaming_agent = None
         self._stop_event = threading.Event()
@@ -43,6 +45,7 @@ class DeviceApplication:
         self.mqtt.start()
         self.control.start()
         self.actions.start()
+        self.qbox_control.start()
         self.telemetry.start()
         self.heartbeat.start()
         self.health.start()
@@ -91,6 +94,10 @@ class DeviceApplication:
                 agent.stop()
             except Exception:
                 logger.exception("Agent shutdown failed: %s", agent.__class__.__name__)
+        try:
+            self.qbox_control.stop()
+        except Exception:
+            logger.exception("Agent shutdown failed: %s", self.qbox_control.__class__.__name__)
 
     def run_forever(self) -> None:
         self.start()
