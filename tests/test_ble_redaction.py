@@ -27,6 +27,5 @@ class BLERedactionTests(unittest.TestCase):
         self.assertEqual(redacted["password"], "********")
         self.assertEqual(redacted["connection"]["psk"], "********")
 
-
 if __name__ == "__main__":
     unittest.main()
