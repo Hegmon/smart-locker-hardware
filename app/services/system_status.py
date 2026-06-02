@@ -56,7 +56,7 @@ def _camera_healthy(role: str, controller: CameraController) -> bool:
 
 
 def _camera_status(is_healthy: bool) -> str:
-    return "ONLINE" if is_healthy else "OFFLINE"
+    return "working" if is_healthy else "not working"
 
 
 def build_system_status() -> dict[str, Any]:
@@ -71,9 +71,9 @@ def build_system_status() -> dict[str, Any]:
     service_status = "running" if _service_running(service_name) else "unhealthy"
     mqtt_connected = mqtt_manager.is_connected()
     mqtt_status = mqtt_manager.mqtt_status()
-    qbox_status = "offline"
-    if service_status == "running":
-        qbox_status = "online" if mqtt_connected and internal_camera_healthy and external_camera_healthy else "degraded"
+    qbox_status = "Offline"
+    if service_status == "running" and mqtt_connected and internal_camera_healthy and external_camera_healthy:
+        qbox_status = "Online"
     logger.info(
         "Generated qbox system status service_status=%s mqtt_status=%s mqtt_connected=%s internal_camera=%s external_camera=%s qbox_status=%s",
         service_status,
