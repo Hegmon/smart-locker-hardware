@@ -55,6 +55,10 @@ def _camera_healthy(role: str, controller: CameraController) -> bool:
         return False
 
 
+def _camera_status(is_healthy: bool) -> str:
+    return "ONLINE" if is_healthy else "OFFLINE"
+
+
 def build_system_status() -> dict[str, Any]:
     hardware_port = get_int_setting("HARDWARE_AGENT_HEALTH_PORT", 8091)
     streaming_port = get_int_setting("STREAMING_AGENT_HEALTH_PORT", 8092)
@@ -62,21 +66,21 @@ def build_system_status() -> dict[str, Any]:
     mqtt_manager = get_shared_mqtt_manager()
     runtime_state = get_qbox_runtime_state().snapshot()
     camera_controller = CameraController()
-    internal_camera_status = _camera_healthy("internal", camera_controller)
-    external_camera_status = _camera_healthy("external", camera_controller)
+    internal_camera_healthy = _camera_healthy("internal", camera_controller)
+    external_camera_healthy = _camera_healthy("external", camera_controller)
     service_status = "running" if _service_running(service_name) else "unhealthy"
     mqtt_connected = mqtt_manager.is_connected()
     mqtt_status = mqtt_manager.mqtt_status()
     qbox_status = "offline"
     if service_status == "running":
-        qbox_status = "online" if mqtt_connected and internal_camera_status and external_camera_status else "degraded"
+        qbox_status = "online" if mqtt_connected and internal_camera_healthy and external_camera_healthy else "degraded"
     logger.info(
         "Generated qbox system status service_status=%s mqtt_status=%s mqtt_connected=%s internal_camera=%s external_camera=%s qbox_status=%s",
         service_status,
         mqtt_status,
         mqtt_connected,
-        internal_camera_status,
-        external_camera_status,
+        internal_camera_healthy,
+        external_camera_healthy,
         qbox_status,
     )
     return {
@@ -86,8 +90,8 @@ def build_system_status() -> dict[str, Any]:
         "registry": "ok",
         "mqtt_status": mqtt_status,
         "mqtt_connected": mqtt_connected,
-        "internal_camera_status": internal_camera_status,
-        "external_camera_status": external_camera_status,
+        "internal_camera_status": _camera_status(internal_camera_healthy),
+        "external_camera_status": _camera_status(external_camera_healthy),
         "qbox_status": qbox_status,
         "alarm_active": bool(runtime_state.get("alarm_active")),
         "last_mqtt_reconnect": runtime_state.get("last_mqtt_reconnect") or "",
